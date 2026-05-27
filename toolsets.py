@@ -541,7 +541,19 @@ TOOLSETS = {
         "description": "Gateway toolset - union of all messaging platform tools",
         "tools": [],
         "includes": ["hermes-telegram", "hermes-discord", "hermes-whatsapp", "hermes-slack", "hermes-signal", "hermes-bluebubbles", "hermes-homeassistant", "hermes-email", "hermes-sms", "hermes-mattermost", "hermes-matrix", "hermes-dingtalk", "hermes-feishu", "hermes-wecom", "hermes-wecom-callback", "hermes-weixin", "hermes-qqbot", "hermes-webhook", "hermes-yuanbao"]
-    }
+    },
+
+    "lex-docx": {
+        "description": (
+            "Legal document review and editing tools (lex_docx).  "
+            "Inspect, review, edit, format, and finalize .docx files "
+            "with full Track Changes support.  Enable this toolset in "
+            "profiles that handle contract review, due diligence, or "
+            "legal document automation."
+        ),
+        "tools": [],
+        "includes": [],
+    },
 }
 
 

@@ -1,0 +1,14 @@
+Metadata-Version: 2.4
+Name: lex-docx
+Version: 0.4.0
+Summary: DOCX automation tools for legal due diligence and contract review
+Author-email: Assassin <assassin@kingsclaws.com>
+License: MIT
+Requires-Python: >=3.9
+Description-Content-Type: text/markdown
+Requires-Dist: python-docx>=0.8.11
+Requires-Dist: lxml>=4.9.0
+Provides-Extra: dev
+Requires-Dist: pytest>=7.0; extra == "dev"
+Requires-Dist: black>=22.0; extra == "dev"
+Requires-Dist: flake8>=4.0; extra == "dev"

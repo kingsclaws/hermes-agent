@@ -1,0 +1,68 @@
+# lex-hermes — Legal Document Automation Platform
+# Hermes Agent fork with lex_docx native tools + HPSwarm multi-agent
+#
+# Based on the openclaw-hermes build pattern.
+#
+# Build:
+#   cp -r /root/.hermes/tools/lex-docx-build ./vendor/lex-docx-build
+#   docker build -f Dockerfile.lex-hermes -t lex-hermes .
+#
+# Run (interactive chat with lex_docx tools):
+#   docker run -it --rm \
+#     -v ~/.hermes/config.yaml:/root/.hermes/config.yaml:ro \
+#     -v $(pwd)/workspace:/workspace \
+#     lex-hermes chat
+#
+# Run (HPSwarm coordinator for a legal project):
+#   docker run -it --rm \
+#     -v ~/.hermes/config.yaml:/root/.hermes/config.yaml:ro \
+#     -v /path/to/project:/project \
+#     -e HERMES_PROFILE=hpswarm-coordinator \
+#     lex-hermes chat
+
+FROM python:3.11-slim
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PIP_BREAK_SYSTEM_PACKAGES=1 \
+    PIP_ROOT_USER_ACTION=ignore
+
+# Remove PEP 668 marker so pip install works without --break-system-packages
+RUN rm -f /usr/lib/python3.*/EXTERNALLY-MANAGED
+
+# ── System Dependencies ──
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    ca-certificates \
+    curl \
+    git \
+    gnupg \
+    jq \
+    libffi-dev \
+    python3-dev \
+    ripgrep \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /opt/lex-hermes
+
+# ── lex_docx ──
+# Installed first so its layer caches independently from hermes-agent.
+COPY vendor/lex-docx-build /opt/lex-docx-build
+RUN pip install --no-cache-dir /opt/lex-docx-build
+
+# ── hermes-agent fork ──
+COPY . /opt/lex-hermes
+RUN pip install --no-cache-dir -e .
+
+# ── HPSwarm legal profiles ──
+RUN bash /opt/lex-hermes/setup.sh install
+
+# ── Runtime dirs ──
+RUN mkdir -p /root/.hermes /workspace /project
+
+ENV HERMES_HOME=/root/.hermes
+
+WORKDIR /workspace
+ENTRYPOINT ["hermes"]
+CMD ["chat"]

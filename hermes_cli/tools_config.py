@@ -78,6 +78,7 @@ CONFIGURABLE_TOOLSETS = [
     ("discord_admin",   "🛡️  Discord Server Admin",    "list channels/roles, pin, assign roles"),
     ("yuanbao",          "🤖 Yuanbao",                  "group info, member queries, DM"),
     ("computer_use",     "🖱️  Computer Use (macOS)",     "background desktop control via cua-driver"),
+    ("lex-docx",         "📝 Legal Document Tools",      "inspect, edit, review, format, finalize .docx"),
 ]
 
 # Toolsets that are OFF by default for new installs.
@@ -121,6 +122,21 @@ def _xai_credentials_present() -> bool:
     except Exception:
         pass
     return bool(str(os.environ.get("XAI_API_KEY") or "").strip())
+
+
+def _lex_docx_available() -> bool:
+    """Cheap check for whether lex_docx is installed and importable.
+
+    Used to auto-enable the ``lex-docx`` toolset when the library is
+    installed. The tool's runtime ``check_fn`` still gates schema
+    registration if the library later becomes unavailable.
+    """
+    try:
+        import lex_docx  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
 
 # Platform-scoped toolsets: only appear in the `hermes tools` checklist for
 # these platforms, and only resolve/save for these platforms.  A toolset
@@ -1184,6 +1200,10 @@ def _get_platform_tools(
             expanded -= default_off
 
             enabled_toolsets |= expanded
+
+        # Auto-enable lex-docx when the library is importable
+        if _toolset_allowed_for_platform("lex-docx", platform) and _lex_docx_available():
+            enabled_toolsets.add("lex-docx")
     else:
         # No explicit config — fall back to resolving composite toolset names
         # (e.g. "hermes-cli") to individual tool names and reverse-mapping.
@@ -1239,6 +1259,10 @@ def _get_platform_tools(
         if x_search_auto_enabled and "x_search" in default_off:
             default_off.remove("x_search")
         enabled_toolsets -= default_off
+
+        # Auto-enable lex-docx when the library is importable
+        if _toolset_allowed_for_platform("lex-docx", platform) and _lex_docx_available():
+            enabled_toolsets.add("lex-docx")
 
     # Recover non-configurable platform toolsets (e.g. discord, feishu_doc,
     # feishu_drive).  These are part of the platform's default composite but

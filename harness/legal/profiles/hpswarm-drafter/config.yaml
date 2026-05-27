@@ -1,0 +1,12 @@
+enabled_toolsets: &id001
+- terminal
+- file
+- lex-docx
+model:
+  default: ''
+preload_skills:
+- legal-memo
+- contract-review
+- legal-translation
+toolsets:
+  enabled: *id001

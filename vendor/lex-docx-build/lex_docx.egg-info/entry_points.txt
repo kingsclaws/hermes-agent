@@ -1,0 +1,2 @@
+[console_scripts]
+lex-docx = lex_docx.cli:main

@@ -1,0 +1,11 @@
+enabled_toolsets:
+  - terminal
+  - file
+  - lex-docx
+model:
+  default: ''
+toolsets:
+  enabled:
+    - terminal
+    - file
+    - lex-docx
