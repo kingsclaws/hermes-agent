@@ -1,36 +1,61 @@
-# CONTEXT.md — Project Live Context
+# CONTEXT.md — 项目上下文（hp 管理，仅供参考）
 
-> 本文件是项目的唯一真实状态来源。所有 Agent 在操作前必须先读取本文件。
-> Coordinator 负责维护本文件，确保其反映项目最新状态。
+> **实际项目上下文由 `hp` 管理。** 运行 `hp init` 后，项目上下文存储在
+> `.hermes-project/project-context.md`，由 Coordinator 维护。
+> 本文件仅为参考模板，说明上下文的结构和字段含义。
 
-## 当前状态
-（状态机：INIT / DRAFTING / REVIEWING / REVISING / FINAL / DELIVERED）
+## 项目状态机
 
-## 工作文件
-| 文件路径 | 版本 | 状态 | 最后操作 |
-|---------|------|------|---------|
-| （待添加） | - | - | - |
+由 Coordinator 在 `project-context.md` 中维护：
 
-## 任务进度
-### 已完成
-- （无）
+```
+INIT → DRAFTING → REVIEWING → REVISING → FINAL → DELIVERED
+```
 
-### 进行中
-- （无）
+- **INIT**：项目刚创建，等待第一个任务
+- **DRAFTING**：Drafter 正在起草/修改文档
+- **REVIEWING**：Reviewer 正在审阅（内容 or 格式）
+- **REVISING**：根据审阅意见改稿中
+- **FINAL**：定稿，等待最终验收
+- **DELIVERED**：已交付
 
-### 待分派
-- （无）
+## hp 项目日常命令
 
-## 关键发现
-（审阅过程中发现的重要问题，按严重程度排列）
+| 命令 | 说明 |
+|------|------|
+| `hp list` | 列出所有项目 |
+| `hp context <slug>` | 查看项目上下文 |
+| `hp sync <slug>` | 同步上下文到 Hermes 会话 |
+| `hp goal <slug> "text"` | 更新项目目标 |
+| `hp status <slug>` | 查看 session 状态 |
+| `hp open <slug>` | 打开项目 session（通过 hermes --tui） |
+| `hp activity <slug>` | 查看项目文件变迁 |
 
-## 下一步
-（下一个要执行的动作，含负责人和优先级）
+## 上下文字段说明
 
-## 决策记录
-（项目过程中的关键决策，含日期和决策人）
+`project-context.md` 中的标准字段（由 hp init 生成，Coordinator 维护）：
 
----
+- **Project Facts**：项目名称、目录、客户、目标、摘要
+- **Project Background**：项目背景（Coordinator 补充）
+- **Key Files**：关键文件路径
+- **Active Tasks**：活跃任务清单
+- **Constraints / Working Rules**：工作约束与规则
+- **Logistics Support**：后勤项目配置
+- **Recent Decisions**：关键决策记录
+- **Extra Notes**：补充说明
 
-> 最后更新：Coordinator 每次操作后更新
-> 更新规则：追加不覆盖，过时信息标记 ~~删除线~~
+## HPSwarm 调度流程
+
+```
+Coordinator（读取 project-context.md）
+  └─ delegate_task() ──→ Drafter（lex_docx 起草/修改）
+                              │
+                              ▼
+                     Reviewer-Content（内容审阅）
+                              │
+                              ▼
+                     Reviewer-Format（格式审阅）
+                              │
+                              ▼
+                     Coordinator（汇总 → 用户）
+```

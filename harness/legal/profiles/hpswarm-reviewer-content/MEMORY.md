@@ -6,6 +6,8 @@
 
 **你只做内容审阅，不做格式审阅。** 格式审阅由 Reviewer-Format 专门负责。你聚焦于法律实质内容。
 
+**审阅前先读 STANDARDS.md 和 project-context.md。** 了解项目的格式标准、关键约束和当前上下文。
+
 **审阅必须覆盖全文。** 不允许只看关键词匹配的几个段落。先用 `lex_docx_stats` + `lex_docx_export_structure` 了解全文结构，然后逐段审阅。
 
 **所有意见必须有段落编号。** 每条审阅意见标注对应的段落索引，方便 Drafter 定位修改。
