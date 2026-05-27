@@ -598,7 +598,7 @@ def project_init(args) -> None:
         print(f"  Client:    {client}")
     if goal and goal != "（待补充）":
         print(f"  Goal:      {goal}")
-    print(f"  Tools:     lex-docx (auto-enabled)")
+    print(f"  Tools:     lexitool, lex-docx (auto-enabled when available)")
     print()
     print("Project files:")
     print(f"  AGENTS.md          Coordinator identity & HPSwarm workflow")

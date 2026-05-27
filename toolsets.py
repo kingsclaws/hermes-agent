@@ -558,6 +558,19 @@ TOOLSETS = {
         "includes": ["hermes-telegram", "hermes-discord", "hermes-whatsapp", "hermes-slack", "hermes-signal", "hermes-bluebubbles", "hermes-homeassistant", "hermes-email", "hermes-sms", "hermes-mattermost", "hermes-matrix", "hermes-dingtalk", "hermes-feishu", "hermes-wecom", "hermes-wecom-callback", "hermes-weixin", "hermes-qqbot", "hermes-webhook", "hermes-yuanbao"]
     },
 
+    "lexitool": {
+        "description": (
+            "Atomic Word document manipulation tools (lexitool).  "
+            "Read .docx files with inline format markup ([b]bold[/b], "
+            "[font:宋体]text[/font]), edit at character-level precision "
+            "with full Track Changes, manage lists/bookmarks/cross-references, "
+            "and control page layout.  Enable this toolset in profiles that "
+            "handle contract drafting, review, or legal document automation."
+        ),
+        "tools": [],
+        "includes": [],
+    },
+
     "lex-docx": {
         "description": (
             "Legal document review and editing tools (lex_docx).  "

@@ -79,6 +79,7 @@ CONFIGURABLE_TOOLSETS = [
     ("yuanbao",          "🤖 Yuanbao",                  "group info, member queries, DM"),
     ("computer_use",     "🖱️  Computer Use (macOS)",     "background desktop control via cua-driver"),
     ("project_management", "📁 Project Management",     "project_init, project_list, project_select, project_context, project_status"),
+    ("lexitool",         "📝 Legal Document Tools v2",   "read, edit, format, list, ref, section, doc"),
     ("lex-docx",         "📝 Legal Document Tools",      "inspect, edit, review, format, finalize .docx"),
 ]
 
@@ -123,6 +124,20 @@ def _xai_credentials_present() -> bool:
     except Exception:
         pass
     return bool(str(os.environ.get("XAI_API_KEY") or "").strip())
+
+
+def _lexitool_available() -> bool:
+    """Cheap check for whether lexitool is installed and importable.
+
+    Used to auto-enable the ``lexitool`` toolset when the library is
+    installed. The tool's runtime ``check_fn`` still gates schema
+    registration if the library later becomes unavailable.
+    """
+    try:
+        import lexitool  # noqa: F401
+        return True
+    except ImportError:
+        return False
 
 
 def _lex_docx_available() -> bool:
@@ -1202,6 +1217,12 @@ def _get_platform_tools(
 
             enabled_toolsets |= expanded
 
+        # Auto-enable lexitool when the library is importable
+        if _toolset_allowed_for_platform("lexitool", platform) and _lexitool_available():
+            enabled_toolsets.add("lexitool")
+        # Auto-enable lexitool when the library is importable
+        if _toolset_allowed_for_platform("lexitool", platform) and _lexitool_available():
+            enabled_toolsets.add("lexitool")
         # Auto-enable lex-docx when the library is importable
         if _toolset_allowed_for_platform("lex-docx", platform) and _lex_docx_available():
             enabled_toolsets.add("lex-docx")

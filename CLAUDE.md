@@ -1,14 +1,16 @@
-# CLAUDE.md — Hermes Agent (Legal Harness Fork)
+# CLAUDE.md — Hermes Agent (Lex-Hermes Legal Fork)
 
 > 本文件是 Claude Code 与 Hermes Agent 的桥接上下文。
-> 当 Hermes 的 lex_docx 工具出现问题，或需要修改/新增工具时，
+> 当 lexitool 或 lex_docx 工具出现问题，或需要修改/新增工具时，
 > 将此文件内容粘贴给 Claude，Claude 即可获得完整的工具参数上下文来协助修复。
 
 ## 项目概述
 
 这是 [Hermes Agent](https://github.com/NousResearch/hermes-agent) 的 fork，
 增加了法律文档自动化能力：
-- **lex_docx 原生工具集**（30 个工具，`tools/lex_docx_tool.py`）
+- **lexitool**（8 个工具，`tools/lexitool_tool.py`）— 新一代 Word 文档原子操作工具集
+- **lex_docx 原生工具集**（30 个工具，`tools/lex_docx_tool.py`）— 旧版兼容
+- **lex-editor 角色**（`.hermes-project/roles/lex-editor.md`）— 法律文档编辑 SOP
 - **HPSwarm 多 Agent 协作**（Coordinator / Drafter / Reviewer-Content / Reviewer-Format）
 - **项目级 Harness**（`harness/` 目录，含法律 SOP 和项目模板）
 
@@ -16,9 +18,12 @@
 
 | 文件 | 用途 |
 |------|------|
-| `tools/lex_docx_tool.py` | 30 个 lex_docx 原生工具注册 |
-| `toolsets.py` | 含 `lex-docx` toolset 定义 |
-| `harness/legal/STANDARDS.md` | 法律文件制作 SOP + 格式标准 |
+| `tools/lexitool_tool.py` | 8 个 lexitool 工具注册（新一代） |
+| `tools/lex_docx_tool.py` | 30 个 lex_docx 原生工具注册（旧版兼容） |
+| `vendor/lexitool/lexitool/` | lexitool Python 包（35+ 模块） |
+| `.hermes-project/roles/lex-editor.md` | 法律文档编辑 SOP + 自演化机制 |
+| `toolsets.py` | 含 `lexitool` + `lex-docx` toolset 定义 |
+| `harness/legal/STANDARDS.md` | 法律文件格式标准 |
 | `harness/legal/profiles/` | HPSwarm Agent profile 定义 |
 | `harness/projects/_template/` | 新项目模板 |
 | `tools/registry.py` | 工具注册表（现有基础设施，不修改） |

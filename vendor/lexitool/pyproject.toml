@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=45", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lexitool"
+version = "0.5.0"
+description = "Atomic Word document manipulation toolkit for AI agents — read, edit, format, and review .docx files with inline format-aware markup"
+readme = "README.md"
+authors = [
+    {name = "Assassin", email = "assassin@kingsclaws.com"}
+]
+license = {text = "MIT"}
+requires-python = ">=3.9"
+dependencies = [
+    "python-docx>=0.8.11",
+    "lxml>=4.9.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "black>=22.0",
+    "flake8>=4.0",
+]
+
+[project.scripts]
+lex-docx = "lexitool.cli:main"
+
+[tool.setuptools]
+packages = ["lexitool"]

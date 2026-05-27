@@ -1,5 +1,5 @@
 # lex-hermes — Legal Document Automation Platform
-# Hermes Agent fork with lex_docx native tools + HPSwarm multi-agent
+# Hermes Agent fork with lexitool + lex_docx native tools + HPSwarm multi-agent
 #
 # Based on the openclaw-hermes build pattern.
 #
@@ -46,8 +46,10 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 
 WORKDIR /opt/lex-hermes
 
-# ── lex_docx ──
-# Installed first so its layer caches independently from hermes-agent.
+# ── lexitool + lex_docx ──
+# Installed first so their layers cache independently from hermes-agent.
+COPY vendor/lexitool /opt/lexitool
+RUN pip install --no-cache-dir /opt/lexitool
 COPY vendor/lex-docx-build /opt/lex-docx-build
 RUN pip install --no-cache-dir /opt/lex-docx-build
 
