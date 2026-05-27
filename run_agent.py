@@ -518,12 +518,44 @@ class AIAgent:
                 parent_session_id=self._parent_session_id,
             )
             self._session_db_created = True
+            # Auto-link session to project if running in a project directory
+            if not self._session_project_linked:
+                self._link_session_to_project()
         except Exception as e:
             # Transient failure (e.g. SQLite lock). Keep _session_db alive —
             # _session_db_created stays False so next run_conversation() retries.
             logger.warning(
                 "Session DB creation failed (will retry next turn): %s", e
             )
+
+    def _link_session_to_project(self) -> None:
+        """Detect .hermes-project/ in cwd and link this session to it.
+
+        Reads project-meta.json to identify the project, then looks it up
+        by path in the database.  Runs once per session lifetime.
+        """
+        self._session_project_linked = True
+        try:
+            cwd = os.environ.get("TERMINAL_CWD", os.getcwd())
+            project_dir = Path(cwd) / ".hermes-project"
+            if not project_dir.is_dir():
+                return
+            meta_file = project_dir / "project-meta.json"
+            if not meta_file.is_file():
+                return
+            import json as _json
+            meta = _json.loads(meta_file.read_text(encoding="utf-8"))
+            project_path = str(Path(cwd).resolve())
+            project = self._session_db.get_project_by_path(project_path)
+            if project is None:
+                # Try by name as fallback
+                project = self._session_db.get_project(meta.get("name", ""))
+            if project:
+                self._session_db.set_session_project(
+                    self.session_id, project["id"]
+                )
+        except Exception:
+            pass  # Best-effort: never block session creation on project linking
 
     def reset_session_state(self):
         """Reset all session-scoped token counters to 0 for a fresh session.

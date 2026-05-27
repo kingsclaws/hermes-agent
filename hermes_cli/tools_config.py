@@ -78,6 +78,7 @@ CONFIGURABLE_TOOLSETS = [
     ("discord_admin",   "🛡️  Discord Server Admin",    "list channels/roles, pin, assign roles"),
     ("yuanbao",          "🤖 Yuanbao",                  "group info, member queries, DM"),
     ("computer_use",     "🖱️  Computer Use (macOS)",     "background desktop control via cua-driver"),
+    ("project_management", "📁 Project Management",     "project_init, project_list, project_select, project_context, project_status"),
     ("lex-docx",         "📝 Legal Document Tools",      "inspect, edit, review, format, finalize .docx"),
 ]
 

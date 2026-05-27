@@ -33,7 +33,7 @@ T = TypeVar("T")
 
 DEFAULT_DB_PATH = get_hermes_home() / "state.db"
 
-SCHEMA_VERSION = 13
+SCHEMA_VERSION = 15
 
 # ---------------------------------------------------------------------------
 # WAL-compatibility fallback
@@ -218,6 +218,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     handoff_state TEXT,
     handoff_platform TEXT,
     handoff_error TEXT,
+    project_id TEXT,
     FOREIGN KEY (parent_session_id) REFERENCES sessions(id)
 );
 
@@ -250,6 +251,35 @@ CREATE INDEX IF NOT EXISTS idx_sessions_source ON sessions(source);
 CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_session_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_started ON sessions(started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, timestamp);
+
+CREATE TABLE IF NOT EXISTS projects (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    client TEXT DEFAULT '',
+    goal TEXT DEFAULT '',
+    path TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'INIT',
+    notes TEXT DEFAULT '',
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_projects_name ON projects(name);
+CREATE INDEX IF NOT EXISTS idx_projects_status ON projects(status);
+
+CREATE TABLE IF NOT EXISTS clients (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE,
+    slug TEXT NOT NULL UNIQUE,
+    path TEXT NOT NULL,
+    notes TEXT DEFAULT '',
+    project_count INTEGER DEFAULT 0,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_clients_name ON clients(name);
+CREATE INDEX IF NOT EXISTS idx_clients_slug ON clients(slug);
 """
 
 FTS_SQL = """
@@ -2629,6 +2659,223 @@ class SessionDB:
         for sid in removed_ids:
             self._remove_session_files(sessions_dir, sid)
         return count
+
+    # ── Project management ──
+
+    def create_project(
+        self, name: str, path: str, client: str = "", goal: str = ""
+    ) -> str:
+        """Create a project record and return its ID."""
+        import uuid as _uuid
+
+        project_id = f"proj_{_uuid.uuid4().hex[:10]}"
+        now = time.time()
+
+        def _do(conn):
+            conn.execute(
+                """INSERT INTO projects (id, name, client, goal, path, status,
+                   created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, 'INIT', ?, ?)""",
+                (project_id, name, client, goal, path, now, now),
+            )
+
+        self._execute_write(_do)
+        return project_id
+
+    def get_project(self, id_or_name: str):
+        """Look up a project by ID or name. Returns dict or None."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM projects WHERE id = ? OR name = ?",
+                (id_or_name, id_or_name),
+            ).fetchone()
+        if row is None:
+            return None
+        return dict(row)
+
+    def get_project_by_path(self, path: str):
+        """Look up a project by its directory path. Returns dict or None.
+
+        Paths are matched after resolving symlinks and normalizing.
+        Query handles trailing-slash and other normalization diffs by
+        checking both the stored path and the stored path + os.sep.
+        """
+        import os as _os
+        resolved = str(_os.path.realpath(_os.path.normpath(path)))
+        with self._lock:
+            # Match resolved path or resolved path with trailing separator
+            row = self._conn.execute(
+                "SELECT * FROM projects WHERE path = ? OR path = ?",
+                (resolved, resolved + _os.sep),
+            ).fetchone()
+        if row is None:
+            return None
+        return dict(row)
+
+    def list_projects(self, status: str = None) -> list:
+        """List all projects, optionally filtered by status."""
+        with self._lock:
+            if status:
+                rows = self._conn.execute(
+                    "SELECT * FROM projects WHERE status = ? ORDER BY updated_at DESC",
+                    (status,),
+                ).fetchall()
+            else:
+                rows = self._conn.execute(
+                    "SELECT * FROM projects ORDER BY updated_at DESC"
+                ).fetchall()
+        return [dict(r) for r in rows]
+
+    def update_project(self, project_id: str, **fields) -> bool:
+        """Update project fields. Returns True if a row was updated."""
+        allowed = {"name", "client", "goal", "path", "status", "notes"}
+        updates = {k: v for k, v in fields.items() if k in allowed}
+        if not updates:
+            return False
+        updates["updated_at"] = time.time()
+
+        set_clause = ", ".join(f"{k} = ?" for k in updates)
+        values = list(updates.values()) + [project_id]
+
+        def _do(conn):
+            conn.execute(
+                f"UPDATE projects SET {set_clause} WHERE id = ?", values
+            )
+
+        self._execute_write(_do)
+        return True
+
+    def delete_project(self, project_id: str) -> bool:
+        """Remove a project from the DB. Returns True if deleted."""
+
+        def _do(conn):
+            cursor = conn.execute("DELETE FROM projects WHERE id = ?", (project_id,))
+            return cursor.rowcount > 0
+
+        return self._execute_write(_do)
+
+    def set_session_project(self, session_id: str, project_id: str) -> bool:
+        """Link a session to a project."""
+
+        def _do(conn):
+            conn.execute(
+                "UPDATE sessions SET project_id = ? WHERE id = ?",
+                (project_id, session_id),
+            )
+
+        self._execute_write(_do)
+        return True
+
+    def get_session_project(self, session_id: str):
+        """Get the project linked to a session, or None."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT p.* FROM projects p "
+                "JOIN sessions s ON s.project_id = p.id "
+                "WHERE s.id = ?",
+                (session_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return dict(row)
+
+    def list_project_sessions(self, project_id: str, limit: int = 20) -> list:
+        """List sessions linked to a project."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT id, source, title, started_at, ended_at, model "
+                "FROM sessions WHERE project_id = ? "
+                "ORDER BY started_at DESC LIMIT ?",
+                (project_id, limit),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    # ── Client management ──
+
+    def create_client(self, name: str, path: str, notes: str = "") -> str:
+        """Create a client record and return its ID."""
+        import re as _re
+        import unicodedata as _unicodedata
+        import uuid as _uuid
+
+        client_id = f"cli_{_uuid.uuid4().hex[:10]}"
+        # Generate slug: lowercase, strip diacritics, spaces→hyphens.
+        # For pure-CJK names, fall back to a short hash so the slug
+        # is always unique and non-empty.
+        import hashlib as _hashlib
+        nfkd = _unicodedata.normalize("NFKD", name.lower())
+        ascii_name = "".join(c for c in nfkd if not _unicodedata.combining(c))
+        slug = _re.sub(r"[^a-z0-9]+", "-", ascii_name).strip("-")
+        if not slug:
+            slug = "cl-" + _hashlib.blake2b(
+                name.encode("utf-8"), digest_size=5
+            ).hexdigest()
+
+        now = time.time()
+
+        def _do(conn):
+            conn.execute(
+                "INSERT INTO clients (id, name, slug, path, notes, project_count, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, 0, ?, ?)",
+                (client_id, name, slug, path, notes, now, now),
+            )
+
+        self._execute_write(_do)
+        return client_id
+
+    def get_client(self, id_or_name: str):
+        """Look up a client by ID, name, or slug. Returns dict or None."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM clients WHERE id = ? OR name = ? OR slug = ?",
+                (id_or_name, id_or_name, id_or_name),
+            ).fetchone()
+        if row is None:
+            return None
+        return dict(row)
+
+    def list_clients(self) -> list:
+        """List all clients, ordered by most recently active."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM clients ORDER BY updated_at DESC"
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def update_client(self, client_id: str, **fields) -> bool:
+        """Update client fields. Returns True if a row was updated."""
+        allowed = {"name", "slug", "path", "notes", "project_count"}
+        updates = {k: v for k, v in fields.items() if k in allowed}
+        if not updates:
+            return False
+        updates["updated_at"] = time.time()
+
+        set_clause = ", ".join(f"{k} = ?" for k in updates)
+        values = list(updates.values()) + [client_id]
+
+        def _do(conn):
+            conn.execute(
+                f"UPDATE clients SET {set_clause} WHERE id = ?", values
+            )
+
+        self._execute_write(_do)
+        return True
+
+    def increment_client_project_count(self, client_id_or_name: str) -> bool:
+        """Increment the project_count and update timestamp for a client."""
+        client = self.get_client(client_id_or_name)
+        if not client:
+            return False
+
+        def _do(conn):
+            conn.execute(
+                "UPDATE clients SET project_count = project_count + 1, "
+                "updated_at = ? WHERE id = ?",
+                (time.time(), client["id"]),
+            )
+
+        self._execute_write(_do)
+        return True
 
     # ── Meta key/value (for scheduler bookkeeping) ──
 

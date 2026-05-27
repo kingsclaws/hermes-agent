@@ -1410,14 +1410,92 @@ def _load_cursorrules(cwd_path: Path) -> str:
     return _truncate_content(cursorrules_content, ".cursorrules")
 
 
+def _load_project_context(cwd_path: Path) -> str:
+    """Load project metadata from .hermes-project/ if present."""
+    project_dir = cwd_path / ".hermes-project"
+    if not project_dir.exists():
+        return ""
+
+    sections = []
+
+    meta_json = project_dir / "project-meta.json"
+    if meta_json.exists():
+        try:
+            import json as _json
+            meta = _json.loads(meta_json.read_text(encoding="utf-8"))
+            lines = [
+                f"- **Project**: {meta.get('name', 'Unknown')}",
+                f"- **Client**: {meta.get('client', 'N/A')}",
+                f"- **Status**: {meta.get('status', 'INIT')}",
+                f"- **Goal**: {meta.get('goal', 'N/A')}",
+            ]
+            meta_block = "## .hermes-project/project-meta.json\n\n" + "\n".join(lines)
+            sections.append(meta_block)
+        except Exception:
+            pass
+
+    context_md = project_dir / "project-context.md"
+    if context_md.exists():
+        try:
+            content = context_md.read_text(encoding="utf-8").strip()
+            if content:
+                content = _scan_context_content(content, "project-context.md")
+                content = _truncate_content(content, "project-context.md")
+                sections.append(f"## .hermes-project/project-context.md\n\n{content}")
+        except Exception:
+            pass
+
+    return "\n".join(sections) if sections else ""
+
+
+def _load_client_context(cwd_path: Path) -> str:
+    """Load client profile content when the project has a linked client.
+
+    Reads .hermes-project/project-meta.json to get the client name, then
+    loads ~/.hermes/clients/<name>/client-context.md if it exists.
+    """
+    meta_json = cwd_path / ".hermes-project" / "project-meta.json"
+    if not meta_json.is_file():
+        return ""
+
+    try:
+        import json as _json
+        meta = _json.loads(meta_json.read_text(encoding="utf-8"))
+        client_name = meta.get("client", "").strip()
+    except Exception:
+        return ""
+
+    if not client_name or client_name == "（待补充）":
+        return ""
+
+    hermes_home = Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes"))
+    client_context = hermes_home / "clients" / client_name / "client-context.md"
+    if not client_context.is_file():
+        return ""
+
+    try:
+        content = client_context.read_text(encoding="utf-8").strip()
+        if content:
+            content = _scan_context_content(content, f"client/{client_name}")
+            content = _truncate_content(content, "client-context.md")
+            return f"## Client: {client_name} (client-context.md)\n\n{content}"
+    except Exception:
+        pass
+    return ""
+
+
 def build_context_files_prompt(cwd: Optional[str] = None, skip_soul: bool = False) -> str:
     """Discover and load context files for the system prompt.
 
     Priority (first found wins — only ONE project context type is loaded):
+      0. .hermes-project/project-context.md  (cwd only, structured project metadata)
       1. .hermes.md / HERMES.md  (walk to git root)
       2. AGENTS.md / agents.md   (cwd only)
       3. CLAUDE.md / claude.md   (cwd only)
       4. .cursorrules / .cursor/rules/*.mdc  (cwd only)
+
+    Client context (~/.hermes/clients/<name>/client-context.md) is loaded
+    independently when the project has an associated client.
 
     SOUL.md from HERMES_HOME is independent and always included when present.
     Each context source is capped at 20,000 chars.
@@ -1431,13 +1509,30 @@ def build_context_files_prompt(cwd: Optional[str] = None, skip_soul: bool = Fals
     cwd_path = Path(cwd).resolve()
     sections = []
 
-    # Priority-based project context: first match wins
-    project_context = (
-        _load_hermes_md(cwd_path)
-        or _load_agents_md(cwd_path)
-        or _load_claude_md(cwd_path)
-        or _load_cursorrules(cwd_path)
-    )
+    # Project context from .hermes-project/ (highest priority for project sessions)
+    project_context = _load_project_context(cwd_path)
+    if not project_context:
+        # Priority-based project context: first match wins
+        project_context = (
+            _load_hermes_md(cwd_path)
+            or _load_agents_md(cwd_path)
+            or _load_claude_md(cwd_path)
+            or _load_cursorrules(cwd_path)
+        )
+    if project_context:
+        sections.append(project_context)
+
+    # Client context — loaded independently when project has a linked client
+    client_context = _load_client_context(cwd_path)
+    if client_context:
+        sections.append(client_context)
+        # Priority-based project context: first match wins
+        project_context = (
+            _load_hermes_md(cwd_path)
+            or _load_agents_md(cwd_path)
+            or _load_claude_md(cwd_path)
+            or _load_cursorrules(cwd_path)
+        )
     if project_context:
         sections.append(project_context)
 

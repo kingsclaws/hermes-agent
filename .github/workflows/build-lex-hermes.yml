@@ -8,8 +8,7 @@ on:
       - 'vendor/lex-docx-build/**'
       - 'tools/lex_docx_tool.py'
       - 'toolsets.py'
-      - 'harness/**'
-      - 'setup.sh'
+      - 'hermes_cli/project_commands.py'
       - '.github/workflows/build-lex-hermes.yml'
   pull_request:
     branches: [main]
@@ -18,8 +17,7 @@ on:
       - 'vendor/lex-docx-build/**'
       - 'tools/lex_docx_tool.py'
       - 'toolsets.py'
-      - 'harness/**'
-      - 'setup.sh'
+      - 'hermes_cli/project_commands.py'
       - '.github/workflows/build-lex-hermes.yml'
   workflow_dispatch:
 

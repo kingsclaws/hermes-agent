@@ -396,6 +396,15 @@ def compress_context(
                 parent_session_id=old_session_id,
             )
             agent._session_db_created = True
+            # Propagate project link to the compression child session
+            try:
+                old_project = agent._session_db.get_session_project(old_session_id)
+                if old_project:
+                    agent._session_db.set_session_project(
+                        agent.session_id, old_project["id"]
+                    )
+            except Exception:
+                pass
             # Auto-number the title for the continuation session
             if old_title:
                 try:

@@ -6258,6 +6258,43 @@ def cmd_import(args):
     run_import(args)
 
 
+def cmd_project(args):
+    """Project management — init, list, open, status, archive."""
+    action = args.project_action
+    if action == "init":
+        from hermes_cli.project_commands import project_init
+        project_init(args)
+    elif action == "list":
+        from hermes_cli.project_commands import project_list
+        project_list(args)
+    elif action == "open":
+        from hermes_cli.project_commands import project_open
+        project_open(args)
+    elif action == "status":
+        from hermes_cli.project_commands import project_status
+        project_status(args)
+    elif action == "archive":
+        from hermes_cli.project_commands import project_archive
+        project_archive(args)
+    elif action == "sessions":
+        from hermes_cli.project_commands import project_sessions
+        project_sessions(args)
+
+
+def cmd_client(args):
+    """Client profile management — create, list, show."""
+    action = args.client_action
+    if action == "create":
+        from hermes_cli.client_commands import client_create
+        client_create(args)
+    elif action == "list":
+        from hermes_cli.client_commands import client_list
+        client_list(args)
+    elif action == "show":
+        from hermes_cli.client_commands import client_show
+        client_show(args)
+
+
 def _print_version_info(*, check_updates: bool = True) -> None:
     print(f"Hermes Agent v{__version__} ({__release_date__})")
     print(f"Project: {PROJECT_ROOT}")
@@ -10761,10 +10798,11 @@ _BUILTIN_SUBCOMMANDS = frozenset(
         "config", "cron", "curator", "dashboard", "debug", "doctor",
         "dump", "fallback", "gateway", "hooks", "import", "insights",
         "kanban", "login", "logout", "logs", "lsp", "mcp", "memory", "migrate",
-        "model", "pairing", "plugins", "portal", "postinstall", "profile", "proxy",
+        "model", "pairing", "plugins", "portal", "postinstall", "profile", "project", "proxy",
         "send", "sessions", "setup",
         "skills", "slack", "status", "tools", "uninstall", "update",
         "version", "webhook", "whatsapp", "chat", "secrets", "security",
+        "client",
         # Help-ish invocations — plugin commands not being listed in
         # top-level --help is an acceptable trade-off for skipping an
         # expensive eager import of every bundled plugin module.
@@ -12675,6 +12713,105 @@ Examples:
                     plugin_parser.set_defaults(func=cmd_info["handler_fn"])
         except Exception as _exc:
             logging.getLogger(__name__).debug("Plugin CLI discovery failed: %s", _exc)
+
+    # =========================================================================
+    # project command — native multi-agent project management
+    # =========================================================================
+    project_parser = subparsers.add_parser(
+        "project",
+        help="Multi-agent project management — init, list, open, status, archive, sessions",
+        description=(
+            "Native multi-agent project management.  Bootstraps a project directory "
+            "with Coordinator identity (AGENTS.md), legal SOP (STANDARDS.md), and "
+            "sub-agent role templates.  The Coordinator orchestrates Drafter and "
+            "Reviewer sub-agents via delegate_task — no profiles needed.\n\n"
+            "  hermes project init <path> [opts]   Create a project with full scaffolding\n"
+            "  hermes project list                 List all registered projects\n"
+            "  hermes project open <name>          Open/resume a project\n"
+            "  hermes project status <name> [s]    Show or set project status\n"
+            "  hermes project archive <name>       Archive a completed project\n"
+            "  hermes project sessions <name>      List sessions linked to a project"
+        ),
+        formatter_class=__import__("argparse").RawDescriptionHelpFormatter,
+    )
+    project_sub = project_parser.add_subparsers(dest="project_action")
+
+    project_init_parser = project_sub.add_parser(
+        "init", help="Initialize a new multi-agent project"
+    )
+    project_init_parser.add_argument("path", help="Project directory path")
+    project_init_parser.add_argument(
+        "--name", help="Project name (default: directory name)"
+    )
+    project_init_parser.add_argument("--client", help="Client name")
+    project_init_parser.add_argument("--goal", help="Project goal / task description")
+
+    project_list_parser = project_sub.add_parser(
+        "list", help="List all registered projects"
+    )
+    project_list_parser.add_argument(
+        "--status", help="Filter by status (INIT, DRAFTING, REVIEWING, FINAL, etc.)"
+    )
+
+    project_open_parser = project_sub.add_parser(
+        "open", help="Open/resume a project"
+    )
+    project_open_parser.add_argument("name", help="Project name or ID")
+
+    project_status_parser = project_sub.add_parser(
+        "status", help="Show or set project status"
+    )
+    project_status_parser.add_argument("name", help="Project name or ID")
+    project_status_parser.add_argument(
+        "new_status", nargs="?",
+        help="New status (INIT, DRAFTING, REVIEWING, REVISING, FINAL, DELIVERED)"
+    )
+
+    project_archive_parser = project_sub.add_parser(
+        "archive", help="Archive a completed project"
+    )
+    project_archive_parser.add_argument("name", help="Project name or ID")
+
+    project_sessions_parser = project_sub.add_parser(
+        "sessions", help="List sessions linked to a project"
+    )
+    project_sessions_parser.add_argument("name", help="Project name or ID")
+
+    project_parser.set_defaults(func=cmd_project)
+
+    # =========================================================================
+    # client command — client profile management
+    # =========================================================================
+    client_parser = subparsers.add_parser(
+        "client",
+        help="Client profile management — create, list, show",
+        description=(
+            "Client profile management. Each client gets a directory under "
+            "~/.hermes/clients/<name>/ with client-context.md (auto-loaded "
+            "into agent context) and preferences.md (format/style preferences).\n\n"
+            "  hermes client create <name>      Create a new client profile\n"
+            "  hermes client list               List all registered clients\n"
+            "  hermes client show <name>        Show client details + linked projects"
+        ),
+        formatter_class=__import__("argparse").RawDescriptionHelpFormatter,
+    )
+    client_sub = client_parser.add_subparsers(dest="client_action")
+
+    client_create_parser = client_sub.add_parser(
+        "create", help="Create a new client profile"
+    )
+    client_create_parser.add_argument("name", help="Client name (e.g. '中信金资')")
+
+    client_list_parser = client_sub.add_parser(
+        "list", help="List all registered clients"
+    )
+
+    client_show_parser = client_sub.add_parser(
+        "show", help="Show client details and linked projects"
+    )
+    client_show_parser.add_argument("name", help="Client name or ID")
+
+    client_parser.set_defaults(func=cmd_client)
 
     # =========================================================================
     # curator command — background skill maintenance

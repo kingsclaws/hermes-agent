@@ -70,6 +70,9 @@ _HERMES_CORE_TOOLS = [
     "kanban_unblock",
     # Computer use (macOS, gated on cua-driver being installed via check_fn)
     "computer_use",
+    # Project management (always available for legal project lifecycle)
+    "project_init", "project_list", "project_select",
+    "project_context", "project_status",
 ]
 
 # Webhook events may originate from untrusted third-party content (for example,
@@ -264,6 +267,18 @@ TOOLSETS = {
             "kanban_heartbeat", "kanban_comment",
             "kanban_create", "kanban_link",
             "kanban_unblock",
+        ],
+        "includes": [],
+    },
+
+    "project_management": {
+        "description": (
+            "Legal project lifecycle management — create, list, select, "
+            "and update projects with status tracking and context persistence."
+        ),
+        "tools": [
+            "project_init", "project_list", "project_select",
+            "project_context", "project_status",
         ],
         "includes": [],
     },
