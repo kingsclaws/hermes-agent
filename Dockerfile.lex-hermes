@@ -4,7 +4,6 @@
 # Based on the openclaw-hermes build pattern.
 #
 # Build:
-#   cp -r /root/.hermes/tools/lex-docx-build ./vendor/lex-docx-build
 #   docker build -f Dockerfile.lex-hermes -t lex-hermes .
 #
 # Run (interactive chat with lex_docx tools):
@@ -40,22 +39,26 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     gnupg \
     jq \
     libffi-dev \
+    nodejs \
+    npm \
     python3-dev \
     ripgrep \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /opt/lex-hermes
 
-# ── lexitool + lex_docx ──
-# Installed first so their layers cache independently from hermes-agent.
+# ── lexitool (replaces legacy lex-docx) ──
+# Installed first so its layers cache independently from hermes-agent.
 COPY vendor/lexitool /opt/lexitool
 RUN pip install --no-cache-dir /opt/lexitool
-COPY vendor/lex-docx-build /opt/lex-docx-build
-RUN pip install --no-cache-dir /opt/lex-docx-build
 
 # ── hermes-agent fork ──
 COPY . /opt/lex-hermes
 RUN pip install --no-cache-dir -e .
+
+# ── Claude Code CLI (self-healing) ──
+RUN npm install -g @anthropic-ai/claude-code && \
+    npm cache clean --force
 
 # ── Runtime dirs ──
 RUN mkdir -p /root/.hermes /workspace /project

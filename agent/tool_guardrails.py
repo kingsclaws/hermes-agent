@@ -416,6 +416,14 @@ def _tool_failure_recovery_hint(tool_name: str, count: int) -> str:
             "in the same tool, then try an absolute path, a simpler command, a different "
             "working directory, or a different tool such as read_file/write_file/patch."
         )
+    if tool_name.startswith("lex_"):
+        return common + (
+            "Lexitool errors like this often indicate a bug in the lexitool library "
+            "rather than a usage error. If the error looks internal (KeyError, "
+            "AttributeError, unexpected None, parsing failure on valid documents), "
+            "call lex_heal with the exact error message — it will invoke Claude Code "
+            "to fix the lexitool source and hot-reload the tools."
+        )
     return common + (
         "Try different arguments, a narrower query/path, an absolute path when relevant, "
         "or a different tool that can make progress. If the blocker is external, report "

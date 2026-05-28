@@ -104,6 +104,10 @@ RUN npm install --prefer-offline --no-audit && \
     (cd ui-tui && npm install --prefer-offline --no-audit) && \
     npm cache clean --force
 
+# ── Claude Code CLI (self-healing subagent for lexitool fixes) ──
+RUN npm install -g @anthropic-ai/claude-code && \
+    npm cache clean --force
+
 # ---------- Layer-cached Python dependency install ----------
 # Copy only pyproject.toml + uv.lock so the Python dep resolve + wheel
 # download + native-extension compile layer is cached unless those inputs
