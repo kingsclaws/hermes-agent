@@ -981,10 +981,10 @@ def _handle_doc(args: dict, **kwargs) -> str:
 LEX_CLAUSE_SCHEMA = {
     "name": "lex_clause",
     "description": (
-        "Split a legal document into semantic clauses, extract clause ranges "
-        "into standalone snippet .docx files, insert a snippet into a target "
-        "document with numbering adjustment, and compare two clauses for "
-        "compatibility.\n\n"
+        "Split a Word document into semantic sections or clauses, extract "
+        "paragraph ranges into standalone snippet .docx files, insert snippets "
+        "into a target document with numbering adjustment, and compare two "
+        "sections for compatibility.\n\n"
         "Ops:\n"
         "  split  — Detect clause boundaries and return metadata\n"
         "  extract — Extract a paragraph range into a standalone .docx snippet\n"
@@ -1119,15 +1119,15 @@ def _handle_clause(args: dict, **kwargs) -> str:
 LEX_CORPUS_SCHEMA = {
     "name": "lex_corpus",
     "description": (
-        "Index and search across multiple .docx files in a project directory. "
-        "Builds a searchable corpus of clauses with type classification and "
-        "key term extraction.\n\n"
+        "Index and search across multiple .docx files in a directory. "
+        "Builds a searchable corpus of document sections with type "
+        "classification and key term extraction.\n\n"
         "Ops:\n"
         "  index  — Recursively scan directory for .docx files, split each into "
-        "clauses, build inverted index\n"
-        "  search — Search indexed corpus by query text, clause type, or specific "
-        "defined terms\n"
-        "  status — Show corpus metadata (document count, clause count, last "
+        "sections, build inverted index\n"
+        "  search — Search indexed corpus by query text, section type, or "
+        "specific key terms\n"
+        "  status — Show corpus metadata (document count, section count, last "
         "indexed timestamp)\n"
     ),
     "parameters": {
