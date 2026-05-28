@@ -1,6 +1,6 @@
 """lexitool — Atomic Word Document Manipulation for AI Agents.
 
-Consolidates ~30 lex_docx tools into 8 focused tools:
+Consolidates ~30 lex_docx tools into 10 focused tools:
   lex_read    — Read document content with inline format markup
   lex_stats   — Document statistics and diagnostics
   lex_edit    — Atomic text edits with optional TC tracking
@@ -9,6 +9,8 @@ Consolidates ~30 lex_docx tools into 8 focused tools:
   lex_ref     — Bookmarks and cross-references
   lex_section — Page/section/column layout
   lex_doc     — Document-level operations (create, clean, TOC, merge)
+  lex_clause  — Clause-level operations (split, extract, insert, compare)
+  lex_corpus  — Multi-document corpus indexing and search
 """
 from __future__ import annotations
 
@@ -974,6 +976,228 @@ def _handle_doc(args: dict, **kwargs) -> str:
     return tool_error(f"Unknown op: {op}")
 
 
+# ── lex_clause ─────────────────────────────────────────────────────────────────
+
+LEX_CLAUSE_SCHEMA = {
+    "name": "lex_clause",
+    "description": (
+        "Split a legal document into semantic clauses, extract clause ranges "
+        "into standalone snippet .docx files, insert a snippet into a target "
+        "document with numbering adjustment, and compare two clauses for "
+        "compatibility.\n\n"
+        "Ops:\n"
+        "  split  — Detect clause boundaries and return metadata\n"
+        "  extract — Extract a paragraph range into a standalone .docx snippet\n"
+        "  insert — Insert source document content into target, optionally "
+        "stripping numbering\n"
+        "  compare — Compare two clause ranges for compatibility\n"
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "path": {
+                "type": "string",
+                "description": "Path to .docx file (target for insert, source for split/extract/compare).",
+            },
+            "op": {
+                "type": "string",
+                "enum": ["split", "extract", "insert", "compare"],
+                "description": "Operation to perform.",
+            },
+            "method": {
+                "type": "string",
+                "enum": ["auto", "heading", "numbering", "flat"],
+                "description": "Clause detection method (for split). Default: auto.",
+            },
+            "para_start": {
+                "type": "integer",
+                "description": "First paragraph to extract/compare (1-indexed).",
+            },
+            "para_end": {
+                "type": "integer",
+                "description": "Last paragraph to extract/compare (1-indexed, inclusive).",
+            },
+            "source_path": {
+                "type": "string",
+                "description": "Path to source .docx (for insert: the snippet to insert from).",
+            },
+            "output_path": {
+                "type": "string",
+                "description": "Output path for extracted snippet .docx (for extract).",
+            },
+            "insert_after_para": {
+                "type": "integer",
+                "description": "Insert after this paragraph number (1-indexed, for insert).",
+            },
+            "adjust_numbering": {
+                "type": "boolean",
+                "description": "Strip numbering from inserted paragraphs (default: true).",
+            },
+            "clause_a": {
+                "type": "object",
+                "description": "First clause spec for compare: {para_start, para_end, title}.",
+            },
+            "clause_b": {
+                "type": "object",
+                "description": "Second clause spec for compare: {para_start, para_end, title}.",
+            },
+        },
+        "required": ["path", "op"],
+    },
+}
+
+
+def _handle_clause(args: dict, **kwargs) -> str:
+    op = args["op"]
+    path = _resolve_path(args["path"])
+
+    if op == "split":
+        from lexitool.clause_ops import list_clauses
+        method = args.get("method", "auto")
+        clauses = list_clauses(path)
+        # Override method in split if specified
+        if method != "auto":
+            from lexitool.clause_ops import split_clauses
+            clauses_raw = split_clauses(path, method=method)
+            clauses = [
+                {
+                    "id": c.id, "title": c.title,
+                    "para_start": c.para_start, "para_end": c.para_end,
+                    "level": c.level, "type": c.clause_type,
+                    "key_terms": c.key_terms[:10], "detection": c.detection,
+                }
+                for c in clauses_raw
+            ]
+        return tool_result({"ok": True, "clauses": clauses, "count": len(clauses)})
+
+    elif op == "extract":
+        from lexitool.clause_ops import extract_clause
+        para_start = args.get("para_start")
+        para_end = args.get("para_end")
+        if para_start is None or para_end is None:
+            return tool_error("extract requires para_start and para_end")
+        output_path = args.get("output_path", f"/tmp/extracted_clause_{para_start}_{para_end}.docx")
+        output_path = _resolve_path(output_path)
+        result = extract_clause(path, para_start, para_end, output_path)
+        return tool_result({"ok": True, "output_path": result, "para_start": para_start, "para_end": para_end})
+
+    elif op == "insert":
+        from lexitool.clause_ops import insert_clause
+        source_path = args.get("source_path")
+        if not source_path:
+            return tool_error("insert requires source_path")
+        source_path = _resolve_path(source_path)
+        insert_after = args.get("insert_after_para")
+        if insert_after is None:
+            return tool_error("insert requires insert_after_para")
+        adjust = args.get("adjust_numbering", True)
+        result = insert_clause(path, source_path, insert_after, adjust)
+        return tool_result({"ok": True, "path": result, "inserted_after": insert_after})
+
+    elif op == "compare":
+        from lexitool.clause_ops import compare_clauses, CompareResult, Clause
+        clause_a = args.get("clause_a", {})
+        clause_b = args.get("clause_b", {})
+        if not clause_a or not clause_b:
+            return tool_error("compare requires clause_a and clause_b with para_start/para_end/title")
+        # We only have one path for compare — the target document
+        # For cross-document compare, use path and source_path
+        source_path = args.get("source_path")
+        doc_b = _resolve_path(source_path) if source_path else path
+        result = compare_clauses(path, clause_a, doc_b, clause_b)
+        return tool_result({
+            "compatible": result.compatible,
+            "issues": result.issues,
+            "info": result.info,
+        })
+
+    return tool_error(f"Unknown op: {op}")
+
+
+# ── lex_corpus ─────────────────────────────────────────────────────────────────
+
+LEX_CORPUS_SCHEMA = {
+    "name": "lex_corpus",
+    "description": (
+        "Index and search across multiple .docx files in a project directory. "
+        "Builds a searchable corpus of clauses with type classification and "
+        "key term extraction.\n\n"
+        "Ops:\n"
+        "  index  — Recursively scan directory for .docx files, split each into "
+        "clauses, build inverted index\n"
+        "  search — Search indexed corpus by query text, clause type, or specific "
+        "defined terms\n"
+        "  status — Show corpus metadata (document count, clause count, last "
+        "indexed timestamp)\n"
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "op": {
+                "type": "string",
+                "enum": ["index", "search", "status"],
+                "description": "Corpus operation to perform.",
+            },
+            "dir_path": {
+                "type": "string",
+                "description": "Root directory containing .docx files.",
+            },
+            "query": {
+                "type": "string",
+                "description": "Free-text search query (for search op).",
+            },
+            "clause_type": {
+                "type": "string",
+                "description": "Filter by clause type: definitions, representations, covenants, conditions, events_of_default, governing_law, indemnity, miscellaneous, parties, background, operative, term_termination.",
+            },
+            "terms": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Filter by specific defined terms (exact match).",
+            },
+            "limit": {
+                "type": "integer",
+                "description": "Maximum search results (default: 20).",
+            },
+            "pattern": {
+                "type": "string",
+                "description": "File glob pattern for index (default: *.docx).",
+            },
+        },
+        "required": ["op", "dir_path"],
+    },
+}
+
+
+def _handle_corpus(args: dict, **kwargs) -> str:
+    op = args["op"]
+    dir_path = _resolve_path(args["dir_path"])
+
+    if op == "index":
+        from lexitool.corpus import index_dir
+        pattern = args.get("pattern", "*.docx")
+        result = index_dir(dir_path, pattern=pattern)
+        return tool_result(result)
+
+    elif op == "search":
+        from lexitool.corpus import search_corpus
+        result = search_corpus(
+            dir_path,
+            query=args.get("query"),
+            clause_type=args.get("clause_type"),
+            terms=args.get("terms"),
+            limit=args.get("limit", 20),
+        )
+        return tool_result(result)
+
+    elif op == "status":
+        from lexitool.corpus import corpus_status
+        result = corpus_status(dir_path)
+        return tool_result(result)
+
+    return tool_error(f"Unknown op: {op}")
+
+
 # ── Registration ──────────────────────────────────────────────────────────────
 
 _TOOLS = [
@@ -990,6 +1214,9 @@ _TOOLS = [
     ("lex_section",  "lexitool", LEX_SECTION_SCHEMA,  _handle_section),
     # Document
     ("lex_doc",      "lexitool", LEX_DOC_SCHEMA,      _handle_doc),
+    # Clause & Corpus
+    ("lex_clause",   "lexitool", LEX_CLAUSE_SCHEMA,   _handle_clause),
+    ("lex_corpus",   "lexitool", LEX_CORPUS_SCHEMA,   _handle_corpus),
 ]
 
 for _name, _toolset, _schema, _handler in _TOOLS:

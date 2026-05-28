@@ -16,6 +16,8 @@
 | `lex_section` | 页面/分节/分栏/页边距 |
 | `lex_doc` | 创建文档、更新目录/域、合并 |
 | `lex_stats` | 文档诊断 |
+| `lex_clause` | 条款拆解/提取/插入/对比 |
+| `lex_corpus` | 项目文档库索引与搜索 |
 
 ## 工作铁律
 
@@ -38,6 +40,53 @@ lex_stats → lex_format(target="§N-M", properties={...})
 
 ### 格式刷
 lex_read(paras=[N]) → lex_format(target="§M", source_para=N)
+
+### 多方借鉴合成合同（模板拆解 + 多源引用）
+
+这是律师起草合同的核心流程——不是从空白文档开始，而是：
+
+1. **索引项目文档库**
+   ```
+   lex_corpus(op="index", dir_path="项目文件/")
+   → 返回：15 份文档，234 个条款已索引
+   ```
+
+2. **拆解先例模板**
+   ```
+   lex_clause(op="split", path="先例模板.docx")
+   → 返回：28 个条款，带类型分类和关键术语
+   ```
+
+3. **审查条款适用性**（AI 判断）
+   ```
+   lex_read(path="先例模板.docx", paras=[12,24])
+   → 判断：第 12-24 段"交易背景"基于旧交易，需替换
+   ```
+
+4. **搜索替代条款**
+   ```
+   lex_corpus(op="search", dir_path="项目文件/",
+              clause_type="representations", terms=["质押", "担保"])
+   → 返回：6 个匹配条款，分别来自 SPA(§4)、SHA(§7)、Deed(§3)
+   ```
+
+5. **提取并插入替代条款**
+   ```
+   lex_clause(op="extract", path="SPA.docx",
+              para_start=32, para_end=45,
+              output_path="/tmp/snippet_reps.docx")
+   lex_clause(op="insert", path="ShareCharge_DRAFT.docx",
+              source_path="/tmp/snippet_reps.docx",
+              insert_after_para=55, adjust_numbering=true)
+   ```
+
+6. **验证一致性**
+   ```
+   lex_clause(op="compare", path="ShareCharge_DRAFT.docx",
+              clause_a={"para_start": 12, "para_end": 24, "title": "定义"},
+              clause_b={"para_start": 55, "para_end": 68, "title": "陈述与保证"})
+   → 报告：术语冲突 / 一致 / 建议
+   ```
 
 ## 编号样式选择
 
