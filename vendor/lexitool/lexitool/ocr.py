@@ -5,13 +5,15 @@ Two API tiers:
   - AgentAPI: free, no token required, suitable for AI agent use
   - PreciseAPI: token required (MINERU_API_KEY), VLM/pipeline models
 
-Entry point:
-  parse_pdf(file_path, ...) → {"ok": True, "markdown": "...", "api": "agent|precise", ...}
+Fallback: local Tesseract OCR (if tesseract + pdftoppm are installed).
 """
 
 from __future__ import annotations
 
 import os
+import shutil
+import subprocess
+import tempfile
 import time
 import requests
 
@@ -184,6 +186,64 @@ class PreciseAPI:
         return None
 
 
+# ── Tesseract local fallback ──────────────────────────────────────────────────
+
+def _check_tesseract() -> bool:
+    """Return True if tesseract and pdftoppm are available."""
+    return shutil.which("tesseract") is not None and shutil.which("pdftoppm") is not None
+
+
+def _tesseract_pdf(file_path: str, language: str = "chi_sim",
+                   page_range: str = None) -> str | None:
+    """Convert PDF to text using local tesseract + pdftoppm.
+
+    Args:
+        file_path: Path to PDF.
+        language: Tesseract language code ('chi_sim', 'chi_tra', 'eng', 'chi_sim+eng').
+        page_range: e.g. '1-5' or None for all pages.
+
+    Returns markdown-ish text, or None on failure.
+    """
+    lang_map = {"ch": "chi_sim", "en": "eng"}
+    tess_lang = lang_map.get(language, language)
+
+    with tempfile.TemporaryDirectory(prefix="lexocr_tess_") as tmpdir:
+        # Convert PDF pages to images
+        page_arg = []
+        if page_range:
+            page_arg = ["-f", page_range.split("-")[0],
+                        "-l", page_range.split("-")[-1] if "-" in page_range else page_range.split("-")[0]]
+
+        cmd = ["pdftoppm", "-png", "-r", "300", file_path, f"{tmpdir}/page"] + page_arg
+        try:
+            subprocess.run(cmd, capture_output=True, check=True, timeout=120)
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError):
+            return None
+
+        # OCR each page
+        pages = sorted(os.listdir(tmpdir))
+        if not pages:
+            return None
+
+        results = []
+        for i, png in enumerate(pages):
+            png_path = os.path.join(tmpdir, png)
+            out_base = os.path.join(tmpdir, f"ocr_{i}")
+            try:
+                subprocess.run(
+                    ["tesseract", png_path, out_base, "-l", tess_lang],
+                    capture_output=True, check=True, timeout=60,
+                )
+                txt_path = out_base + ".txt"
+                if os.path.exists(txt_path):
+                    with open(txt_path, "r") as f:
+                        results.append(f.read().strip())
+            except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+                results.append(f"[page {i+1}: OCR failed]")
+
+        return "\n\n---\n\n".join(results)
+
+
 # ── Entry point ─────────────────────────────────────────────────────────────
 
 def parse_pdf(
@@ -233,6 +293,12 @@ def parse_pdf(
             )
             api_used = "agent"
 
+        # Tesseract fallback if MinerU returned nothing
+        if md_text is None and _check_tesseract():
+            md_text = _tesseract_pdf(file_path, language=language, page_range=page_range)
+            if md_text:
+                api_used = "tesseract"
+
         if md_text:
             return {
                 "ok": True,
@@ -249,4 +315,19 @@ def parse_pdf(
                 "api": api_used,
             }
     except Exception as e:
+        # Last resort: try tesseract if MinerU threw an exception
+        if _check_tesseract():
+            try:
+                md_text = _tesseract_pdf(file_path, language=language, page_range=page_range)
+                if md_text:
+                    return {
+                        "ok": True,
+                        "api": "tesseract",
+                        "file": os.path.basename(file_path),
+                        "page_range": page_range,
+                        "markdown": md_text,
+                        "char_count": len(md_text),
+                    }
+            except Exception:
+                pass
         return {"ok": False, "error": str(e), "api": api_used}
