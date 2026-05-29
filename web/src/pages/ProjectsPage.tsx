@@ -18,12 +18,10 @@ import { Button } from "@nous-research/ui/ui/components/button";
 import { Input } from "@nous-research/ui/ui/components/input";
 import { Badge } from "@nous-research/ui/ui/components/badge";
 import { Spinner } from "@nous-research/ui/ui/components/spinner";
-import { Card, CardContent, CardHeader, CardTitle } from "@nous-research/ui/ui/components/card";
+import { Card, CardContent } from "@nous-research/ui/ui/components/card";
 import { DeleteConfirmDialog } from "@/components/DeleteConfirmDialog";
 import { useConfirmDelete } from "@nous-research/ui/hooks/use-confirm-delete";
 import { useToast } from "@nous-research/ui/hooks/use-toast";
-import { useI18n } from "@/i18n";
-import { usePageHeader } from "@/contexts/usePageHeader";
 import { PluginSlot } from "@/plugins";
 
 interface CreateForm {
@@ -43,9 +41,6 @@ const EMPTY_FORM: CreateForm = {
 };
 
 export default function ProjectsPage() {
-  const { t } = useI18n();
-  const { setActions } = usePageHeader();
-
   const [projects, setProjects] = useState<ProjectInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
@@ -54,20 +49,21 @@ export default function ProjectsPage() {
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const { toast, ...toastHandlers } = useToast();
+  const { toast, showToast } = useToast();
   const projectDelete = useConfirmDelete({
-    onConfirm: async (id: string) => {
-      try {
-        await api.deleteProject(id);
-        setProjects((prev) => prev.filter((p) => p.id !== id));
-      } catch (e: any) {
-        toastHandlers.showToast({
-          variant: "error",
-          title: "Delete failed",
-          message: e?.message ?? String(e),
-        });
-      }
-    },
+    onDelete: useCallback(
+      async (id: string) => {
+        try {
+          await api.deleteProject(id);
+          setProjects((prev) => prev.filter((p) => p.id !== id));
+          showToast("Project deleted", "success");
+        } catch (e: any) {
+          showToast(e?.message ?? "Delete failed", "error");
+          throw new Error("delete failed");
+        }
+      },
+      [showToast],
+    ),
   });
 
   const loadProjects = useCallback(async () => {
@@ -88,17 +84,6 @@ export default function ProjectsPage() {
     loadProjects();
   }, [loadProjects]);
 
-  useEffect(() => {
-    setActions([
-      {
-        id: "create-project",
-        label: "New Project",
-        icon: Plus,
-        onClick: () => setShowCreate(true),
-      },
-    ]);
-  }, [setActions]);
-
   const handleCreate = async () => {
     if (!form.project_name.trim() || !form.dir_path.trim()) return;
     setCreating(true);
@@ -112,13 +97,10 @@ export default function ProjectsPage() {
       });
       setShowCreate(false);
       setForm(EMPTY_FORM);
+      showToast("Project created", "success");
       await loadProjects();
     } catch (e: any) {
-      toastHandlers.showToast({
-        variant: "error",
-        title: "Create failed",
-        message: e?.message ?? String(e),
-      });
+      showToast(e?.message ?? "Create failed", "error");
     } finally {
       setCreating(false);
     }
@@ -151,13 +133,13 @@ export default function ProjectsPage() {
         onConfirm={projectDelete.confirm}
         title="Delete Project"
         description="This will permanently delete the project directory and all its contents. This action cannot be undone."
-        destructive
+        loading={projectDelete.isDeleting}
       />
 
       {error && (
-        <div className="bg-error/10 border border-error/30 text-error p-4 rounded-md text-sm">
+        <div className="border border-destructive/30 bg-destructive/[0.06] p-4 text-sm">
           {error}
-          <Button variant="ghost" size="sm" className="ml-4" onClick={loadProjects}>
+          <Button ghost size="sm" className="ml-4" onClick={loadProjects}>
             Retry
           </Button>
         </div>
@@ -183,7 +165,7 @@ export default function ProjectsPage() {
             </button>
           )}
         </div>
-        <Button onClick={() => setShowCreate(true)} variant="primary">
+        <Button onClick={() => setShowCreate(true)}>
           <Plus className="h-4 w-4 mr-1" />
           New Project
         </Button>
@@ -200,7 +182,7 @@ export default function ProjectsPage() {
                 : "No projects yet. Create your first legal project."}
             </p>
             {!search.trim() && (
-              <Button variant="primary" onClick={() => setShowCreate(true)}>
+              <Button onClick={() => setShowCreate(true)}>
                 <Plus className="h-4 w-4 mr-1" />
                 Create Project
               </Button>
@@ -247,7 +229,7 @@ export default function ProjectsPage() {
                         <FileText className="h-3 w-3" />
                         {proj.doc_count ?? 0} docs
                       </span>
-                      <Badge tone="neutral" className="text-xs">
+                      <Badge tone="outline" className="text-xs">
                         {proj.directory}
                       </Badge>
                     </div>
@@ -255,12 +237,12 @@ export default function ProjectsPage() {
 
                   <div className="flex items-center gap-1 flex-shrink-0">
                     <Button
-                      variant="ghost"
+                      ghost
                       size="sm"
-                      onClick={() => projectDelete.open(proj.id)}
+                      onClick={() => projectDelete.requestDelete(proj.id)}
                       aria-label={`Delete ${proj.name}`}
                     >
-                      <Trash2 className="h-4 w-4 text-text-tertiary hover:text-error" />
+                      <Trash2 className="h-4 w-4 text-text-tertiary hover:text-destructive" />
                     </Button>
                     <ChevronRight className="h-5 w-5 text-text-tertiary" />
                   </div>
@@ -285,7 +267,7 @@ export default function ProjectsPage() {
             <div className="flex items-center justify-between mb-4">
               <h2 className="text-lg font-semibold">Create New Project</h2>
               <Button
-                variant="ghost"
+                ghost
                 size="sm"
                 onClick={() => setShowCreate(false)}
               >
@@ -365,13 +347,12 @@ export default function ProjectsPage() {
 
             <div className="flex justify-end gap-2 mt-6">
               <Button
-                variant="ghost"
+                ghost
                 onClick={() => setShowCreate(false)}
               >
                 Cancel
               </Button>
               <Button
-                variant="primary"
                 onClick={handleCreate}
                 disabled={creating || !form.project_name.trim() || !form.dir_path.trim()}
               >
