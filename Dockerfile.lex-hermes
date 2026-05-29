@@ -83,6 +83,9 @@ EXPOSE 9119
 # ── Runtime dirs ──
 RUN mkdir -p /root/.hermes /workspace /project
 
+# ── Default SOUL.md (writing-focused identity) ──
+COPY SOUL.md /root/.hermes/SOUL.md
+
 ENV HERMES_HOME=/root/.hermes
 ENV HERMES_DASHBOARD_TUI=1
 
