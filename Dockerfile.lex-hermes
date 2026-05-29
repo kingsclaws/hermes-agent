@@ -66,7 +66,7 @@ RUN pip install --no-cache-dir /opt/lexitool
 
 # ── hermes-agent fork ──
 COPY . /opt/lex-hermes
-RUN pip install --no-cache-dir -e .
+RUN pip install --no-cache-dir -e ".[web]"
 
 # ── Claude Code CLI (self-healing) ──
 RUN npm install -g @anthropic-ai/claude-code && \
@@ -88,4 +88,4 @@ ENV HERMES_DASHBOARD_TUI=1
 
 WORKDIR /workspace
 ENTRYPOINT ["hermes"]
-CMD ["dashboard", "--host", "0.0.0.0"]
+CMD ["dashboard", "--host", "0.0.0.0", "--insecure"]

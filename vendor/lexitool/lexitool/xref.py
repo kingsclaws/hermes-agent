@@ -401,3 +401,172 @@ def auto_xref(doc_path: str) -> dict:
         "xrefs_converted": xrefs_converted,
         "clauses_indexed": len(clause_to_pidx),
     }
+
+
+# ── Cross-document scan ─────────────────────────────────────────────────────────
+
+# Regex patterns for cross-document references
+_CROSS_DOC_CHINESE = re.compile(
+    r'[《「]([^》」]{2,80})[》」]\s*第\s*(\d+(?:\.\d+)*)\s*条'
+)
+_CROSS_DOC_ENGLISH = re.compile(
+    r'(?:the|The)\s+([A-Z][A-Za-z\s]{2,60}(?:Agreement|Contract|Deed|Guarantee|Charge|Undertaking|Letter|Schedule|Annex|Appendix))\s+'
+    r'(?:Clause|Section|Article|clause|section|article)\s+(\d+(?:\.\d+)*)'
+)
+
+
+def _build_doc_clause_index(doc_path: str) -> dict[str, set]:
+    """Build clause-number → {heading_texts} map for a single document."""
+    doc_xml, _other, _order = _read_docx(doc_path)
+    root = etree.fromstring(doc_xml)
+    body = root.find(f"{W}body")
+    paras = [c for c in body if c.tag == f"{W}p"]
+    clause_to_pidx = _build_clause_index(paras)
+
+    # Map clause_num → heading text for reporting
+    result = {}
+    for cn, pi in clause_to_pidx.items():
+        p = paras[pi]
+        text = "".join(txt for _, txt in _get_direct_runs(p))
+        result[cn] = text[:80]
+    return result
+
+
+def _extract_filename(doc_path: str) -> str:
+    """Extract meaningful short name from a doc path for matching."""
+    import os
+    base = os.path.splitext(os.path.basename(doc_path))[0]
+    # Remove common suffixes for better matching
+    for suffix in ("_DRAFT", "_FINAL", "_v1", "_v2", "_clean", "_TC", "-DRAFT", "-FINAL"):
+        base = base.replace(suffix, "")
+    return base
+
+
+def cross_doc_scan(doc_paths: list[str]) -> dict:
+    """Scan for cross-document references across a set of .docx files.
+
+    Args:
+        doc_paths: List of .docx file paths that form the document set.
+
+    Returns:
+        {
+            "ok": True,
+            "refs": [{
+                "source_doc": "...",
+                "source_para": N,
+                "ref_text": "《担保合同》第5条",
+                "target_doc": "Guarantee.docx",
+                "target_clause": "5",
+                "status": "valid" | "broken_doc" | "broken_clause" | "unchecked",
+                "target_clause_text": "heading text or None",
+            }],
+            "broken_refs": [...],
+            "valid_refs": [...],
+            "summary": {"total": N, "valid": N, "broken": N, "unchecked": N},
+        }
+    """
+    if not doc_paths:
+        return {"ok": True, "refs": [], "broken_refs": [], "valid_refs": [],
+                "summary": {"total": 0, "valid": 0, "broken": 0, "unchecked": 0}}
+
+    # Build short-name → full-path map for matching
+    import os
+    name_map = {}  # short_name → full_path
+    for p in doc_paths:
+        short = _extract_filename(p)
+        name_map[short.lower()] = p
+        # Also index by basename without extension
+        name_map[os.path.splitext(os.path.basename(p))[0].lower()] = p
+
+    # Build clause index for each document
+    doc_clauses = {}  # full_path → {clause_num: heading_text}
+    for p in doc_paths:
+        try:
+            doc_clauses[p] = _build_doc_clause_index(p)
+        except Exception:
+            doc_clauses[p] = {}
+
+    all_refs = []
+
+    for src_path in doc_paths:
+        try:
+            doc_xml, _other, _order = _read_docx(src_path)
+            root = etree.fromstring(doc_xml)
+            body = root.find(f"{W}body")
+            paras = [c for c in body if c.tag == f"{W}p"]
+        except Exception:
+            continue
+
+        src_name = os.path.basename(src_path)
+
+        for pi, p in enumerate(paras):
+            full_text = "".join(txt for _, txt in _get_direct_runs(p))
+
+            # Chinese cross-doc refs
+            for m in _CROSS_DOC_CHINESE.finditer(full_text):
+                doc_title = m.group(1).strip()
+                clause_num = m.group(2)
+                target_path = name_map.get(doc_title.lower())
+                status = "unchecked"
+                target_text = None
+
+                if target_path is None:
+                    status = "broken_doc"
+                elif clause_num not in doc_clauses.get(target_path, {}):
+                    status = "broken_clause"
+                else:
+                    status = "valid"
+                    target_text = doc_clauses[target_path][clause_num]
+
+                all_refs.append({
+                    "source_doc": src_name,
+                    "source_para": pi + 1,
+                    "ref_text": m.group(0),
+                    "target_doc_title": doc_title,
+                    "target_clause": clause_num,
+                    "status": status,
+                    "target_clause_text": target_text,
+                })
+
+            # English cross-doc refs
+            for m in _CROSS_DOC_ENGLISH.finditer(full_text):
+                doc_title = m.group(1).strip()
+                clause_num = m.group(2)
+                target_path = name_map.get(doc_title.lower())
+                status = "unchecked"
+                target_text = None
+
+                if target_path is None:
+                    status = "broken_doc"
+                elif clause_num not in doc_clauses.get(target_path, {}):
+                    status = "broken_clause"
+                else:
+                    status = "valid"
+                    target_text = doc_clauses[target_path][clause_num]
+
+                all_refs.append({
+                    "source_doc": src_name,
+                    "source_para": pi + 1,
+                    "ref_text": m.group(0),
+                    "target_doc_title": doc_title,
+                    "target_clause": clause_num,
+                    "status": status,
+                    "target_clause_text": target_text,
+                })
+
+    broken = [r for r in all_refs if r["status"] in ("broken_doc", "broken_clause")]
+    valid = [r for r in all_refs if r["status"] == "valid"]
+
+    return {
+        "ok": True,
+        "refs": all_refs,
+        "broken_refs": broken,
+        "valid_refs": valid,
+        "summary": {
+            "total": len(all_refs),
+            "valid": len(valid),
+            "broken": len(broken),
+            "unchecked": len(all_refs) - len(valid) - len(broken),
+        },
+        "documents_scanned": len(doc_paths),
+    }

@@ -735,7 +735,7 @@ LEX_REF_SCHEMA = {
                 "type": "string",
                 "enum": ["add_bookmark", "remove_bookmark", "add_ref", "add_page_ref",
                          "add_noteref", "add_styleref", "list", "list_fields",
-                         "resolve_fields", "scan_xref", "auto_xref"],
+                         "resolve_fields", "scan_xref", "auto_xref", "cross_doc_scan"],
                 "description": "Operation to perform.",
             },
             "name": {
@@ -749,6 +749,11 @@ LEX_REF_SCHEMA = {
             "offset": {
                 "type": "integer",
                 "description": "Character offset within paragraph for field insertion (default: 0).",
+            },
+            "docs": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "List of document paths for cross_doc_scan. All docs are scanned for cross-references to each other.",
             },
         },
         "required": ["path", "op"],
@@ -776,10 +781,16 @@ def _handle_ref(args: dict, **kwargs) -> str:
             fields.update_fields(path)
         return tool_result(result)
 
-    if op in ("scan_xref", "auto_xref"):
+    if op in ("scan_xref", "auto_xref", "cross_doc_scan"):
         from lexitool import xref
         if op == "scan_xref":
             result = xref.scan_xrefs(path)
+        elif op == "cross_doc_scan":
+            docs = args.get("docs", [])
+            if not docs:
+                return tool_error("'docs' is required for cross_doc_scan (list of doc paths)")
+            docs = [_resolve_path(d) for d in docs]
+            result = xref.cross_doc_scan(docs)
         else:
             result = xref.auto_xref(path)
         return tool_result(result)

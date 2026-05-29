@@ -504,6 +504,23 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ name }),
     }),
+
+  // Projects
+  fetchProjects: () =>
+    fetchJSON<ProjectsResponse>("/api/projects"),
+  getProject: (id: string) =>
+    fetchJSON<ProjectDetail>(`/api/projects/${encodeURIComponent(id)}`),
+  createProject: (body: CreateProjectRequest) =>
+    fetchJSON<ProjectCreateResponse>("/api/projects", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
+  deleteProject: (id: string) =>
+    fetchJSON<{ ok: boolean }>(
+      `/api/projects/${encodeURIComponent(id)}`,
+      { method: "DELETE" },
+    ),
 };
 
 /** Identity payload returned by ``GET /api/auth/me`` (Phase 7).
@@ -601,6 +618,48 @@ export interface SessionLatestDescendantResponse {
   session_id: string;
   path: string[];
   changed: boolean;
+}
+
+export interface ProjectInfo {
+  id: string;
+  name: string;
+  client?: string;
+  goal?: string;
+  directory: string;
+  created?: string;
+  doc_count?: number;
+}
+
+export interface ProjectDetail extends ProjectInfo {
+  sessions: SessionInfo[];
+  session_count: number;
+}
+
+export interface ProjectsResponse {
+  projects: ProjectInfo[];
+  total: number;
+}
+
+export interface CreateProjectRequest {
+  project_name: string;
+  client_name?: string;
+  goal?: string;
+  dir_path: string;
+  language?: string;
+  recursive?: boolean;
+}
+
+export interface ProjectCreateResponse {
+  ok: boolean;
+  project_dir: string;
+  files_scanned: number;
+  docx_count: number;
+  pdf_count: number;
+  ok_count: number;
+  failed_count: number;
+  total_chars_extracted: number;
+  entities_detected: Record<string, string[]>;
+  error?: string;
 }
 
 export interface PaginatedSessions {

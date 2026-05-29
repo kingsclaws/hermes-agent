@@ -2560,6 +2560,153 @@ async def delete_session_endpoint(session_id: str):
 
 
 # ---------------------------------------------------------------------------
+# Project management endpoints
+# ---------------------------------------------------------------------------
+
+import shutil as _shutil
+
+
+def _scan_projects_dir(base: str = "/data/projects") -> list[dict]:
+    """Scan a directory tree for .hermes-project/project-meta.json files."""
+    projects = []
+    try:
+        root = Path(base)
+    except Exception:
+        return projects
+    if not root.is_dir():
+        return projects
+    for meta_path in sorted(root.rglob(".hermes-project/project-meta.json")):
+        try:
+            meta = json.loads(meta_path.read_text())
+            project_dir = str(meta_path.parent.parent)
+            doc_count = 0
+            for pattern in ("*.docx", "*.pdf"):
+                doc_count += len(list(Path(project_dir).rglob(pattern)))
+            projects.append({
+                "id": project_dir.replace("/", "_").lstrip("_"),
+                "name": meta.get("name", "Unnamed"),
+                "client": meta.get("client", ""),
+                "goal": meta.get("goal", ""),
+                "directory": project_dir,
+                "created": meta.get("created", ""),
+                "doc_count": doc_count,
+            })
+        except Exception:
+            continue
+    return projects
+
+
+@app.get("/api/projects")
+async def get_projects():
+    """List all projects discovered under /data/projects."""
+    try:
+        projects = _scan_projects_dir()
+        total = len(projects)
+        return {"projects": projects, "total": total}
+    except Exception:
+        _log.exception("GET /api/projects failed")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@app.post("/api/projects")
+async def create_project(request: Request):
+    """Create a new legal project by scanning a source directory."""
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+
+    project_name = body.get("project_name", "").strip()
+    client_name = body.get("client_name", "").strip()
+    goal = body.get("goal", "").strip()
+    dir_path = body.get("dir_path", "").strip()
+    language = body.get("language", "ch")
+    recursive = body.get("recursive", False)
+
+    if not project_name or not dir_path:
+        raise HTTPException(status_code=400, detail="project_name and dir_path are required")
+
+    try:
+        from lexitool.project_init import scan_and_init_project
+        result = scan_and_init_project(
+            dir_path=dir_path,
+            project_name=project_name,
+            client_name=client_name,
+            goal=goal,
+            language=language,
+            recursive=recursive,
+            project_parent_dir="/data/projects",
+        )
+        if result.get("ok"):
+            return result
+        raise HTTPException(status_code=400, detail=result.get("error", "Project init failed"))
+    except ImportError:
+        raise HTTPException(status_code=500, detail="lexitool not installed")
+    except HTTPException:
+        raise
+    except Exception as e:
+        _log.exception("POST /api/projects failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/projects/{project_id}")
+async def get_project_detail(project_id: str):
+    """Get project details including linked sessions."""
+    try:
+        from hermes_state import SessionDB
+    except ImportError:
+        raise HTTPException(status_code=500, detail="SessionDB unavailable")
+
+    # Map project_id back to directory
+    projects = _scan_projects_dir()
+    project = next((p for p in projects if p["id"] == project_id), None)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    # Find sessions linked to this project directory
+    try:
+        db = SessionDB()
+        try:
+            all_sessions = db.list_sessions_rich(limit=500, offset=0)
+            project_dir = project["directory"]
+            linked = [s for s in all_sessions
+                      if s.get("cwd", "").startswith(project_dir)]
+            project["sessions"] = linked
+            project["session_count"] = len(linked)
+        finally:
+            db.close()
+    except Exception:
+        project["sessions"] = []
+        project["session_count"] = 0
+
+    return project
+
+
+@app.delete("/api/projects/{project_id}")
+async def delete_project(project_id: str):
+    """Delete a project directory and all its contents."""
+    projects = _scan_projects_dir()
+    project = next((p for p in projects if p["id"] == project_id), None)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    project_dir = Path(project["directory"])
+    if not project_dir.is_dir():
+        raise HTTPException(status_code=404, detail="Project directory not found")
+
+    # Safety: only delete if it contains a .hermes-project marker
+    if not (project_dir / ".hermes-project").is_dir():
+        raise HTTPException(status_code=400, detail="Not a valid hermes project (no .hermes-project/)")
+
+    try:
+        _shutil.rmtree(str(project_dir))
+        return {"ok": True, "deleted": str(project_dir)}
+    except Exception as e:
+        _log.exception("DELETE /api/projects failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ---------------------------------------------------------------------------
 # Log viewer endpoint
 # ---------------------------------------------------------------------------
 
