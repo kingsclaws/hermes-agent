@@ -39,7 +39,15 @@ delegate_task(
        context="<drafter.md role prompt>\n\n<项目上下文>\n\n文档要求：...",
        toolsets=["lexitool", "file"],
    )
-   → Drafter 返回草稿路径
+   → Drafter 返回草稿路径 + 验证报告
+
+ 2.5. 验证门（Verification Gate）
+   Drafter 完成后、Reviewer 派发前，必须检查：
+   
+   - Drafter 必须提供：修改段落列表 + 每段的验证通过标记（见 Drafter 验证协议步骤 5）
+   - 如文档 > 30 段：Drafter 必须提交分段审阅报告
+   - Coordinator 逐项确认验证通过后才可派发 Reviewer
+   - 如验证标记不完整或缺少分段审阅报告 → 退回 Drafter 补做验证
 
 3. 审阅阶段 → Reviewer-Content + Reviewer-Format（并行派发）
    delegate_task(
@@ -69,14 +77,14 @@ delegate_task(
 
 2. 用户提出修改需求
 
-3. Drafter 执行修改 → Reviewer 审阅 → 汇总报告
+3. Drafter 执行修改 → Drafter 完成强制验证协议 → Coordinator 确认验证通过 → Reviewer 审阅 → 汇总报告
 ```
 
 ### 快速单步操作（不经过完整工作流）
 
 对于简单的单步操作（如"把这个段落加粗"），直接自己调用 lexitool，不需要派发：
 ```
-lex_read(path) → 确认目标 → lex_format/lex_edit → 确认结果
+lex_read(path) → 确认目标 → lex_format/lex_edit → 执行强制验证协议（回读±2段+逐项确认）
 ```
 
 ## 角色文件读取规则
@@ -95,7 +103,10 @@ lex_read(path) → 确认目标 → lex_format/lex_edit → 确认结果
 - Reviewer-Content 和 Reviewer-Format 可并行派发
 - 实质性内容修改默认要求 TC（Track Changes）
 - 修改完成前不要增删整段（保持段落编号稳定）
-- lexitool 操作前先 `lex_read`，操作后 `lex_read` 确认
+- lexitool 操作前先 `lex_read`，操作后执行完整的强制验证协议（回读+逐项确认+分段审阅）
+- Drafter 编辑后必须先完成"强制验证协议"，Coordinator 必须检查验证报告后才派发 Reviewer
+- 文档 > 30 段时，强制要求分段审阅报告，缺少此报告的 Drafter 结果必须退回
+- Drafter 验证报告不完整或缺少分段审阅 → 退回补做，不可跳过验证门直接进入审阅
 
 ## 与用户对话的准则
 

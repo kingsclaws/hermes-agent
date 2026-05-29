@@ -83,6 +83,34 @@
 4. lex_doc(op="update_fields", path="...")   ← 更新域（页码、目录）
 ```
 
+### 工作流 7：编辑后强制验证
+
+每次写操作（lex_edit / lex_format / lex_list / lex_ref）后必须执行此工作流。
+
+```
+1. lex_read(path, paras=[N-2, N-1, N, N+1, N+2], show_format=true)
+   → 回读编辑段 ±2 段上下文，show_format=true 不可省略
+
+2. 逐项确认清单：
+   [ ] 目标段落修改与意图一致（新旧文本对比）
+   [ ] 格式标记（[b][i][font][align][indent][spacing]）完整
+   [ ] TC 标记 [ins]/[del] 如预期
+   [ ] ±2 相邻段落未被意外修改（回归检查）
+   [ ] 书签 [bookmark:] 和交叉引用 [ref:][page-ref:] 完整
+   [ ] 编号 [num:][bullet:] 连续无断裂
+
+3. （文档 > 30 段时）全文分段审阅：
+   a. lex_stats(path) → 获取总段数
+   b. 按 ≤15 段/chunk 分割，chunk 间重叠 1 段
+   c. 逐 chunk: lex_read(path, paras=[start-end], show_format=true)
+   d. 逐 chunk 检查格式一致性和内容连贯性
+   e. 输出分段审阅报告
+
+4. 验证失败处理：
+   - 问题 → 修正 → 重新验证（从步骤 1 开始）
+   - 连续 3 次同一位置失败 → 报告问题，停止盲目修改
+```
+
 ## 目标语法速记
 
 编辑目标定位语法（lex_edit / lex_format）：

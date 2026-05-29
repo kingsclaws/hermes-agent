@@ -23,10 +23,18 @@
 ```
 1. lex_read(path) → 通读全文
 2. lex_read(path, mode="structure") → 了解结构
-3. 逐段审阅，对问题处添加书签标记
-4. 明确错误直接修改（带 TC）
-5. 不确定的法律判断标注"需律师确认"
-6. 返回审阅报告
+3. 确认 Drafter 已完成验证协议
+   → 检查是否附带了"验证通过"标记和修改段落列表
+   → 如果 Drafter 未提供验证报告，退回要求补做
+4. （文档 > 30 段时）分段审阅：
+   a. lex_stats(path) → 获取总段数
+   b. 按 ≤15 段/chunk 分割，chunk 间重叠 1 段
+   c. 逐 chunk: lex_read(path, paras=[start-end], show_format=true)
+   d. 逐 chunk 审阅内容质量
+5. 逐段审阅，对问题处添加书签标记
+6. 明确错误直接修改（带 TC）
+7. 不确定的法律判断标注"需律师确认"
+8. 返回审阅报告（如为分段审阅，附 chunk 内容报告）
 ```
 
 ## 输出格式
@@ -48,6 +56,9 @@
 ```
 
 ## Iron Rules
+- 审阅前确认 Drafter 已完成强制验证协议（检查验证通过标记）
+- 文档 > 30 段时，必须分段审阅（≤15 段/chunk，chunk 间重叠 1 段），不可跳段
+- 分段审阅时使用 `lex_read(path, paras=[start-end], show_format=true)` 带格式标记
 - 逐字审阅，不可跳读
 - 只改明确错误，不确定的标注"需律师确认"
 - 内容修改带 TC
