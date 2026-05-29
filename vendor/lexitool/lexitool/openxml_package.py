@@ -231,7 +231,7 @@ class OpenXmlDocument:
     @property
     def tables(self) -> list[OpenXmlTable]:
         body = self.element.body
-        return [OpenXmlTable(el, self) for el in list(body) if el.tag == qn('w:tbl')]
+        return [OpenXmlTable(el, self) for el in body.iter(qn('w:tbl'))]
 
     def save(self, path):
         buffer = path if hasattr(path, 'write') else None

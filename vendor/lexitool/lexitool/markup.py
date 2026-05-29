@@ -294,6 +294,26 @@ def _export_runs(
         for bm_name in seg.get("bm_ends", []):
             parts.append(f"[/bookmark:{bm_name}]")
 
+        # Handle field reference markers (REF, PAGEREF, NOTEREF, STYLEREF)
+        # When a segment has a field marker, emit ONLY the marker (not the display text)
+        # since the marker communicates what the field points to.
+        has_field_marker = False
+        if seg.get("ref_name"):
+            parts.append(f"[ref:{seg['ref_name']}]")
+            has_field_marker = True
+        elif seg.get("pageref_name"):
+            parts.append(f"[page-ref:{seg['pageref_name']}]")
+            has_field_marker = True
+        elif seg.get("noteref_name"):
+            parts.append(f"[note-ref:{seg['noteref_name']}]")
+            has_field_marker = True
+        elif seg.get("styleref_name"):
+            parts.append(f"[style-ref:{seg['styleref_name']}]")
+            has_field_marker = True
+
+        if has_field_marker:
+            continue
+
         # Handle TC state changes — need to track which tag is open
         if show_tc:
             seg_tc = seg.get("tc")
@@ -353,12 +373,82 @@ def _export_runs(
 
 
 def _collect_segments(para_el) -> list[dict]:
-    """Walk paragraph children and collect text segments with TC/format context."""
+    """Walk paragraph children and collect text segments with TC/format context.
+
+    Also detects Word field codes (REF, PAGEREF, NOTEREF, STYLEREF) and
+    emits [ref:name], [page-ref:name], etc. markers.
+    """
     segments: list[dict] = []
     bm_id_to_name: dict[str, str] = {}
 
+    # Field state machine
+    in_field = False
+    field_instr = ""
+    field_display = ""
+
     for child in para_el:
+        # ── Field code detection ──
         if child.tag == f"{W}r":
+            fld_char = child.find(f"{W}fldChar")
+            if fld_char is not None:
+                fld_type = fld_char.get(f"{W}fldCharType", "")
+                if fld_type == "begin":
+                    in_field = True
+                    field_instr = ""
+                    field_display = ""
+                    continue
+                elif fld_type == "separate":
+                    # End of instruction, start of display text
+                    continue
+                elif fld_type == "end" and in_field:
+                    in_field = False
+                    ft = _field_type_from_instr(field_instr)
+                    name = _field_name_from_instr(field_instr)
+                    if ft == "REF" and name:
+                        segments.append({
+                            "text": field_display or f"[{name}]",
+                            "format": {}, "tc": None,
+                            "ref_name": name,
+                        })
+                    elif ft == "PAGEREF" and name:
+                        segments.append({
+                            "text": field_display or f"[p.{name}]",
+                            "format": {}, "tc": None,
+                            "pageref_name": name,
+                        })
+                    elif ft == "NOTEREF" and name:
+                        segments.append({
+                            "text": field_display or f"[fn.{name}]",
+                            "format": {}, "tc": None,
+                            "noteref_name": name,
+                        })
+                    elif ft == "STYLEREF" and name:
+                        segments.append({
+                            "text": field_display or f"[style:{name}]",
+                            "format": {}, "tc": None,
+                            "styleref_name": name,
+                        })
+                    else:
+                        # Other field (PAGE, NUMPAGES, TOC, etc.) — keep display text
+                        if field_display:
+                            segments.append({
+                                "text": field_display,
+                                "format": {}, "tc": None,
+                            })
+                    continue
+
+            if in_field:
+                instr_el = child.find(f"{W}instrText")
+                if instr_el is not None:
+                    field_instr += instr_el.text or ""
+                    continue
+                # After separate, collect display text
+                t_el = child.find(f"{W}t")
+                if t_el is not None:
+                    field_display += t_el.text or ""
+                    continue
+
+            # Regular run
             seg = _segment_from_run(child)
             segments.append(seg)
 
@@ -407,6 +497,25 @@ def _collect_segments(para_el) -> list[dict]:
                 segments.append({"text": "[line-break]", "format": {}, "tc": None})
 
     return segments
+
+
+def _field_type_from_instr(instr: str) -> str:
+    """Extract field type (e.g. REF, PAGEREF) from instruction text."""
+    parts = instr.strip().split()
+    return parts[0].upper() if parts else ""
+
+
+def _field_name_from_instr(instr: str) -> str:
+    """Extract bookmark/style name from field instruction."""
+    parts = instr.strip().split()
+    if len(parts) < 2:
+        return ""
+    # Skip switches like \h, \p, \* MERGEFORMAT
+    for p in parts[1:]:
+        if p.startswith("\\"):
+            continue
+        return p.strip('"')
+    return ""
 
 
 def _segment_from_run(r_el, is_del: bool = False) -> dict:

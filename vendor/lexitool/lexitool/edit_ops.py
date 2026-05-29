@@ -45,6 +45,10 @@ def _write_docx(path: str, doc_xml: bytes, other: dict[str, bytes],
     import os as _os
     _os.close(fd)
     with zipfile.ZipFile(tmp, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        # OOXML requires [Content_Types].xml as the first ZIP entry
+        ct_xml = other.pop("[Content_Types].xml", None)
+        if ct_xml is not None:
+            zf.writestr("[Content_Types].xml", ct_xml)
         zf.writestr("word/document.xml", doc_xml)
         for name, data in other.items():
             zf.writestr(name, data)

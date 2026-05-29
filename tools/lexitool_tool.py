@@ -241,6 +241,19 @@ def _handle_edit(args: dict, **kwargs) -> str:
 
     doc_xml_out = etree.tostring(root, xml_declaration=True, encoding="UTF-8", standalone="yes")
     _write_docx(path, doc_xml_out, other)
+
+    # If new_text contains [ref:name] or [page-ref:name] markup, convert to real fields
+    _field_markers = ("[ref:", "[page-ref:", "[note-ref:", "[style-ref:")
+    if new_text and any(m in new_text for m in _field_markers):
+        try:
+            from lexitool.fields import resolve_field_markup
+            field_result = resolve_field_markup(path)
+            if field_result.get("converted"):
+                from lexitool.fields import update_fields
+                update_fields(path)
+        except Exception:
+            pass  # field conversion is best-effort
+
     return tool_result({"ok": True, "op": op, "target": target_str, "para": target.para_start})
 
 
@@ -703,7 +716,13 @@ LEX_REF_SCHEMA = {
         "  remove_bookmark — Remove a bookmark\n"
         "  add_ref         — Insert a REF field (shows bookmark text)\n"
         "  add_page_ref    — Insert a PAGEREF field (shows page number)\n"
-        "  list            — List all bookmarks in the document"
+        "  add_noteref     — Insert a NOTEREF field (footnote/endnote reference)\n"
+        "  add_styleref    — Insert a STYLEREF field (shows text with a given style)\n"
+        "  list            — List all bookmarks in the document\n"
+        "  list_fields     — List all field codes (REF, PAGEREF, TOC, etc.) in the document\n"
+        "  resolve_fields  — Convert [ref:name]/[page-ref:name] markup in runs to real field codes\n"
+        "  scan_xref       — Dry-run scan: find static '第X条' patterns and what they'd link to\n"
+        "  auto_xref       — Full conversion: add bookmarks to headings, wrap xref text in hyperlinks"
     ),
     "parameters": {
         "type": "object",
@@ -714,16 +733,22 @@ LEX_REF_SCHEMA = {
             },
             "op": {
                 "type": "string",
-                "enum": ["add_bookmark", "remove_bookmark", "add_ref", "add_page_ref", "list"],
+                "enum": ["add_bookmark", "remove_bookmark", "add_ref", "add_page_ref",
+                         "add_noteref", "add_styleref", "list", "list_fields",
+                         "resolve_fields", "scan_xref", "auto_xref"],
                 "description": "Operation to perform.",
             },
             "name": {
                 "type": "string",
-                "description": "Bookmark name (required for add/remove/ref operations).",
+                "description": "Bookmark name (for add/remove/ref) or style name (for add_styleref).",
             },
             "target_para": {
                 "type": "integer",
                 "description": "Paragraph number (1-indexed) for bookmark anchor or field insert point.",
+            },
+            "offset": {
+                "type": "integer",
+                "description": "Character offset within paragraph for field insertion (default: 0).",
             },
         },
         "required": ["path", "op"],
@@ -741,20 +766,45 @@ def _handle_ref(args: dict, **kwargs) -> str:
         result = bookmarks.list_bookmarks(path)
         return tool_result(result)
 
+    if op == "list_fields":
+        result = fields.list_fields(path)
+        return tool_result(result)
+
+    if op == "resolve_fields":
+        result = fields.resolve_field_markup(path)
+        if result.get("ok"):
+            fields.update_fields(path)
+        return tool_result(result)
+
+    if op in ("scan_xref", "auto_xref"):
+        from lexitool import xref
+        if op == "scan_xref":
+            result = xref.scan_xrefs(path)
+        else:
+            result = xref.auto_xref(path)
+        return tool_result(result)
+
     name = args.get("name")
-    if not name and op != "list":
+    if not name:
         return tool_error("'name' is required for this operation")
 
     target_para = args.get("target_para", 1)
+    offset = args.get("offset", 0)
 
     if op == "add_bookmark":
         result = bookmarks.add_bookmark(path, target_para - 1, name)
     elif op == "remove_bookmark":
         result = bookmarks.remove_bookmark(path, name)
     elif op == "add_ref":
-        result = fields.insert_field(path, target_para - 1, 0, "REF", name, f"[{name}]")
+        result = fields.insert_field(path, target_para - 1, offset, "REF", name, f"[{name}]")
     elif op == "add_page_ref":
-        result = fields.insert_field(path, target_para - 1, 0, "PAGEREF", name, f"[p.{name}]")
+        result = fields.insert_field(path, target_para - 1, offset, "PAGEREF", name, f"[p.{name}]")
+    elif op == "add_noteref":
+        result = fields.insert_field(path, target_para - 1, offset, "NOTEREF", name, f"[fn.{name}]")
+    elif op == "add_styleref":
+        # STYLEREF accepts quoted style names like "Heading 1"
+        instr = f'"{name}"' if " " in name else name
+        result = fields.insert_field(path, target_para - 1, offset, "STYLEREF", instr, f"[{name}]")
     else:
         return tool_error(f"Unknown op: {op}")
 

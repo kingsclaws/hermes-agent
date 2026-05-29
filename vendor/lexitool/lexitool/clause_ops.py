@@ -408,6 +408,10 @@ def extract_clause(docx_path: str, para_start: int, para_end: int,
     os_close = __import__("os").close
     os_close(fd)
     with zipfile.ZipFile(tmp, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        # OOXML requires [Content_Types].xml as the first ZIP entry
+        ct_xml = members.pop("[Content_Types].xml", None)
+        if ct_xml is not None:
+            zf.writestr("[Content_Types].xml", ct_xml)
         zf.writestr("word/document.xml", doc_xml_out)
         for name, data in members.items():
             if name != "word/document.xml":
@@ -518,6 +522,10 @@ def insert_clause(target_path: str, source_path: str,
     os_close = __import__("os").close
     os_close(fd)
     with zipfile.ZipFile(tmp, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        # OOXML requires [Content_Types].xml as the first ZIP entry
+        ct_xml = target_members.pop("[Content_Types].xml", None)
+        if ct_xml is not None:
+            zf.writestr("[Content_Types].xml", ct_xml)
         zf.writestr("word/document.xml", target_doc_out)
         for name, data in target_members.items():
             if name != "word/document.xml":
