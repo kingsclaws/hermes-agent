@@ -6,6 +6,13 @@
 # Build:
 #   docker build -f Dockerfile.lex-hermes -t lex-hermes .
 #
+# Run (WebUI dashboard — default):
+#   docker run -d --rm \
+#     -v ~/.hermes/config.yaml:/root/.hermes/config.yaml:ro \
+#     -p 9119:9119 \
+#     lex-hermes
+#   → Open http://localhost:9119 → Chat tab
+#
 # Run (interactive chat with lex_docx tools):
 #   docker run -it --rm \
 #     -v ~/.hermes/config.yaml:/root/.hermes/config.yaml:ro \
@@ -65,11 +72,20 @@ RUN pip install --no-cache-dir -e .
 RUN npm install -g @anthropic-ai/claude-code && \
     npm cache clean --force
 
+# ── Web Dashboard ──
+RUN cd /opt/lex-hermes/web && \
+    npm install --prefer-offline --no-audit && \
+    npm run build && \
+    npm cache clean --force
+
+EXPOSE 9119
+
 # ── Runtime dirs ──
 RUN mkdir -p /root/.hermes /workspace /project
 
 ENV HERMES_HOME=/root/.hermes
+ENV HERMES_DASHBOARD_TUI=1
 
 WORKDIR /workspace
 ENTRYPOINT ["hermes"]
-CMD ["chat"]
+CMD ["dashboard", "--host", "0.0.0.0"]
