@@ -1248,6 +1248,140 @@ def _handle_corpus(args: dict, **kwargs) -> str:
     return tool_error(f"Unknown op: {op}")
 
 
+# ── lex_ocr schema & handler ─────────────────────────────────────────────────
+
+LEX_OCR_SCHEMA = {
+    "name": "lex_ocr",
+    "description": (
+        "Convert a scanned PDF to markdown text using MinerU OCR. "
+        "Supports both the free Agent API (no key needed, lower quality) and "
+        "the Precision API (set MINERU_API_KEY env var for best quality with "
+        "VLM-based recognition). Use this for legal documents, scanned "
+        "contracts, and any PDF that may contain non-extractable text or images."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "file_path": {
+                "type": "string",
+                "description": "Absolute or relative path to the PDF file.",
+            },
+            "language": {
+                "type": "string",
+                "description": "Document language code ('ch' for Chinese, 'en' for English, etc.). Default: 'ch'.",
+            },
+            "page_range": {
+                "type": "string",
+                "description": "Page range to process, e.g. '1-5' or '1,3,5-7'. Omit for all pages.",
+            },
+            "model_version": {
+                "type": "string",
+                "description": "Precision API model version: 'vlm' (best quality, default), 'pipeline', or 'MinerU-HTML'. Only used when MINERU_API_KEY is set.",
+            },
+        },
+        "required": ["file_path"],
+    },
+}
+
+
+def _handle_ocr(args: dict, **kwargs) -> str:
+    from lexitool.ocr import parse_pdf
+
+    file_path = _resolve_path(args["file_path"])
+    language = args.get("language", "ch")
+    page_range = args.get("page_range")
+    model_version = args.get("model_version", "vlm")
+
+    result = parse_pdf(
+        file_path,
+        language=language,
+        page_range=page_range,
+        model_version=model_version,
+        prefer_precise=True,
+    )
+
+    if result.get("ok"):
+        return tool_result(result)
+    return tool_error(result.get("error", "OCR failed"))
+
+
+# ── lex_project_init schema & handler ────────────────────────────────────────
+
+LEX_PROJECT_INIT_SCHEMA = {
+    "name": "lex_project_init",
+    "description": (
+        "Initialise a new legal project by scanning a directory for .docx and "
+        ".pdf files, extracting all content (PDF via OCR), detecting key "
+        "entities (parties, dates, amounts, law citations), and building a "
+        "comprehensive project context. Creates the full project scaffold with "
+        "enriched project-context.md, AGENTS.md, STANDARDS.md, and role files.\n\n"
+        "Use this at the start of any legal project to pre-load all case "
+        "documents into the project knowledge base. After init, use hermes chat "
+        "from the project directory to activate HPSwarm multi-agent mode."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "dir_path": {
+                "type": "string",
+                "description": "Path to the directory containing source documents (.docx, .pdf).",
+            },
+            "project_name": {
+                "type": "string",
+                "description": "Short project identifier, used as the project directory name (e.g. 'case-2024-001').",
+            },
+            "client_name": {
+                "type": "string",
+                "description": "Client or organisation name.",
+            },
+            "goal": {
+                "type": "string",
+                "description": "What the project aims to accomplish (e.g. 'Draft defence statement for copyright infringement case').",
+            },
+            "language": {
+                "type": "string",
+                "description": "Document language for OCR. Default: 'ch'.",
+            },
+            "recursive": {
+                "type": "boolean",
+                "description": "Whether to scan subdirectories recursively. Default: false.",
+            },
+            "project_parent_dir": {
+                "type": "string",
+                "description": "Directory where the new project folder will be created. Default: parent of dir_path.",
+            },
+        },
+        "required": ["dir_path", "project_name", "client_name", "goal"],
+    },
+}
+
+
+def _handle_project_init(args: dict, **kwargs) -> str:
+    from lexitool.project_init import scan_and_init_project
+
+    dir_path = _resolve_path(args["dir_path"])
+    project_name = args["project_name"]
+    client_name = args["client_name"]
+    goal = args["goal"]
+    language = args.get("language", "ch")
+    recursive = args.get("recursive", False)
+    project_parent_dir = args.get("project_parent_dir")
+
+    result = scan_and_init_project(
+        dir_path=dir_path,
+        project_name=project_name,
+        client_name=client_name,
+        goal=goal,
+        language=language,
+        recursive=recursive,
+        project_parent_dir=project_parent_dir,
+    )
+
+    if result.get("ok"):
+        return tool_result(result)
+    return tool_error(result.get("error", "Project init failed"))
+
+
 # ── Registration ──────────────────────────────────────────────────────────────
 
 _TOOLS = [
@@ -1265,8 +1399,11 @@ _TOOLS = [
     # Document
     ("lex_doc",      "lexitool", LEX_DOC_SCHEMA,      _handle_doc),
     # Clause & Corpus
-    ("lex_clause",   "lexitool", LEX_CLAUSE_SCHEMA,   _handle_clause),
-    ("lex_corpus",   "lexitool", LEX_CORPUS_SCHEMA,   _handle_corpus),
+    ("lex_clause",        "lexitool", LEX_CLAUSE_SCHEMA,        _handle_clause),
+    ("lex_corpus",        "lexitool", LEX_CORPUS_SCHEMA,        _handle_corpus),
+    # OCR & Project
+    ("lex_ocr",           "lexitool", LEX_OCR_SCHEMA,           _handle_ocr),
+    ("lex_project_init",  "lexitool", LEX_PROJECT_INIT_SCHEMA,  _handle_project_init),
 ]
 
 for _name, _toolset, _schema, _handler in _TOOLS:
