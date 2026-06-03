@@ -23,7 +23,6 @@ platform_toolsets:
   cli:
     - browser
     - clarify
-    - computer_use
     - cronjob
     - delegation
     - file
