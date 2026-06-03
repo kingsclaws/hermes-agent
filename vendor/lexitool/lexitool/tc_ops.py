@@ -43,8 +43,8 @@ def _ancestor_paragraph(el):
     return ox.ancestor_paragraph(el)
 
 
-def _in_para_range(para_idx: int | None, para_range: tuple[int, int] | None) -> bool:
-    return ox.in_para_range(para_idx, para_range)
+def _in_para_range(para_idx, para_range, *, include_tables=False):
+    return ox.in_para_range(para_idx, para_range, include_tables=include_tables)
 
 
 def _collect_body_ins(body, author_filter):
@@ -61,7 +61,8 @@ def _collect_body_del(body, author_filter, *, skip_para_mark: bool = True):
 
 def list_tc(doc, author_filter: str | None = None,
             para_range: tuple[int, int] | None = None,
-            type_filter: str | None = None) -> list[dict]:
+            type_filter: str | None = None,
+            include_tables: bool = False) -> list[dict]:
     """
     List all tracked changes (w:ins / w:del) in the document body.
     """
@@ -71,6 +72,7 @@ def list_tc(doc, author_filter: str | None = None,
         author_filter=author_filter,
         para_range=para_range,
         type_filter=type_filter,
+        include_tables=include_tables,
     ):
         items.append({
             "id": rec.tc_id,
@@ -374,7 +376,7 @@ def clean_comments_filtered(doc, author_filter: str | None = None,
     }
 
     # 快路：无过滤时，保留原全量清理行为
-    if author_filter is None and para_range is None:
+    if author_filter is None and para_range is None and comment_ids is None:
         # ── 1. Remove w:commentRangeStart / w:commentRangeEnd ────────────── #
         for tag, key in (
             (qn("w:commentRangeStart"), "range_starts"),

@@ -372,10 +372,17 @@ def _handle_edit(args: dict, **kwargs) -> str:
 
     try:
         if op == "delete":
-            tc_del_paragraph(para_el, tc_id, author)
+            if tc:
+                tc_del_paragraph(para_el, tc_id, author)
+            else:
+                for t_el in para_el.iter(f"{W}t"):
+                    t_el.text = None
 
-        elif op == "replace" and target.char_start is not None:
-            old_text = _get_para_text(para_el)[target.char_start:target.char_end]
+        elif op == "replace":
+            if target.char_start is not None:
+                old_text = _get_para_text(para_el)[target.char_start:target.char_end]
+            else:
+                old_text = _get_para_text(para_el)
             if tc:
                 tc_replace_first_in_para(para_el, old_text, new_text, tc_id, author)
             else:
@@ -471,6 +478,23 @@ def _direct_insert(para_el, text: str, offset: int) -> None:
     t.text = text
     if text and (text[0] == " " or text[-1] == " "):
         t.set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
+    if offset >= 0:
+        _char_pos = 0
+        _target_t = None
+        for _t_el in para_el.iter(f"{W}t"):
+            _tlen = len(_t_el.text or "")
+            if _char_pos + _tlen > offset:
+                _target_t = _t_el
+                break
+            _char_pos += _tlen
+        if _target_t is not None:
+            _ins_pos = offset - _char_pos
+            _old = _target_t.text or ""
+            _target_t.text = _old[:_ins_pos] + text + _old[_ins_pos:]
+            # Remove the appended run since we inserted inline
+            para_el.remove(r)
+            if text and (text[0] == " " or text[-1] == " "):
+                _target_t.set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
 
 
 def _apply_format_to_range(para_el, start: int, end: int, fmt: dict) -> None:
@@ -591,7 +615,8 @@ def _handle_tc(args: dict, **kwargs) -> str:
 
     if op == "list":
         items = tc_ops.list_tc(doc, author_filter=author,
-                               para_range=para_range, type_filter=type_filter)
+                               para_range=para_range, type_filter=type_filter,
+                               include_tables=include_tables)
         return tool_result({"ok": True, "op": "list", "tc_items": items,
                             "count": len(items)})
 

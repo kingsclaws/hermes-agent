@@ -168,7 +168,8 @@ def revision_text(el, tc_type: str, max_len: int = 120) -> str:
 
 def iter_revision_records(doc, author_filter: str | None = None,
                           para_range: tuple[int, int] | None = None,
-                          type_filter: str | None = None):
+                          type_filter: str | None = None,
+                          include_tables: bool = False):
     para_map = paragraph_index_map(doc)
     for el in doc.element.body.iter():
         if el.tag not in (qn("w:ins"), qn("w:del")):
@@ -180,7 +181,7 @@ def iter_revision_records(doc, author_filter: str | None = None,
             continue
         p_el = ancestor_paragraph(el)
         para_idx = para_map.get(el_key(p_el)) if p_el is not None else None
-        if not in_para_range(para_idx, para_range):
+        if not in_para_range(para_idx, para_range, include_tables=include_tables):
             continue
         yield RevisionRecord(
             el=el,
