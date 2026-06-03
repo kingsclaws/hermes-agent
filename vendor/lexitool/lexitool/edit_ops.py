@@ -799,6 +799,90 @@ def insert_table_rows(docx_path: str, table_index: int, template_row_index: int,
 	                  path=output or docx_path)
 
 
+# ── Table creation ────────────────────────────────────────────────────────────
+
+def create_table(docx_path: str, after_para: int,
+                 headers: list[str], rows: list[list[str]], *,
+                 font: str = "宋体", font_size: float = 11.0,
+                 output: str | None = None) -> EditResult:
+    """
+    Create a new table and insert it after the specified paragraph.
+
+    after_para: 0-indexed paragraph number to insert after
+    headers: column header texts
+    rows: list of rows, each row is a list of cell text strings
+    """
+    if not headers and not rows:
+        return EditResult(ok=False, message="headers or rows required", path=docx_path)
+
+    doc_xml, other = _read_docx(docx_path)
+    root = etree.fromstring(doc_xml)
+    body = root.find(f"{W}body")
+    if body is None:
+        return EditResult(ok=False, message="Document body not found", path=docx_path)
+
+    all_paras = [el for el in body if el.tag == f"{W}p"]
+    if after_para < 0 or after_para >= len(all_paras):
+        return EditResult(ok=False,
+                          message=f"Paragraph {after_para} out of range (0-{len(all_paras)-1})",
+                          path=docx_path)
+
+    anchor = all_paras[after_para]
+    ncols = max(len(headers), max((len(r) for r in rows), default=0))
+    if ncols == 0:
+        return EditResult(ok=False, message="No columns to create", path=docx_path)
+
+    sz = float(font_size) * 2
+    col_width = str(int(9000 / ncols))  # Distribute width in twips (~5000 pct ≈ page width)
+
+    tbl = etree.Element(f"{W}tbl")
+
+    # tblPr
+    tblPr = etree.SubElement(tbl, f"{W}tblPr")
+    etree.SubElement(tblPr, f"{W}tblStyle").set(f"{W}val", "TableGrid")
+    tblW = etree.SubElement(tblPr, f"{W}tblW")
+    tblW.set(f"{W}w", "5000"); tblW.set(f"{W}type", "pct")
+
+    # tblGrid
+    tblGrid = etree.SubElement(tbl, f"{W}tblGrid")
+    for _ in range(ncols):
+        gc = etree.SubElement(tblGrid, f"{W}gridCol")
+        gc.set(f"{W}w", col_width)
+
+    def _make_cell(text: str, bold: bool = False) -> etree._Element:
+        tc = etree.Element(f"{W}tc")
+        p = etree.SubElement(tc, f"{W}p")
+        p.append(_make_run(text, bold=bold, font=font, sz=sz))
+        return tc
+
+    # Header row
+    if headers:
+        tr = etree.SubElement(tbl, f"{W}tr")
+        for h in headers:
+            tr.append(_make_cell(h or "", bold=True))
+        # Pad missing header cells
+        for _ in range(ncols - len(headers)):
+            tr.append(_make_cell("", bold=True))
+
+    # Data rows
+    for row in rows:
+        tr = etree.SubElement(tbl, f"{W}tr")
+        for cell_text in row[:ncols]:
+            tr.append(_make_cell(str(cell_text) if cell_text is not None else ""))
+        for _ in range(ncols - len(row)):
+            tr.append(_make_cell(""))
+
+    # Insert after anchor paragraph
+    anchor.addnext(tbl)
+
+    _write_docx(docx_path, etree.tostring(root, xml_declaration=True,
+                                          encoding="UTF-8", standalone=True),
+                other, output=output)
+    return EditResult(ok=True,
+                      message=f"Created table ({ncols} cols, {len(headers) and 1 + len(rows)} rows) after paragraph {after_para}",
+                      path=output or docx_path)
+
+
 # ── Paragraph block insertion ─────────────────────────────────────────────────
 
 def insert_paragraph_block(docx_path: str, after_para: int,

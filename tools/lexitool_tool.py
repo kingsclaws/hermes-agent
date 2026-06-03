@@ -176,11 +176,13 @@ LEX_EDIT_SCHEMA = {
                     "replace", "insert", "delete", "set_format",
                     "replace_table_cell", "replace_table_cells",
                     "insert_table_rows", "insert_paragraphs",
+                    "create_table",
                 ],
                 "description": (
                     "Operation type. Paragraph-level: replace, insert, delete, set_format. "
                     "Table-level: replace_table_cell (single cell), replace_table_cells (batch), "
-                    "insert_table_rows (copy template row with cell text). "
+                    "insert_table_rows (copy template row with cell text), "
+                    "create_table (insert a new table with headers and data rows). "
                     "Block-level: insert_paragraphs (insert multiple paras after anchor)."
                 ),
             },
@@ -244,7 +246,7 @@ LEX_EDIT_SCHEMA = {
             },
             "after_para": {
                 "type": "integer",
-                "description": "0-indexed paragraph number to insert after. For insert_paragraphs.",
+                "description": "0-indexed paragraph number to insert after. For insert_paragraphs and create_table.",
             },
             "paragraphs": {
                 "type": "array",
@@ -258,6 +260,19 @@ LEX_EDIT_SCHEMA = {
                     "required": ["text"],
                 },
                 "description": "List of {text, bold?, page_break_before?}. For insert_paragraphs.",
+            },
+            "headers": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Column header texts. For create_table.",
+            },
+            "rows": {
+                "type": "array",
+                "items": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                },
+                "description": "Table data rows, each a list of cell text strings. For create_table.",
             },
         },
         "required": ["path", "op"],
@@ -285,7 +300,8 @@ def _handle_edit(args: dict, **kwargs) -> str:
 
     # ── Table / block operations (no target needed) ──────────────────────────
     if op in ("replace_table_cell", "replace_table_cells",
-              "insert_table_rows", "insert_paragraphs"):
+              "insert_table_rows", "insert_paragraphs",
+              "create_table"):
         try:
             if op == "replace_table_cell":
                 table_index = args.get("table_index", 0)
@@ -330,6 +346,19 @@ def _handle_edit(args: dict, **kwargs) -> str:
                     return tool_error("'paragraphs' is required for insert_paragraphs")
                 res = insert_paragraph_block(
                     path, after_para, paragraphs,
+                    output=path,
+                )
+
+            elif op == "create_table":
+                from lexitool.edit_ops import create_table
+                after_para = args.get("after_para", 0)
+                headers = args.get("headers", [])
+                rows = args.get("rows", [])
+                if not headers and not rows:
+                    return tool_error("'headers' or 'rows' is required for create_table")
+                res = create_table(
+                    path, after_para, headers, rows,
+                    font_size=font_size,
                     output=path,
                 )
 
