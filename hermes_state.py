@@ -293,6 +293,7 @@ CREATE TABLE IF NOT EXISTS projects (
     client TEXT DEFAULT '',
     goal TEXT DEFAULT '',
     path TEXT NOT NULL,
+    cwd TEXT DEFAULT '',
     status TEXT NOT NULL DEFAULT 'INIT',
     notes TEXT DEFAULT '',
     created_at REAL NOT NULL,
@@ -2698,7 +2699,7 @@ class SessionDB:
     # ── Project management ──
 
     def create_project(
-        self, name: str, path: str, client: str = "", goal: str = ""
+        self, name: str, path: str, client: str = "", goal: str = "", cwd: str = ""
     ) -> str:
         """Create a project record and return its ID."""
         import uuid as _uuid
@@ -2708,10 +2709,10 @@ class SessionDB:
 
         def _do(conn):
             conn.execute(
-                """INSERT INTO projects (id, name, client, goal, path, status,
+                """INSERT INTO projects (id, name, client, goal, path, cwd, status,
                    created_at, updated_at)
-                   VALUES (?, ?, ?, ?, ?, 'INIT', ?, ?)""",
-                (project_id, name, client, goal, path, now, now),
+                   VALUES (?, ?, ?, ?, ?, ?, 'INIT', ?, ?)""",
+                (project_id, name, client, goal, path, cwd, now, now),
             )
 
         self._execute_write(_do)
@@ -2763,7 +2764,7 @@ class SessionDB:
 
     def update_project(self, project_id: str, **fields) -> bool:
         """Update project fields. Returns True if a row was updated."""
-        allowed = {"name", "client", "goal", "path", "status", "notes"}
+        allowed = {"name", "client", "goal", "path", "cwd", "status", "notes"}
         updates = {k: v for k, v in fields.items() if k in allowed}
         if not updates:
             return False

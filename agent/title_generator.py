@@ -4,8 +4,10 @@ Runs asynchronously after the first response is delivered so it never
 adds latency to the user-facing reply.
 """
 
+import json
 import logging
 import threading
+from pathlib import Path
 from typing import Callable, Optional
 
 from agent.auxiliary_client import call_llm
@@ -84,6 +86,19 @@ def generate_title(
         return None
 
 
+def _read_project_name() -> Optional[str]:
+    """Read project name from .hermes-project/project-meta.json in cwd."""
+    try:
+        meta_path = Path.cwd() / ".hermes-project" / "project-meta.json"
+        if not meta_path.is_file():
+            return None
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        name = meta.get("name", "").strip()
+        return name if name else None
+    except Exception:
+        return None
+
+
 def auto_title_session(
     session_db,
     session_id: str,
@@ -100,6 +115,9 @@ def auto_title_session(
     - session_db is None
     - session already has a title (user-set or previously auto-generated)
     - title generation fails
+
+    When cwd contains a .hermes-project/project-meta.json, the project
+    name is used as the session title instead of LLM-based generation.
     """
     if not session_db or not session_id:
         return
@@ -112,9 +130,13 @@ def auto_title_session(
     except Exception:
         return
 
-    title = generate_title(
-        user_message, assistant_response, failure_callback=failure_callback, main_runtime=main_runtime
-    )
+    # Prefer project name from .hermes-project/project-meta.json
+    title = _read_project_name()
+
+    if not title:
+        title = generate_title(
+            user_message, assistant_response, failure_callback=failure_callback, main_runtime=main_runtime
+        )
     if not title:
         return
 

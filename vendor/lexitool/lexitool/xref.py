@@ -5,9 +5,11 @@ Converts static "第X条(title)" patterns into clickable w:hyperlink elements
 pointing to heading bookmarks. Preserves all run-level formatting.
 
 Operations:
-  - scan_xrefs: Dry-run scan showing what xrefs exist and what they'd link to
-  - auto_xref:   Full conversion — add bookmarks, flatten broken field codes,
-                  wrap xref text in hyperlinks
+  - scan_xrefs:    Dry-run scan showing what xrefs exist and what they'd link to
+  - auto_xref:     Full conversion — add bookmarks, flatten broken field codes,
+                    wrap xref text in hyperlinks
+  - cross_doc_scan: Multi-document scan — detect cross-document references
+                    and validate they point to existing docs and clauses
 """
 from __future__ import annotations
 
@@ -17,6 +19,8 @@ import shutil
 import tempfile
 import zipfile
 from copy import deepcopy
+from pathlib import Path
+from typing import Dict, List, Optional, Set
 
 from lxml import etree
 
@@ -403,170 +407,441 @@ def auto_xref(doc_path: str) -> dict:
     }
 
 
-# ── Cross-document scan ─────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+# Cross-Document Reference Scanner
+# ═══════════════════════════════════════════════════════════════════════════════
 
-# Regex patterns for cross-document references
-_CROSS_DOC_CHINESE = re.compile(
-    r'[《「]([^》」]{2,80})[》」]\s*第\s*(\d+(?:\.\d+)*)\s*条'
+# Chinese numeral → digit mapping for clause references
+_CN_NUM_MAP = {
+    '一': '1', '二': '2', '三': '3', '四': '4', '五': '5',
+    '六': '6', '七': '7', '八': '8', '九': '9', '十': '10',
+}
+
+def _cn_to_digit(cn_num: str) -> str:
+    """Convert a simple Chinese numeral to digit string. Handles 一-十, 十二, 二十一, etc."""
+    # Already a digit
+    if cn_num.isdigit():
+        return cn_num
+    # Try direct mapping
+    if cn_num in _CN_NUM_MAP:
+        return _CN_NUM_MAP[cn_num]
+    # Compound: 十一, 十二, 二十, 二十一, etc.
+    if '十' in cn_num:
+        result = 0
+        parts = cn_num.split('十')
+        if parts[0] == '':
+            result = 10
+        else:
+            result = int(_CN_NUM_MAP.get(parts[0], 0)) * 10
+        if len(parts) > 1 and parts[1]:
+            result += int(_CN_NUM_MAP.get(parts[1], 0))
+        return str(result)
+    return cn_num
+
+
+def _cn_clause_to_digit(match_text: str) -> str:
+    """Convert '第三条' or '第三.二条' to '3' or '3.2'."""
+    inner = match_text[1:-1]  # strip 第 and 条
+    parts = []
+    for segment in inner.split('.'):
+        # segment is like "三" or "3" or "3.1"
+        sub = []
+        i = 0
+        while i < len(segment):
+            ch = segment[i]
+            if ch.isdigit() or ch == '.':
+                sub.append(ch)
+                i += 1
+            elif ch in _CN_NUM_MAP:
+                # Collect consecutive Chinese numerals
+                cn_part = ch
+                i += 1
+                while i < len(segment) and segment[i] in _CN_NUM_MAP:
+                    cn_part += segment[i]
+                    i += 1
+                sub.append(_cn_to_digit(cn_part))
+            else:
+                i += 1
+        parts.append(''.join(sub))
+    return '.'.join(parts) if parts else inner
+
+
+# Cross-doc reference patterns — match both Chinese and English forms
+# Matches: 《担保合同》第5.3条, 《担保合同》第五条, 《担保合同》第5.3条(保证责任)
+_CROSS_DOC_XREF_RE = re.compile(
+    r'《([^》]+)》\s*第\s*([\d一二三四五六七八九十.]+(?:\.[\d一二三四五六七八九十]+)*)\s*条'
 )
-_CROSS_DOC_ENGLISH = re.compile(
-    r'(?:the|The)\s+([A-Z][A-Za-z\s]{2,60}(?:Agreement|Contract|Deed|Guarantee|Charge|Undertaking|Letter|Schedule|Annex|Appendix))\s+'
-    r'(?:Clause|Section|Article|clause|section|article)\s+(\d+(?:\.\d+)*)'
+_CROSS_DOC_XREF_EN_RE = re.compile(
+    r'(?:the\s+)?[""]([^""]+)[""]\s+(?:Agreement|Contract|Schedule|Appendix|Annex)\s+'
+    r'(?:Clause|Section|Article|Para(?:graph)?)\s*(\d+(?:\.\d+)*)',
+    re.IGNORECASE,
+)
+# Loose English form: "the Loan Agreement, Clause 3.2" or "Guarantee Contract Article 5"
+_CROSS_DOC_XREF_EN_LOOSE_RE = re.compile(
+    r'(?:the\s+)?([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+){0,4})\s*'
+    r'(?:Clause|Section|Article|Para(?:graph)?)\s*(\d+(?:\.\d+)*)',
+)
+# Schedule/attachment refs: 附件1, 附件一, Schedule 1, Appendix A, Annex I
+_SCHEDULE_REF_RE = re.compile(
+    r'(附件[一二三四五六七八九十\d]+|Schedule\s+\d+|[Aa]ppendix\s+[A-Z\d]+|[Aa]nnex\s+[IVX\d]+)'
 )
 
-
-def _build_doc_clause_index(doc_path: str) -> dict[str, set]:
-    """Build clause-number → {heading_texts} map for a single document."""
-    doc_xml, _other, _order = _read_docx(doc_path)
-    root = etree.fromstring(doc_xml)
-    body = root.find(f"{W}body")
-    paras = [c for c in body if c.tag == f"{W}p"]
-    clause_to_pidx = _build_clause_index(paras)
-
-    # Map clause_num → heading text for reporting
-    result = {}
-    for cn, pi in clause_to_pidx.items():
-        p = paras[pi]
-        text = "".join(txt for _, txt in _get_direct_runs(p))
-        result[cn] = text[:80]
-    return result
+# Stop-words for English loose matching — common legal terms that aren't doc names
+_ENGLISH_LEGAL_STOP_WORDS: Set[str] = {
+    "this", "the", "each", "any", "such", "other", "relevant", "applicable",
+    "said", "aforesaid", "herein", "hereto", "hereunder", "hereof",
+    "thereto", "thereof", "therein", "thereunder", "whereby", "whereof",
+}
 
 
-def _extract_filename(doc_path: str) -> str:
-    """Extract meaningful short name from a doc path for matching."""
-    import os
-    base = os.path.splitext(os.path.basename(doc_path))[0]
-    # Remove common suffixes for better matching
-    for suffix in ("_DRAFT", "_FINAL", "_v1", "_v2", "_clean", "_TC", "-DRAFT", "-FINAL"):
-        base = base.replace(suffix, "")
-    return base
+def _doc_name_from_path(path: str) -> str:
+    """Extract a display name from a document path (filename without extension)."""
+    return Path(path).stem
 
 
-def cross_doc_scan(doc_paths: list[str]) -> dict:
-    """Scan for cross-document references across a set of .docx files.
+def _build_doc_name_map(paths: List[str]) -> Dict[str, str]:
+    """Build a lookup: doc display name → full path.
+
+    Supports matching by:
+    - Full stem (e.g. '担保合同' matches '担保合同.docx')
+    - Stem with parent dir prefix for disambiguation
+    Returns a dict where keys are lowercase for case-insensitive matching.
+    """
+    name_map: Dict[str, str] = {}
+    for p in paths:
+        stem = _doc_name_from_path(p)
+        name_map[stem.lower()] = p
+        # Also index common aliases — strip suffixes like （终稿）/（修订版）
+        clean = re.sub(r'[（(][^)）]*[)）]$', '', stem).strip()
+        if clean.lower() != stem.lower():
+            name_map[clean.lower()] = p
+    return name_map
+
+
+def _extract_all_runs_text(paras: list) -> List[str]:
+    """Extract full text of each paragraph from lxml paragraph elements."""
+    texts = []
+    for p in paras:
+        runs = p.findall(f".//{W}t")
+        para_text = "".join((r.text or "") for r in runs)
+        texts.append(para_text)
+    return texts
+
+
+def cross_doc_scan(docs: List[str]) -> dict:
+    """Scan a set of documents for cross-document references and validate them.
+
+    For each document, detects references to OTHER documents in the set —
+    e.g. 《担保合同》第5.3条 referencing a clause in a separate guarantee doc.
+    Validates that the target document exists and the referenced clause is
+    present in that document's heading structure.
 
     Args:
-        doc_paths: List of .docx file paths that form the document set.
+        docs: List of absolute paths to .docx files. All docs are scanned
+              for cross-references to each other.
 
     Returns:
         {
             "ok": True,
-            "refs": [{
-                "source_doc": "...",
-                "source_para": N,
-                "ref_text": "《担保合同》第5条",
-                "target_doc": "Guarantee.docx",
-                "target_clause": "5",
-                "status": "valid" | "broken_doc" | "broken_clause" | "unchecked",
-                "target_clause_text": "heading text or None",
-            }],
-            "broken_refs": [...],
+            "docs_scanned": N,
+            "total_refs": T,
+            "broken_refs": [{"source": path, "target_doc": name, "clause": cn,
+                              "match": "...", "reason": "..."}],
             "valid_refs": [...],
-            "summary": {"total": N, "valid": N, "broken": N, "unchecked": N},
+            "schedule_refs": [...],   # attachments detected (not validated)
+            "summary": {"total": T, "broken": B, "valid": V}
         }
     """
-    if not doc_paths:
-        return {"ok": True, "refs": [], "broken_refs": [], "valid_refs": [],
-                "summary": {"total": 0, "valid": 0, "broken": 0, "unchecked": 0}}
+    if not docs or len(docs) < 2:
+        return {
+            "ok": True,
+            "docs_scanned": len(docs) if docs else 0,
+            "total_refs": 0,
+            "broken_refs": [],
+            "valid_refs": [],
+            "schedule_refs": [],
+            "summary": {"total": 0, "broken": 0, "valid": 0, "schedules": 0},
+            "note": "Need at least 2 documents for cross-doc scan",
+        }
 
-    # Build short-name → full-path map for matching
-    import os
-    name_map = {}  # short_name → full_path
-    for p in doc_paths:
-        short = _extract_filename(p)
-        name_map[short.lower()] = p
-        # Also index by basename without extension
-        name_map[os.path.splitext(os.path.basename(p))[0].lower()] = p
+    # Build name → path map and clause index for each document
+    name_map = _build_doc_name_map(docs)
+    doc_clause_indices: Dict[str, Dict[str, int]] = {}  # path → {clause_num: para_idx}
+    doc_para_texts: Dict[str, List[str]] = {}  # path → [para_text, ...]
 
-    # Build clause index for each document
-    doc_clauses = {}  # full_path → {clause_num: heading_text}
-    for p in doc_paths:
+    for p in docs:
         try:
-            doc_clauses[p] = _build_doc_clause_index(p)
-        except Exception:
-            doc_clauses[p] = {}
-
-    all_refs = []
-
-    for src_path in doc_paths:
-        try:
-            doc_xml, _other, _order = _read_docx(src_path)
+            doc_xml, _other, _order = _read_docx(p)
             root = etree.fromstring(doc_xml)
             body = root.find(f"{W}body")
             paras = [c for c in body if c.tag == f"{W}p"]
+            doc_clause_indices[p] = _build_clause_index(paras)
+            doc_para_texts[p] = _extract_all_runs_text(paras)
         except Exception:
+            doc_clause_indices[p] = {}
+            doc_para_texts[p] = []
+
+    broken_refs = []
+    valid_refs = []
+    schedule_refs = []
+
+    for src_path in docs:
+        src_name = _doc_name_from_path(src_path)
+        para_texts = doc_para_texts.get(src_path, [])
+
+        for pi, para_text in enumerate(para_texts):
+            # ── Chinese cross-doc refs: 《DOC_NAME》第X条 ──
+            for m in _CROSS_DOC_XREF_RE.finditer(para_text):
+                target_name = m.group(1).strip()
+                clause_raw = m.group(2)
+                clause_num = _cn_clause_to_digit(f"第{clause_raw}条")
+                full_match = m.group(0)
+
+                # Resolve target doc
+                target_path = name_map.get(target_name.lower())
+                if target_path:
+                    target_stem = _doc_name_from_path(target_path)
+                    if target_stem.lower() == src_name.lower():
+                        continue  # Same-doc ref → handled by scan_xrefs, skip here
+                    clause_idx = doc_clause_indices.get(target_path, {})
+                    if clause_num in clause_idx:
+                        valid_refs.append({
+                            "source": src_path,
+                            "source_para": pi + 1,
+                            "target_doc": target_name,
+                            "target_path": target_path,
+                            "clause": clause_num,
+                            "match": full_match,
+                        })
+                    else:
+                        available = list(clause_idx.keys())[:20]
+                        broken_refs.append({
+                            "source": src_path,
+                            "source_para": pi + 1,
+                            "target_doc": target_name,
+                            "target_path": target_path,
+                            "clause": clause_num,
+                            "match": full_match,
+                            "reason": f"Document '{target_name}' found but clause {clause_num} not in headings. "
+                                      f"Available clauses: {available}",
+                        })
+                else:
+                    # Target doc not in the document set
+                    available_docs = sorted(set(_doc_name_from_path(d) for d in docs))
+                    broken_refs.append({
+                        "source": src_path,
+                        "source_para": pi + 1,
+                        "target_doc": target_name,
+                        "target_path": None,
+                        "clause": clause_num,
+                        "match": full_match,
+                        "reason": f"Target document '{target_name}' not found in project. "
+                                  f"Available documents: {available_docs}",
+                    })
+
+            # ── Schedule/attachment refs ──
+            for m in _SCHEDULE_REF_RE.finditer(para_text):
+                schedule_refs.append({
+                    "source": src_path,
+                    "source_para": pi + 1,
+                    "match": m.group(0),
+                })
+
+    total = len(valid_refs) + len(broken_refs)
+    return {
+        "ok": len(broken_refs) == 0,
+        "docs_scanned": len(docs),
+        "total_refs": total,
+        "broken_refs": broken_refs,
+        "valid_refs": valid_refs,
+        "schedule_refs": schedule_refs,
+        "summary": {
+            "total": total,
+            "broken": len(broken_refs),
+            "valid": len(valid_refs),
+            "schedules": len(schedule_refs),
+        },
+    }
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Cross-Reference Audit (single document, comprehensive)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Patterns covering both Chinese and English clause references
+_XREF_AUDIT_PATTERNS = [
+    # Chinese: 第X条, 第X.Y条, 第X.Y.Z条 — numeric
+    (re.compile(r'第(\d+(?:\.\d+)*)条'), "cn"),
+    # Chinese: 第一条, 第二条, 第十二条 — Chinese numerals
+    (re.compile(r'第([一二三四五六七八九十百]+(?:\.\d+)*)条'), "cn_numeral"),
+    # English: Section X / Section X.Y
+    (re.compile(r'[Ss]ection\s+(\d+(?:\.\d+)*)'), "en"),
+    # English: Clause X / Clause X.Y
+    (re.compile(r'[Cc]lause\s+(\d+(?:\.\d+)*)'), "en"),
+    # English: Article X / Article X.Y
+    (re.compile(r'[Aa]rticle\s+(\d+(?:\.\d+)*)'), "en"),
+]
+
+# Build clause index from all heading styles (not just AOHead)
+_HEADING_STYLES = frozenset({
+    "Heading1", "Heading2", "Heading3", "Heading4",
+    "Heading5", "Heading6", "Heading7", "Heading8", "Heading9",
+    "AOHead1", "AOHead2", "AOHead3", "AOHead4",
+    "AOAltHead3", "AOAltHead4",  # schedule/appendix heading variants
+    "1", "2", "3", "4", "5", "6", "7", "8", "9",  # standard Word heading style IDs
+})
+
+
+def _build_broad_clause_index(paras: list) -> dict[str, int]:
+    """Build clause-number → paragraph-index map from all heading styles.
+
+    Falls back to scanning paragraph text for '第X条' patterns when no
+    heading styles are found (covers manually-numbered documents).
+    """
+    clause_to_pidx: dict[str, int] = {}
+
+    # Pass 1: heading styles (AOHead or standard Heading)
+    counters: dict[int, int] = {}
+    for pi, p in enumerate(paras):
+        pPr = p.find(f"{W}pPr")
+        if pPr is None:
+            continue
+        ps = pPr.find(f"{W}pStyle")
+        if ps is None:
+            continue
+        style = ps.get(f"{W}val", "")
+        if style not in _HEADING_STYLES:
             continue
 
-        src_name = os.path.basename(src_path)
+        # Determine level (1-9)
+        level = 1
+        for c in reversed(style):
+            if c.isdigit():
+                level = int(c)
+                break
 
+        # Increment counter at this level; reset deeper levels
+        counters[level] = counters.get(level, 0) + 1
+        for l in range(level + 1, 10):
+            counters[l] = 0
+
+        # Build clause number like "3" or "3.1" or "3.1.2"
+        parts = [str(counters[l]) for l in sorted(counters) if counters[l] > 0 and l <= level]
+        cn = ".".join(parts) if parts else str(counters[level])
+        clause_to_pidx[cn] = pi
+
+    # Pass 2: if no heading styles found, detect clauses from paragraph text
+    if not clause_to_pidx:
+        manual_clause = re.compile(r'^第(\d+(?:\.\d+)*)条')
         for pi, p in enumerate(paras):
             full_text = "".join(txt for _, txt in _get_direct_runs(p))
+            m = manual_clause.match(full_text.strip())
+            if m:
+                cn = m.group(1)
+                if cn not in clause_to_pidx:
+                    clause_to_pidx[cn] = pi
 
-            # Chinese cross-doc refs
-            for m in _CROSS_DOC_CHINESE.finditer(full_text):
-                doc_title = m.group(1).strip()
-                clause_num = m.group(2)
-                target_path = name_map.get(doc_title.lower())
-                status = "unchecked"
-                target_text = None
+    return clause_to_pidx
 
-                if target_path is None:
-                    status = "broken_doc"
-                elif clause_num not in doc_clauses.get(target_path, {}):
-                    status = "broken_clause"
+
+def xref_audit(doc_path: str) -> dict:
+    """Audit all cross-references in a document against actual clause headings.
+
+    Finds every reference to a clause (both Chinese 第X条 and English
+    Section/Clause/Article patterns) and checks whether the referenced
+    clause actually exists in the document's heading structure.
+
+    Returns:
+        {
+            "ok": True,
+            "clauses_indexed": N,       # total clauses found in headings
+            "total_references": T,      # total references found
+            "valid_refs": [...],        # references that resolve to a clause
+            "dead_refs": [...],         # references to non-existing clauses
+            "unreferenced_clauses": [cn, ...],  # clauses never referenced
+            "summary": "..."
+        }
+
+    Each reference entry:
+        {
+            "para": int,                # paragraph number (1-indexed)
+            "ref_text": "第3.1条",      # the matched reference text
+            "clause_num": "3.1",       # the referenced clause number
+            "status": "valid" | "dead",
+            "target_para": int | null,  # paragraph of target clause (if valid)
+            "context": "...",           # surrounding text (~80 chars)
+        }
+    """
+    doc_xml, _other, _order = _read_docx(doc_path)
+    root = etree.fromstring(doc_xml)
+    body = root.find(f"{W}body")
+    paras = [c for c in body if c.tag == f"{W}p"]
+
+    clause_to_pidx = _build_broad_clause_index(paras)
+    referenced_clauses: set[str] = set()
+
+    valid_refs: list[dict] = []
+    dead_refs: list[dict] = []
+
+    for pi, p in enumerate(paras):
+        full_text = "".join(txt for _, txt in _get_direct_runs(p))
+        if not full_text.strip():
+            continue
+
+        for pattern, ref_type in _XREF_AUDIT_PATTERNS:
+            for m in pattern.finditer(full_text):
+                raw_cn = m.group(1)
+                if ref_type == "cn_numeral":
+                    cn = _cn_to_digit(raw_cn)
                 else:
-                    status = "valid"
-                    target_text = doc_clauses[target_path][clause_num]
+                    cn = raw_cn
 
-                all_refs.append({
-                    "source_doc": src_name,
-                    "source_para": pi + 1,
+                referenced_clauses.add(cn)
+
+                # Extract context (~80 chars around the match)
+                ctx_start = max(0, m.start() - 30)
+                ctx_end = min(len(full_text), m.end() + 50)
+                context = full_text[ctx_start:ctx_end].replace("\t", " ")
+                if ctx_start > 0:
+                    context = "…" + context
+                if ctx_end < len(full_text):
+                    context += "…"
+
+                entry = {
+                    "para": pi + 1,
                     "ref_text": m.group(0),
-                    "target_doc_title": doc_title,
-                    "target_clause": clause_num,
-                    "status": status,
-                    "target_clause_text": target_text,
-                })
+                    "clause_num": cn,
+                    "context": context,
+                }
 
-            # English cross-doc refs
-            for m in _CROSS_DOC_ENGLISH.finditer(full_text):
-                doc_title = m.group(1).strip()
-                clause_num = m.group(2)
-                target_path = name_map.get(doc_title.lower())
-                status = "unchecked"
-                target_text = None
-
-                if target_path is None:
-                    status = "broken_doc"
-                elif clause_num not in doc_clauses.get(target_path, {}):
-                    status = "broken_clause"
+                if cn in clause_to_pidx:
+                    entry["status"] = "valid"
+                    entry["target_para"] = clause_to_pidx[cn] + 1
+                    valid_refs.append(entry)
                 else:
-                    status = "valid"
-                    target_text = doc_clauses[target_path][clause_num]
+                    entry["status"] = "dead"
+                    entry["target_para"] = None
+                    dead_refs.append(entry)
 
-                all_refs.append({
-                    "source_doc": src_name,
-                    "source_para": pi + 1,
-                    "ref_text": m.group(0),
-                    "target_doc_title": doc_title,
-                    "target_clause": clause_num,
-                    "status": status,
-                    "target_clause_text": target_text,
-                })
+    unreferenced = sorted(
+        [cn for cn in clause_to_pidx if cn not in referenced_clauses],
+        key=lambda x: tuple(int(p) for p in x.split(".")),
+    )
 
-    broken = [r for r in all_refs if r["status"] in ("broken_doc", "broken_clause")]
-    valid = [r for r in all_refs if r["status"] == "valid"]
+    total = len(valid_refs) + len(dead_refs)
+    all_ok = len(dead_refs) == 0
 
     return {
-        "ok": True,
-        "refs": all_refs,
-        "broken_refs": broken,
-        "valid_refs": valid,
-        "summary": {
-            "total": len(all_refs),
-            "valid": len(valid),
-            "broken": len(broken),
-            "unchecked": len(all_refs) - len(valid) - len(broken),
-        },
-        "documents_scanned": len(doc_paths),
+        "ok": all_ok,
+        "clauses_indexed": len(clause_to_pidx),
+        "total_references": total,
+        "valid_refs": valid_refs,
+        "dead_refs": dead_refs,
+        "unreferenced_clauses": unreferenced,
+        "summary": (
+            f"{total} references found: "
+            f"{len(valid_refs)} valid, "
+            f"{len(dead_refs)} dead, "
+            f"{len(unreferenced)} clauses unreferenced"
+        ),
     }

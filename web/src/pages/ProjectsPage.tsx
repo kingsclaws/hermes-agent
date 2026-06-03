@@ -222,7 +222,7 @@ export default function ProjectsPage() {
                       {proj.created && (
                         <span className="flex items-center gap-1">
                           <Calendar className="h-3 w-3" />
-                          {timeAgo(proj.created)}
+                          {timeAgo(new Date(proj.created).getTime() / 1000)}
                         </span>
                       )}
                       <span className="flex items-center gap-1">

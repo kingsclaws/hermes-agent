@@ -4,6 +4,7 @@ Consolidates ~30 lex_docx tools into 10 focused tools:
   lex_read    — Read document content with inline format markup
   lex_stats   — Document statistics and diagnostics
   lex_edit    — Atomic text edits with optional TC tracking
+  lex_tc      — Track Changes: list, accept, or reject insertions/deletions
   lex_format  — Apply formatting to ranges
   lex_list    — Bullet and numbered list management
   lex_ref     — Bookmarks and cross-references
@@ -11,6 +12,8 @@ Consolidates ~30 lex_docx tools into 10 focused tools:
   lex_doc     — Document-level operations (create, clean, TOC, merge)
   lex_clause  — Clause-level operations (split, extract, insert, compare)
   lex_corpus  — Multi-document corpus indexing and search
+  lex_diff    — Document comparison with tracked-changes redline (quicompare)
+  lex_xref_audit — Cross-reference audit: find dead links and unreferenced clauses
 """
 from __future__ import annotations
 
@@ -142,15 +145,22 @@ def _handle_stats(args: dict, **kwargs) -> str:
 LEX_EDIT_SCHEMA = {
     "name": "lex_edit",
     "description": (
-        "Atomically edit text in a .docx file. Supports replace, insert, delete, "
-        "and set_format operations with optional Track Changes.\n\n"
+        "Atomically edit text in a .docx file. Supports paragraph-level, "
+        "table-level, and block-level operations with optional Track Changes.\n\n"
+        "## Paragraph-level ops (require 'target')\n"
         "Target syntax:\n"
         "  §3           = entire paragraph 3\n"
         "  §3:5-10      = characters 5-10 in paragraph 3\n"
         "  §3:r2        = run 2 in paragraph 3\n"
         "  §3:r2:5-10   = characters 5-10 in run 2 of paragraph 3\n"
         "  §3-7         = paragraphs 3 through 7\n\n"
-        "Use lex_read first to see § numbers and format markup, "
+        "## Table-level ops (require 'table_index')\n"
+        "- replace_table_cell: find cell by old_text, replace with new_text\n"
+        "- replace_table_cells: batch {old, new} across table cells\n"
+        "- insert_table_rows: copy template_row, fill cell text from rows_data\n\n"
+        "## Block-level ops\n"
+        "- insert_paragraphs: insert paras with optional page breaks after after_para\n\n"
+        "Use lex_read first to see § numbers and table structure, "
         "then target your edits precisely."
     ),
     "parameters": {
@@ -162,8 +172,17 @@ LEX_EDIT_SCHEMA = {
             },
             "op": {
                 "type": "string",
-                "enum": ["replace", "insert", "delete", "set_format"],
-                "description": "Operation type.",
+                "enum": [
+                    "replace", "insert", "delete", "set_format",
+                    "replace_table_cell", "replace_table_cells",
+                    "insert_table_rows", "insert_paragraphs",
+                ],
+                "description": (
+                    "Operation type. Paragraph-level: replace, insert, delete, set_format. "
+                    "Table-level: replace_table_cell (single cell), replace_table_cells (batch), "
+                    "insert_table_rows (copy template row with cell text). "
+                    "Block-level: insert_paragraphs (insert multiple paras after anchor)."
+                ),
             },
             "target": {
                 "type": "string",
@@ -181,26 +200,161 @@ LEX_EDIT_SCHEMA = {
                 "type": "boolean",
                 "description": "Track Changes mode. Default: true.",
             },
+            "author": {
+                "type": "string",
+                "description": "Author name for Track Changes annotations. Default: 'ai-agent'.",
+            },
+            "font_size": {
+                "type": "string",
+                "description": "Font size for replacement text, e.g. '11pt'. Default: '11pt'.",
+            },
+            # -- Table / block parameters --
+            "table_index": {
+                "type": "integer",
+                "description": "0-indexed table number. For replace_table_cell, replace_table_cells, insert_table_rows.",
+            },
+            "old_text": {
+                "type": "string",
+                "description": "Text to find in the table cell. For replace_table_cell.",
+            },
+            "replacements": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "old": {"type": "string"},
+                        "new": {"type": "string"},
+                        "bold": {"type": "boolean"},
+                    },
+                    "required": ["old", "new"],
+                },
+                "description": "List of {old, new, bold?} for batch cell replacement. For replace_table_cells.",
+            },
+            "template_row": {
+                "type": "integer",
+                "description": "0-indexed row to copy as template. For insert_table_rows.",
+            },
+            "rows_data": {
+                "type": "array",
+                "items": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                },
+                "description": "List of rows, each a list of cell text strings. For insert_table_rows.",
+            },
+            "after_para": {
+                "type": "integer",
+                "description": "0-indexed paragraph number to insert after. For insert_paragraphs.",
+            },
+            "paragraphs": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "text": {"type": "string"},
+                        "bold": {"type": "boolean"},
+                        "page_break_before": {"type": "boolean"},
+                    },
+                    "required": ["text"],
+                },
+                "description": "List of {text, bold?, page_break_before?}. For insert_paragraphs.",
+            },
         },
-        "required": ["path", "op", "target"],
+        "required": ["path", "op"],
     },
 }
 
 
 def _handle_edit(args: dict, **kwargs) -> str:
     from lxml import etree
+    from lexitool.edit_ops import (
+        _read_docx, _write_docx,
+        replace_table_cell_text, replace_table_cell_text_all,
+        insert_table_rows, insert_paragraph_block,
+    )
+
+    path = _resolve_path(args["path"])
+    op = args["op"]
+    tc = args.get("tc", True)
+    author = args.get("author", "ai-agent")
+    font_size_str = args.get("font_size", "11pt")
+    try:
+        font_size = float(font_size_str.replace("pt", ""))
+    except (ValueError, AttributeError):
+        font_size = 11.0
+
+    # ── Table / block operations (no target needed) ──────────────────────────
+    if op in ("replace_table_cell", "replace_table_cells",
+              "insert_table_rows", "insert_paragraphs"):
+        try:
+            if op == "replace_table_cell":
+                table_index = args.get("table_index", 0)
+                old_text = args.get("old_text", "")
+                new_text = args.get("new_text", "")
+                if not old_text:
+                    return tool_error("'old_text' is required for replace_table_cell")
+                res = replace_table_cell_text(
+                    path, table_index, old_text, new_text,
+                    tc=tc, author=author,
+                    font_size=font_size,
+                    output=path,
+                )
+
+            elif op == "replace_table_cells":
+                table_index = args.get("table_index", 0)
+                replacements = args.get("replacements", [])
+                if not replacements:
+                    return tool_error("'replacements' is required for replace_table_cells")
+                res = replace_table_cell_text_all(
+                    path, table_index, replacements,
+                    tc=tc, author=author,
+                    font_size=font_size,
+                    output=path,
+                )
+
+            elif op == "insert_table_rows":
+                table_index = args.get("table_index", 0)
+                template_row = args.get("template_row", 0)
+                rows_data = args.get("rows_data", [])
+                if not rows_data:
+                    return tool_error("'rows_data' is required for insert_table_rows")
+                res = insert_table_rows(
+                    path, table_index, template_row, rows_data,
+                    output=path,
+                )
+
+            elif op == "insert_paragraphs":
+                after_para = args.get("after_para", 0)
+                paragraphs = args.get("paragraphs", [])
+                if not paragraphs:
+                    return tool_error("'paragraphs' is required for insert_paragraphs")
+                res = insert_paragraph_block(
+                    path, after_para, paragraphs,
+                    output=path,
+                )
+
+            return tool_result({
+                "ok": res.ok,
+                "op": op,
+                "message": res.message,
+                "path": res.path,
+                "tc_mode": res.tc_mode,
+                "tc_id": res.tc_id,
+            })
+
+        except Exception as e:
+            return tool_error(str(e))
+
+    # ── Paragraph-level operations ───────────────────────────────────────────
     from lexitool.markup import parse_target
-    from lexitool.edit_ops import _read_docx, _write_docx
     from lexitool.tc_utils import tc_replace_first_in_para, tc_ins_text, tc_del_paragraph
 
     W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
-    path = _resolve_path(args["path"])
-    op = args["op"]
-    target_str = args["target"]
+    target_str = args.get("target", "")
+    if not target_str:
+        return tool_error("'target' is required for paragraph-level operations (replace, insert, delete, set_format)")
     new_text = args.get("new_text", "")
     fmt = args.get("format")
-    tc = args.get("tc", True)
-    author = kwargs.get("author", "ai-agent")
 
     target = parse_target(target_str)
     doc_xml, other = _read_docx(path)
@@ -254,7 +408,24 @@ def _handle_edit(args: dict, **kwargs) -> str:
         except Exception:
             pass  # field conversion is best-effort
 
-    return tool_result({"ok": True, "op": op, "target": target_str, "para": target.para_start})
+    # Post-edit verification: read back the changed paragraphs so the agent
+    # can confirm the edit was applied correctly without an extra round-trip.
+    verified_output = ""
+    try:
+        from lexitool.markup import lex_read
+        # Read the edited paragraph plus one on each side for context
+        read_start = max(1, target.para_start - 1)
+        read_end = target.para_start + 1
+        verified = lex_read(path, paras=list(range(read_start, read_end + 1)),
+                            mode="full", show_tc=True, show_format=True)
+        verified_output = verified.get("text", "")
+    except Exception:
+        verified_output = ""  # best-effort
+
+    result = {"ok": True, "op": op, "target": target_str, "para": target.para_start}
+    if verified_output:
+        result["verified_output"] = verified_output
+    return tool_result(result)
 
 
 def _next_tc_id_from_body(body) -> int:
@@ -328,6 +499,117 @@ def _apply_format_to_range(para_el, start: int, end: int, fmt: dict) -> None:
             if existing is not None:
                 r_el.remove(existing)
             r_el.insert(0, new_rPr)
+
+
+# ── 3b. lex_tc (Track Changes accept/reject/list) ─────────────────────────────
+
+LEX_TC_SCHEMA = {
+    "name": "lex_tc",
+    "description": (
+        "Manage Track Changes in a .docx file: list, accept, or reject tracked "
+        "insertions and deletions. Supports filtering by paragraph range, author, "
+        "and change type (ins/del).\n\n"
+        "Operations:\n"
+        "- 'list': List all TC entries with paragraph number, type, author, and text\n"
+        "- 'accept': Accept (finalize) TC changes — deletions are removed, insertions become normal text\n"
+        "- 'reject': Reject (revert) TC changes — deletions are restored, insertions are removed\n\n"
+        "Use 'reject' with type='del' to restore deleted text (e.g., restoring a removed clause).\n"
+        "Use 'accept' with type='ins' to finalize inserted text.\n"
+        "Use paragraph range to target specific sections without affecting the whole document."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "path": {
+                "type": "string",
+                "description": "Path to the .docx file.",
+            },
+            "op": {
+                "type": "string",
+                "enum": ["list", "accept", "reject"],
+                "description": "Operation: 'list' (read-only scan), 'accept' (finalize changes), 'reject' (revert changes).",
+            },
+            "author": {
+                "type": "string",
+                "description": "Filter by author name. Omit to match all authors.",
+            },
+            "type_filter": {
+                "type": "string",
+                "enum": ["ins", "del"],
+                "description": "Filter by change type: 'ins' for insertions only, 'del' for deletions only. Omit for both.",
+            },
+            "para_range": {
+                "oneOf": [
+                    {"type": "string"},
+                    {"type": "array", "items": {"type": "integer"}, "minItems": 2, "maxItems": 2},
+                ],
+                "description": "Paragraph range to operate on. Accepts '50,100' (string) or [50, 100] (array of two ints). Omit for entire document.",
+            },
+            "dry_run": {
+                "type": "boolean",
+                "description": "If true, preview what would change without saving. Default: false.",
+            },
+            "include_tables": {
+                "type": "boolean",
+                "description": "If true, also include TC entries inside tables when using para_range. Essential when restoring sections that span both paragraphs and tables (e.g., a clause with a data table). Default: false.",
+            },
+        },
+        "required": ["path", "op"],
+    },
+}
+
+
+def _handle_tc(args: dict, **kwargs) -> str:
+    from lexitool import tc_ops
+    from docx import Document
+
+    path = _resolve_path(args["path"])
+    op = args["op"]
+    author = args.get("author")
+    type_filter = args.get("type_filter")
+    para_range_str = args.get("para_range")
+    dry_run = args.get("dry_run", False)
+    include_tables = args.get("include_tables", False)
+
+    # Parse paragraph range — accept both string ("1119,1124") and array ([1119, 1124])
+    para_range = None
+    if para_range_str is not None:
+        if isinstance(para_range_str, list):
+            if len(para_range_str) == 2:
+                para_range = (int(para_range_str[0]), int(para_range_str[1]))
+            else:
+                return tool_error(f"Invalid para_range list (need exactly 2 elements): {para_range_str}")
+        elif isinstance(para_range_str, str) and para_range_str.strip():
+            parts = para_range_str.split(",")
+            if len(parts) == 2:
+                try:
+                    para_range = (int(parts[0].strip()), int(parts[1].strip()))
+                except ValueError:
+                    return tool_error(f"Invalid para_range: {para_range_str}")
+
+    doc = Document(path)
+
+    if op == "list":
+        items = tc_ops.list_tc(doc, author_filter=author,
+                               para_range=para_range, type_filter=type_filter)
+        return tool_result({"ok": True, "op": "list", "tc_items": items,
+                            "count": len(items)})
+
+    # accept / reject
+    if op == "accept":
+        stats = tc_ops.accept_all(doc, author_filter=author,
+                                  para_range=para_range, type_filter=type_filter,
+                                  include_tables=include_tables)
+    else:
+        stats = tc_ops.reject_all(doc, author_filter=author,
+                                  para_range=para_range, type_filter=type_filter,
+                                  include_tables=include_tables)
+
+    if dry_run:
+        return tool_result({"ok": True, "op": op, "dry_run": True, "would_change": stats})
+
+    doc.save(path)
+    return tool_result({"ok": True, "op": op, "stats": stats})
 
 
 # ── 4. lex_format ─────────────────────────────────────────────────────────────
@@ -1003,35 +1285,35 @@ def _handle_doc(args: dict, **kwargs) -> str:
     op = args["op"]
 
     if op == "create":
-        from lexitool.doc_create import create as doc_create
+        from lexitool.doc_create import create_document
         path = _resolve_path(args.get("output", args.get("path", "/tmp/out.docx")))
-        template = args.get("template")
-        if template:
-            template = _resolve_path(template)
         meta = args.get("metadata", {})
-        result = doc_create(
-            path,
+        result = create_document(
+            output=path,
             title=meta.get("title", "Untitled"),
-            font_size=meta.get("font_size", 11.5),
+            font_size=meta.get("font_size", 11.0),
         )
-        return tool_result({"ok": True, "path": path, "title": meta.get("title", "Untitled")})
+        return tool_result(result)
 
     elif op == "clean":
-        from lexitool.cleanup import clean_docx
+        from docx import Document
+        from lexitool.cleanup import cleanup_all
         path = _resolve_path(args["path"])
-        clean_docx(path, args.get("output"))
-        return tool_result({"ok": True, "path": path})
+        doc = Document(str(path))
+        result = cleanup_all(doc, as_tc_del=True)
+        doc.save(str(path))
+        return tool_result({"ok": True, "path": path, "result": result})
 
     elif op == "update_toc":
-        from lexitool.toc_ops import update_toc
+        from lexitool.toc_ops import toc_generate
         path = _resolve_path(args["path"])
-        update_toc(path)
-        return tool_result({"ok": True, "path": path})
+        result = toc_generate(docx_path=path)
+        return tool_result(result)
 
     elif op == "update_fields":
         from lexitool.fields import update_fields
         path = _resolve_path(args["path"])
-        result = update_fields(path)
+        result = update_fields(doc_path=path)
         return tool_result(result)
 
     return tool_error(f"Unknown op: {op}")
@@ -1264,11 +1546,14 @@ def _handle_corpus(args: dict, **kwargs) -> str:
 LEX_OCR_SCHEMA = {
     "name": "lex_ocr",
     "description": (
-        "Convert a scanned PDF to markdown text using MinerU OCR. "
+        "Read a PDF file and return its full text as markdown. This is the "
+        "PRIMARY tool for ALL PDF reading — never use `exec` with parse_pdf "
+        "or any other PDF library. Uses MinerU OCR engine.\n\n"
         "Supports both the free Agent API (no key needed, lower quality) and "
         "the Precision API (set MINERU_API_KEY env var for best quality with "
         "VLM-based recognition). Use this for legal documents, scanned "
-        "contracts, and any PDF that may contain non-extractable text or images."
+        "contracts, and any PDF — whether text-based or scanned, extractable "
+        "or image-only."
     ),
     "parameters": {
         "type": "object",
@@ -1357,9 +1642,13 @@ LEX_PROJECT_INIT_SCHEMA = {
                 "type": "boolean",
                 "description": "Whether to scan subdirectories recursively. Default: false.",
             },
-            "project_parent_dir": {
+            "management_dir": {
                 "type": "string",
-                "description": "Directory where the new project folder will be created. Default: parent of dir_path.",
+                "description": "Where to create bootstrap files. Default: /workspace/<project_name>/. Separate from dir_path which is where documents live.",
+            },
+            "in_place": {
+                "type": "boolean",
+                "description": "If true, bootstrap files go into dir_path itself (management_dir == dir_path). Use when the working directory IS the project root.",
             },
         },
         "required": ["dir_path", "project_name", "client_name", "goal"],
@@ -1376,7 +1665,8 @@ def _handle_project_init(args: dict, **kwargs) -> str:
     goal = args["goal"]
     language = args.get("language", "ch")
     recursive = args.get("recursive", False)
-    project_parent_dir = args.get("project_parent_dir")
+    management_dir = args.get("management_dir")
+    in_place = args.get("in_place", False)
 
     result = scan_and_init_project(
         dir_path=dir_path,
@@ -1385,12 +1675,579 @@ def _handle_project_init(args: dict, **kwargs) -> str:
         goal=goal,
         language=language,
         recursive=recursive,
-        project_parent_dir=project_parent_dir,
+        management_dir=management_dir,
+        in_place=in_place,
     )
 
     if result.get("ok"):
         return tool_result(result)
     return tool_error(result.get("error", "Project init failed"))
+
+
+# ── 13. lex_diff ───────────────────────────────────────────────────────────────
+
+LEX_DIFF_SCHEMA = {
+    "name": "lex_diff",
+    "description": (
+        "Compare two .docx files and produce a tracked-changes redline document.\n"
+        "Uses quicompare (Aspose Words backend) for professional legal redlining.\n\n"
+        "Produces a Word .docx with all insertions, deletions, and moves tracked.\n"
+        "Optionally also generates a PDF redline.\n\n"
+        "Typical use: compare contract v1 vs v2, or compare final vs draft."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "original": {
+                "type": "string",
+                "description": "Path to the original (older) .docx file.",
+            },
+            "revised": {
+                "type": "string",
+                "description": "Path to the revised (newer) .docx file.",
+            },
+            "output_dir": {
+                "type": "string",
+                "description": "Directory for output files (default: same folder as revised).",
+            },
+            "author": {
+                "type": "string",
+                "description": "Author name shown in tracked changes (default: from config).",
+            },
+            "pdf": {
+                "type": "boolean",
+                "description": "Also generate a PDF redline (default: false).",
+            },
+            "granularity": {
+                "type": "string",
+                "enum": ["char", "word"],
+                "description": "Track changes at character or word level (default: char).",
+            },
+        },
+        "required": ["original", "revised"],
+    },
+}
+
+
+def _handle_diff(args: dict, **kwargs) -> str:
+    from lexitool import diff as _diff
+
+    original = _resolve_path(args["original"])
+    revised = _resolve_path(args["revised"])
+
+    if not _diff.is_available():
+        return tool_error(
+            "quicompare is not available in this environment. "
+            "Install it: cd /root/.hermes/tools/lex-workspace/tools/quicompare && bash install.sh",
+            success=False,
+        )
+
+    result = _diff.redline(
+        original=original,
+        revised=revised,
+        output_dir=_resolve_path(args.get("output_dir")) if args.get("output_dir") else None,
+        author=args.get("author"),
+        pdf=args.get("pdf", False),
+        granularity=args.get("granularity", "char"),
+    )
+    return tool_result(result)
+
+
+# ── 13b. lex_xref_audit ────────────────────────────────────────────────────────
+
+LEX_XREF_AUDIT_SCHEMA = {
+    "name": "lex_xref_audit",
+    "description": (
+        "Audit all cross-references in a .docx file against actual clause headings. "
+        "Finds every clause reference (Chinese 第X条 and English Section/Clause/Article) "
+        "and checks whether the referenced clause exists. Reports dead links (references "
+        "to non-existing clauses) and unreferenced clauses (clauses that exist but are "
+        "never referenced).\n\n"
+        "Use this BEFORE delivery to catch broken cross-references that would confuse "
+        "readers or create legal ambiguity. This is a READ-ONLY audit — it does not "
+        "modify the document."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "doc_path": {
+                "type": "string",
+                "description": "Path to the .docx file to audit.",
+            },
+        },
+        "required": ["doc_path"],
+    },
+}
+
+
+def _handle_xref_audit(args: dict, **kwargs) -> str:
+    from lexitool.xref import xref_audit
+
+    path = _resolve_path(args["doc_path"])
+    result = xref_audit(path)
+    return tool_result(result)
+
+
+# ── 14. lex_deliver ────────────────────────────────────────────────────────────
+
+LEX_DELIVER_SCHEMA = {
+    "name": "lex_deliver",
+    "description": (
+        "Package project deliverables into a timestamped delivery folder.\n"
+        "Collects all .docx files, runs cross-reference verification, and\n"
+        "generates a delivery manifest.\n\n"
+        "Typical use: at project completion, run lex_deliver to produce a\n"
+        "delivery bundle ready for client handoff."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "project_dir": {
+                "type": "string",
+                "description": "Path to the project root (containing .hermes-project/).",
+            },
+            "output_dir": {
+                "type": "string",
+                "description": "Where to create the delivery folder (default: project_dir/delivery/).",
+            },
+            "author": {
+                "type": "string",
+                "description": "Author name for tracked changes in comparison redlines.",
+            },
+            "require_gates": {
+                "type": "boolean",
+                "description": "If true, runs lex_gate_check(strict=true) before packaging. Delivery is blocked if any gates fail. Default: true (gates REQUIRED for delivery).",
+            },
+        },
+        "required": ["project_dir"],
+    },
+}
+
+
+def _handle_deliver(args: dict, **kwargs) -> str:
+    from lexitool import deliver as _deliver
+
+    project_dir = _resolve_path(args["project_dir"])
+    result = _deliver.package(
+        project_dir=project_dir,
+        output_dir=_resolve_path(args.get("output_dir")) if args.get("output_dir") else None,
+        author=args.get("author"),
+        require_gates=args.get("require_gates", True),
+    )
+    return tool_result(result)
+
+
+LEX_GATE_CHECK_SCHEMA = {
+    "name": "lex_gate_check",
+    "description": (
+        "Run quality gate checks against a legal project before delivery.\n"
+        "Validates all 7 HPSwarm quality gates: structure, content review,\n"
+        "format review, TS consistency, cross-references, translation, and\n"
+        "final readiness. Reads reviewer reports from .hermes-project/reviews/\n"
+        "and runs automated checks.\n\n"
+        "Use this before calling lex_deliver to ensure all gates pass.\n"
+        "In strict mode, missing reports are treated as failures."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "project_dir": {
+                "type": "string",
+                "description": "Path to the project root (containing .hermes-project/).",
+            },
+            "gates": {
+                "type": "array",
+                "items": {"type": "integer", "minimum": 1, "maximum": 7},
+                "description": "Specific gates to check (1-7). Default: all.",
+            },
+            "strict": {
+                "type": "boolean",
+                "description": "Treat missing/pending reports as failures. Default: false.",
+            },
+        },
+        "required": ["project_dir"],
+    },
+}
+
+
+def _handle_gate_check(args: dict, **kwargs) -> str:
+    from lexitool import gate_check as _gc
+
+    project_dir = _resolve_path(args["project_dir"])
+    result = _gc.gate_check(
+        project_dir=project_dir,
+        gates=args.get("gates"),
+        strict=args.get("strict", False),
+    )
+    return tool_result(result)
+
+
+# ── 16. update_project_state ──────────────────────────────────────────────────
+
+UPDATE_PROJECT_STATE_SCHEMA = {
+    "name": "update_project_state",
+    "description": (
+        "Update the evolving project state. Call this at key milestones: "
+        "phase changes, new findings, document creation/completion, "
+        "gate check results, and major decisions. All updates are journaled "
+        "to project-context.md and synced to memory files that survive "
+        "context compression."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "project_dir": {
+                "type": "string",
+                "description": "Path to the project root (containing .hermes-project/).",
+            },
+            "phase": {
+                "type": "string",
+                "description": "New project phase: init, drafting, review, execution, cp, closing, registration.",
+                "enum": ["init", "drafting", "review", "execution", "cp", "closing", "registration"],
+            },
+            "phase_note": {
+                "type": "string",
+                "description": "Human-readable note about the phase transition.",
+            },
+            "finding": {
+                "type": "string",
+                "description": "A key finding to record (dated, survives compression).",
+            },
+            "decision": {
+                "type": "string",
+                "description": "A major decision with rationale to record.",
+            },
+            "document": {
+                "type": "object",
+                "description": "Document tracking: {'path': '...', 'status': 'draft|review|final|executed', 'D_number': 'D01', 'notes': '...'}.",
+                "properties": {
+                    "path": {"type": "string"},
+                    "status": {"type": "string", "enum": ["draft", "review", "final", "executed"]},
+                    "D_number": {"type": "string"},
+                    "notes": {"type": "string"},
+                },
+            },
+            "gate_result": {
+                "type": "object",
+                "description": "The full result dict returned by lex_gate_check — auto-updates gate status.",
+            },
+        },
+        "required": ["project_dir"],
+    },
+}
+
+
+def _handle_update_project_state(args: dict, **kwargs) -> str:
+    from hermes_cli.project_commands import update_project_state
+
+    project_dir = _resolve_path(args["project_dir"])
+    result = update_project_state(
+        project_dir=project_dir,
+        phase=args.get("phase"),
+        phase_note=args.get("phase_note", ""),
+        finding=args.get("finding"),
+        decision=args.get("decision"),
+        document=args.get("document"),
+        gate_result=args.get("gate_result"),
+    )
+    return tool_result(result)
+
+
+# ── 17. get_project_state ─────────────────────────────────────────────────────
+
+GET_PROJECT_STATE_SCHEMA = {
+    "name": "get_project_state",
+    "description": (
+        "Read the current project state: phase, key findings, active documents, "
+        "last gate check result, major decisions. Use this after context "
+        "compression to rehydrate project awareness."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "project_dir": {
+                "type": "string",
+                "description": "Path to the project root (containing .hermes-project/).",
+            },
+        },
+        "required": ["project_dir"],
+    },
+}
+
+
+def _handle_get_project_state(args: dict, **kwargs) -> str:
+    from hermes_cli.project_commands import get_project_state
+
+    project_dir = _resolve_path(args["project_dir"])
+    result = get_project_state(project_dir)
+    return tool_result(result)
+
+
+# ── 18. refine_goal ─────────────────────────────────────────────────────────
+
+REFINE_GOAL_SCHEMA = {
+    "name": "refine_goal",
+    "description": (
+        "Refine a raw user goal into a complete, clear legal project goal. "
+        "Call this BEFORE lex_project_init whenever the user provides a goal. "
+        "The tool returns a structured framework — use it to produce the "
+        "refined goal, then pass the refined goal to lex_project_init.\n\n"
+        "A well-formed legal project goal includes: (1) document type and "
+        "jurisdiction, (2) key parties and their roles, (3) commercial context "
+        "and deal structure, (4) specific deliverables and scope boundaries, "
+        "(5) quality standards and review criteria, (6) cross-references to "
+        "related documents if any."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "raw_goal": {
+                "type": "string",
+                "description": "The raw goal text as provided by the user, in any language.",
+            },
+            "context": {
+                "type": "string",
+                "description": "Optional: additional context from the conversation or project directory that helps refine the goal.",
+            },
+        },
+        "required": ["raw_goal"],
+    },
+}
+
+
+def _handle_refine_goal(args: dict, **kwargs) -> str:
+    raw_goal = args["raw_goal"]
+    context = args.get("context", "")
+
+    context_header = "### Additional Context\n" + context if context else ""
+
+    framework = f"""## Goal Refinement Framework
+
+### Original Goal
+{raw_goal}
+
+{context_header}
+
+### Refinement Checklist
+
+Use this checklist to refine the goal into a complete legal project brief:
+
+1. **Document Type & Jurisdiction**: What specific legal document(s) are being produced? Under which governing law?
+2. **Parties & Roles**: Who are the parties? Lender/Borrower/Guarantor/Trustee etc. — clarify each role.
+3. **Commercial Context**: What transaction type? Key commercial terms (amount, term, security structure, conditions precedent)?
+4. **Scope & Deliverables**: Which documents exactly? What is explicitly OUT of scope?
+5. **Quality Standards**: Any specific formatting, language, or regulatory requirements?
+6. **Cross-References**: What source documents or related agreements exist? (Term Sheet, Loan Agreement, etc.)
+
+### Output Format
+
+Return ONE refined goal sentence (Chinese or English, matching the user's language) that captures all the above. Follow with a short structured breakdown in this format:
+
+**Refined Goal:** [One comprehensive sentence]
+
+**Scope:** [What's included]
+**Parties:** [Key parties and roles]
+**Key References:** [Source documents]
+**Quality Gates:** [Key review criteria]
+
+Now refine the original goal above and pass the result to lex_project_init."""
+
+    return framework
+
+
+# ── 19. project_add_task ────────────────────────────────────────────────────
+
+PROJECT_ADD_TASK_SCHEMA = {
+    "name": "project_add_task",
+    "description": (
+        "Capture a raw task for the current project and return a refinement "
+        "framework. The task is stored immediately (status=pending, title=raw_input). "
+        "The returned framework helps you refine the task into a structured, "
+        "actionable item — then call project_update_task to save the refined version.\n\n"
+        "Use this whenever the user asks to record, capture, or note down a task "
+        "for later execution. Tasks persist in .hermes-project/project-tasks.json "
+        "and survive context compression via memories/tasks.md."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "project_dir": {
+                "type": "string",
+                "description": "Path to the project root (containing .hermes-project/).",
+            },
+            "raw_task": {
+                "type": "string",
+                "description": "The raw task description as entered by the user, in any language.",
+            },
+            "priority": {
+                "type": "string",
+                "description": "Initial priority hint: high, medium, or low. Default: medium.",
+                "enum": ["high", "medium", "low"],
+            },
+        },
+        "required": ["project_dir", "raw_task"],
+    },
+}
+
+
+def _handle_project_add_task(args: dict, **kwargs) -> str:
+    from hermes_cli.project_commands import add_project_task
+
+    project_dir = _resolve_path(args["project_dir"])
+    result = add_project_task(
+        project_dir=project_dir,
+        raw_task=args["raw_task"],
+        priority=args.get("priority", "medium"),
+    )
+    return tool_result(result)
+
+
+# ── 20. project_list_tasks ───────────────────────────────────────────────────
+
+PROJECT_LIST_TASKS_SCHEMA = {
+    "name": "project_list_tasks",
+    "description": (
+        "List tasks on the project task board. Optionally filter by status "
+        "and/or priority. Use this to review the backlog, find pending work, "
+        "or check what's been completed."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "project_dir": {
+                "type": "string",
+                "description": "Path to the project root (containing .hermes-project/).",
+            },
+            "status": {
+                "type": "string",
+                "description": "Filter by task status.",
+                "enum": ["pending", "in_progress", "completed", "cancelled"],
+            },
+            "priority": {
+                "type": "string",
+                "description": "Filter by task priority.",
+                "enum": ["high", "medium", "low"],
+            },
+        },
+        "required": ["project_dir"],
+    },
+}
+
+
+def _handle_project_list_tasks(args: dict, **kwargs) -> str:
+    from hermes_cli.project_commands import list_project_tasks
+
+    project_dir = _resolve_path(args["project_dir"])
+    result = list_project_tasks(
+        project_dir=project_dir,
+        status=args.get("status"),
+        priority=args.get("priority"),
+    )
+    return tool_result(result)
+
+
+# ── 21. project_update_task ──────────────────────────────────────────────────
+
+PROJECT_UPDATE_TASK_SCHEMA = {
+    "name": "project_update_task",
+    "description": (
+        "Update a task on the project task board. Only the fields you provide "
+        "are changed — omitted fields are left unchanged. Use this to:\n"
+        "- Refine a task after the refinement framework (update title, description, tags)\n"
+        "- Change task status (pending → in_progress → completed)\n"
+        "- Reprioritize tasks\n\n"
+        "After every update, memories/tasks.md is synced for compression survival."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "project_dir": {
+                "type": "string",
+                "description": "Path to the project root (containing .hermes-project/).",
+            },
+            "task_id": {
+                "type": "string",
+                "description": "The task ID (t_xxxxxxxx) to update.",
+            },
+            "status": {
+                "type": "string",
+                "description": "New task status.",
+                "enum": ["pending", "in_progress", "completed", "cancelled"],
+            },
+            "priority": {
+                "type": "string",
+                "description": "New task priority.",
+                "enum": ["high", "medium", "low"],
+            },
+            "title": {
+                "type": "string",
+                "description": "Refined one-line task title.",
+            },
+            "description": {
+                "type": "string",
+                "description": "Expanded task description: scope, deliverables, quality criteria.",
+            },
+            "tags": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Category tags: drafting, review, translation, urgent, etc.",
+            },
+        },
+        "required": ["project_dir", "task_id"],
+    },
+}
+
+
+def _handle_project_update_task(args: dict, **kwargs) -> str:
+    from hermes_cli.project_commands import update_project_task
+
+    project_dir = _resolve_path(args["project_dir"])
+    result = update_project_task(
+        project_dir=project_dir,
+        task_id=args["task_id"],
+        status=args.get("status"),
+        priority=args.get("priority"),
+        title=args.get("title"),
+        description=args.get("description"),
+        tags=args.get("tags"),
+    )
+    return tool_result(result)
+
+
+# ── 22. project_delete_task ──────────────────────────────────────────────────
+
+PROJECT_DELETE_TASK_SCHEMA = {
+    "name": "project_delete_task",
+    "description": (
+        "Delete a task from the project task board. Use this to remove "
+        "cancelled, duplicate, or obsolete tasks."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "project_dir": {
+                "type": "string",
+                "description": "Path to the project root (containing .hermes-project/).",
+            },
+            "task_id": {
+                "type": "string",
+                "description": "The task ID (t_xxxxxxxx) to delete.",
+            },
+        },
+        "required": ["project_dir", "task_id"],
+    },
+}
+
+
+def _handle_project_delete_task(args: dict, **kwargs) -> str:
+    from hermes_cli.project_commands import delete_project_task
+
+    project_dir = _resolve_path(args["project_dir"])
+    result = delete_project_task(
+        project_dir=project_dir,
+        task_id=args["task_id"],
+    )
+    return tool_result(result)
 
 
 # ── Registration ──────────────────────────────────────────────────────────────
@@ -1401,6 +2258,7 @@ _TOOLS = [
     ("lex_stats",    "lexitool", LEX_STATS_SCHEMA,    _handle_stats),
     # Write
     ("lex_edit",     "lexitool", LEX_EDIT_SCHEMA,     _handle_edit),
+    ("lex_tc",       "lexitool", LEX_TC_SCHEMA,       _handle_tc),
     ("lex_format",   "lexitool", LEX_FORMAT_SCHEMA,   _handle_format),
     # Structure
     ("lex_list",     "lexitool", LEX_LIST_SCHEMA,     _handle_list),
@@ -1415,6 +2273,22 @@ _TOOLS = [
     # OCR & Project
     ("lex_ocr",           "lexitool", LEX_OCR_SCHEMA,           _handle_ocr),
     ("lex_project_init",  "lexitool", LEX_PROJECT_INIT_SCHEMA,  _handle_project_init),
+    # Diff & Deliver
+    ("lex_diff",          "lexitool", LEX_DIFF_SCHEMA,          _handle_diff),
+    ("lex_xref_audit",    "lexitool", LEX_XREF_AUDIT_SCHEMA,    _handle_xref_audit),
+    ("lex_deliver",       "lexitool", LEX_DELIVER_SCHEMA,       _handle_deliver),
+    # Gate Check
+    ("lex_gate_check",         "lexitool", LEX_GATE_CHECK_SCHEMA,         _handle_gate_check),
+    # Project State Evolution
+    ("update_project_state",   "lexitool", UPDATE_PROJECT_STATE_SCHEMA,   _handle_update_project_state),
+    ("get_project_state",      "lexitool", GET_PROJECT_STATE_SCHEMA,      _handle_get_project_state),
+    # Goal
+    ("refine_goal",            "lexitool", REFINE_GOAL_SCHEMA,            _handle_refine_goal),
+    # Task Board
+    ("project_add_task",       "lexitool", PROJECT_ADD_TASK_SCHEMA,       _handle_project_add_task),
+    ("project_list_tasks",     "lexitool", PROJECT_LIST_TASKS_SCHEMA,     _handle_project_list_tasks),
+    ("project_update_task",    "lexitool", PROJECT_UPDATE_TASK_SCHEMA,    _handle_project_update_task),
+    ("project_delete_task",    "lexitool", PROJECT_DELETE_TASK_SCHEMA,    _handle_project_delete_task),
 ]
 
 for _name, _toolset, _schema, _handler in _TOOLS:

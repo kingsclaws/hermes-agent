@@ -66,11 +66,12 @@ def ancestor_paragraph(el):
     return None
 
 
-def in_para_range(para_idx: int | None, para_range: tuple[int, int] | None) -> bool:
+def in_para_range(para_idx: int | None, para_range: tuple[int, int] | None,
+                  include_tables: bool = False) -> bool:
     if para_range is None:
         return True
     if para_idx is None:
-        return False
+        return include_tables
     return para_range[0] <= para_idx < para_range[1]
 
 

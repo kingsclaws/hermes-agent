@@ -1017,6 +1017,188 @@ def _execute_remote(
 # Main entry point
 # ---------------------------------------------------------------------------
 
+def _check_docx_import(code: str) -> str:
+    """Scan code for docx imports and return a redirect message if found.
+
+    python-docx imports take 3s+ per fresh subprocess and are never needed —
+    lexitool tools (lex_read, lex_edit, lex_stats, etc.) use lxml for direct
+    OOXML parsing and are orders of magnitude faster.
+
+    Returns an empty string if no docx import is detected, or a helpful error
+    message string with the correct lexitool tool to use instead.
+    """
+    import re
+
+    # Detect import docx / from docx import ... patterns
+    docx_pattern = re.compile(
+        r'(?:^|\n)\s*(?:import\s+docx|from\s+docx\s+import)',
+        re.MULTILINE,
+    )
+    if not docx_pattern.search(code):
+        return ""
+
+    # Determine what the code is trying to do and suggest the right lexitool
+    code_lower = code.lower()
+    if "paragraph" in code_lower or "run" in code_lower or "text" in code_lower:
+        suggestion = "lex_read"
+    elif "save" in code_lower or "add_paragraph" in code_lower or "add_run" in code_lower:
+        suggestion = "lex_edit"
+    elif "table" in code_lower or "section" in code_lower or "style" in code_lower:
+        suggestion = "lex_read / lex_format"
+    elif "comment" in code_lower or "track" in code_lower or "revision" in code_lower:
+        suggestion = "lex_read (with TC mode) / lex_diff"
+    elif "xref" in code_lower or "reference" in code_lower or "bookmark" in code_lower:
+        suggestion = "lex_ref"
+    elif "stats" in code_lower or "count" in code_lower or "len(" in code_lower:
+        suggestion = "lex_stats"
+    elif "clause" in code_lower:
+        suggestion = "lex_clause"
+    else:
+        suggestion = "lex_read / lex_edit / lex_stats"
+
+    return (
+        "DO NOT use `import docx` or `from docx import ...`. "
+        "python-docx is slow (3s+ per fresh subprocess) and unnecessary. "
+        "Use lexitool tools instead — they parse .docx directly via lxml "
+        "and are orders of magnitude faster.\n\n"
+        f"For this operation, try: {suggestion}\n\n"
+        "Available lexitool tools:\n"
+        "- lex_read: read document text, paragraphs, tables, TC markup\n"
+        "- lex_stats: word/char/paragraph counts, section structure\n"
+        "- lex_edit: add/modify/delete paragraphs, runs, text with TC tracking\n"
+        "- lex_format: font, alignment, spacing, indentation\n"
+        "- lex_ref: cross-references, bookmarks, hyperlinks, clause numbering\n"
+        "- lex_clause: clause library search and insertion\n"
+        "- lex_list: headings, bookmarks, numbered items\n"
+        "- lex_section: page layout, columns, headers/footers\n"
+        "- lex_diff: compare two .docx files\n\n"
+        "Delete the docx import and rewrite using these tools instead."
+    )
+
+
+def _check_truncation(code: str) -> str:
+    """Detect content truncation patterns and return a redirect message.
+
+    Catches patterns like [:3000], [:5000] etc. where the agent reads
+    a document then slices to show only a "preview." Legal documents
+    must be read completely — lex_read returns full text by default.
+
+    Returns an empty string if no truncation is detected, or a helpful
+    error message with the correct approach.
+    """
+    import re
+
+    # Detect [:N] slices where N >= 500 (preview-sized truncation)
+    # Pattern: [:3000], [:5000], [: 5000], result[:1000], text[: 2000]
+    slice_pattern = re.compile(r'\[\s*:\s*(\d{3,})\s*\]')
+    matches = slice_pattern.findall(code)
+    if not matches:
+        return ""
+
+    # Build a list of the offending slice sizes found
+    sizes = ", ".join(matches[:5])
+    if len(matches) > 5:
+        sizes += f" ... and {len(matches) - 5} more"
+
+    return (
+        f"CONTENT TRUNCATION DETECTED: code contains [{sizes}] slice patterns "
+        f"that limit document output to a fixed character count.\n\n"
+        f"Legal documents must be read COMPLETELY — every clause, every page. "
+        f"A missed provision can have serious legal consequences.\n\n"
+        f"Instead of truncating with [:{sizes.split(',')[0]}], use:\n"
+        f"- lex_read(path) — returns the FULL document text by default, no truncation\n"
+        f"- lex_read(path, mode='structure') — for document outline\n"
+        f"- lex_read(path, paras=[10, 11, 12]) — for specific paragraphs\n\n"
+        f"Remove ALL [:{sizes.split(',')[0]}] slices from the code. "
+        f"Print the complete text without any character limit."
+    )
+
+
+def _check_has_dedicated_tool(code: str) -> str:
+    """Detect exec code that duplicates a dedicated Hermes tool and redirect.
+
+    The agent should use dedicated tools (lex_ocr, lex_read, lex_edit, etc.)
+    instead of exec for single-function calls. exec is for complex multi-step
+    scripts that can't be expressed as a sequence of tool calls.
+
+    Returns an empty string if no dedicated-tool duplication is detected,
+    or a helpful error message with the correct tool to use.
+    """
+    import re
+
+    # Detect from lexitool.xxx import yyy — these should use dedicated tools
+    lexitool_import = re.compile(
+        r'(?:^|\n)\s*from\s+lexitool\.(\w+)\s+import\s+(\w+(?:\s*,\s*\w+)*)',
+        re.MULTILINE,
+    )
+    m = lexitool_import.search(code)
+    if m:
+        module = m.group(1)
+        funcs = m.group(2)
+        # Map lexitool modules to corresponding Hermes tools
+        module_tool_map = {
+            "ocr": "lex_ocr",
+            "markup": "lex_read / lex_edit",
+            "edit_ops": "lex_edit (or lex_tc for TC accept/reject)",
+            "tc_ops": "lex_tc",
+            "tc_utils": "lex_tc",
+            "xref": "lex_ref",
+            "clause": "lex_clause",
+            "diff": "lex_diff",
+            "deliver": "lex_doc",
+            "gate_check": "lex_stats",
+        }
+        suggested = module_tool_map.get(module, "lexitool (dedicated tool)")
+
+        return (
+            "DO NOT use `exec` with lexitool imports. "
+            f"`from lexitool.{module} import {funcs}` duplicates the "
+            f"`{suggested}` tool which already wraps this functionality.\n\n"
+            "exec is for complex multi-step scripts only — not for calling "
+            "a single lexitool function. Use the dedicated tool directly:\n"
+            f"- Instead of `from lexitool.{module} import {funcs}` + exec, "
+            f"just call `{suggested}`\n\n"
+            "Delete this exec call and use the dedicated tool instead."
+        )
+
+    # Detect PDF libraries that duplicate lex_ocr
+    pdf_import = re.compile(
+        r'(?:^|\n)\s*import\s+(fitz|pymupdf|pdfplumber|pikepdf|camelot|tabula)',
+        re.MULTILINE,
+    )
+    m = pdf_import.search(code)
+    if m:
+        lib = m.group(1)
+        return (
+            f"DO NOT use `exec` with `{lib}` for PDF reading. "
+            f"The `lex_ocr` tool already handles PDF-to-text extraction "
+            f"using MinerU OCR.\n\n"
+            f"Replace this exec call with: lex_ocr(file_path='...')\n\n"
+            f"lex_ocr supports language selection, page ranges, and both "
+            f"free and precision API modes."
+        )
+
+    # Detect lxml/etree imports — used to bypass lex_read for direct XML docx parsing
+    lxml_import = re.compile(
+        r'(?:^|\n)\s*(?:import\s+lxml|from\s+lxml\s+import)',
+        re.MULTILINE,
+    )
+    m = lxml_import.search(code)
+    if m:
+        return (
+            "DO NOT use `exec` with `lxml` / `etree` to directly parse .docx XML. "
+            "This bypasses the `lex_read` tool which provides structured document "
+            "output with paragraph numbers, TC markup, and table content.\n\n"
+            "Use `lex_read` instead:\n"
+            "- lex_read(path) — full document text with tables\n"
+            "- lex_read(path, mode='structure') — heading outline\n"
+            "- lex_read(path, paras=[1, 2, 3]) — specific paragraphs\n\n"
+            "Delete this exec call and use lex_read directly."
+        )
+
+    return ""
+
+
 def execute_code(
     code: str,
     task_id: Optional[str] = None,
@@ -1047,9 +1229,30 @@ def execute_code(
     if not code or not code.strip():
         return tool_error("No code provided.")
 
+    # Block import docx — lexitool tools (lex_read/lex_edit/lex_stats/etc.)
+    # are faster and bypass the 3s+ python-docx import penalty.
+    _docx_blocked = _check_docx_import(code)
+    if _docx_blocked:
+        return tool_error(_docx_blocked)
+
+    # Block content truncation — [:N] slices on document text are the #1
+    # cause of incomplete legal review. Use lex_read for full documents.
+    _trunc_blocked = _check_truncation(code)
+    if _trunc_blocked:
+        return tool_error(_trunc_blocked)
+
+    # Block exec code that duplicates dedicated tools — the agent should
+    # use lex_ocr, lex_read, lex_edit, etc. directly instead of wrapping
+    # lexitool imports in exec. exec is for complex multi-step scripts only.
+    _dedup_blocked = _check_has_dedicated_tool(code)
+    if _dedup_blocked:
+        return tool_error(_dedup_blocked)
+
     # Dispatch: remote backends use file-based RPC, local uses UDS
+    _t0 = time.monotonic()
     from tools.terminal_tool import _get_env_config
     env_type = _get_env_config()["env_type"]
+    _t_dispatch = time.monotonic() - _t0
     if env_type != "local":
         return _execute_remote(code, task_id, enabled_tools)
 

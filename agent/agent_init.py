@@ -1079,9 +1079,13 @@ def init_agent(
             agent._memory_nudge_interval = int(mem_config.get("nudge_interval", 10))
             if agent._memory_enabled or agent._user_profile_enabled:
                 from tools.memory_tool import MemoryStore
+                # Detect project directory for project-scoped memory
+                _cwd = os.getenv("TERMINAL_CWD") or os.getcwd()
+                _proj_dir = _cwd if Path(_cwd, ".hermes-project").is_dir() else None
                 agent._memory_store = MemoryStore(
                     memory_char_limit=mem_config.get("memory_char_limit", 2200),
                     user_char_limit=mem_config.get("user_char_limit", 1375),
+                    project_dir=_proj_dir,
                 )
                 agent._memory_store.load_from_disk()
         except Exception:

@@ -1580,6 +1580,69 @@ def _resolve_notification_flag_conflict(
     return watch_patterns, ""
 
 
+def _check_python_heredoc_abuse(command: str) -> str:
+    """Detect inline Python heredocs that bypass execute_code with banned imports.
+
+    Catches patterns like:
+      python3 << 'EOF'
+      from lexitool.edit_ops import _read_docx
+      from lxml import etree
+      ...
+      EOF
+
+    These must go through execute_code (which has sandboxing and docx guards),
+    or better yet, use dedicated lexitool tools (lex_read, lex_edit, etc.).
+
+    Returns an empty string if no abuse is detected, or a blocking message.
+    """
+    # Match python3 << 'MARKER' ... MARKER or python << 'MARKER' ... MARKER
+    # Pattern can appear anywhere in a command chain (e.g. "cd /x && python3 << 'EOF'")
+    heredoc_re = re.compile(
+        r'python3?\s*<<\s*[\'"]?(\w+)[\'"]?\s*\n(.*?)\n\1\b',
+        re.DOTALL,
+    )
+    # Match python3 -c "..." / python -c '...'
+    one_liner_re = re.compile(
+        r'python3?\s+-c\s+[\'"](.+?)[\'"]',
+        re.DOTALL,
+    )
+
+    heredoc_bodies: list[str] = []
+    for m in heredoc_re.finditer(command):
+        heredoc_bodies.append(m.group(2))
+    for m in one_liner_re.finditer(command):
+        heredoc_bodies.append(m.group(1))
+
+    if not heredoc_bodies:
+        return ""
+
+    banned_patterns = [
+        (r'from\s+lexitool\.\w+\s+import', 'lexitool import detected'),
+        (r'import\s+docx\b', 'python-docx import detected'),
+        (r'from\s+docx\s+import', 'python-docx import detected'),
+        (r'(?:import\s+lxml|from\s+lxml\s+import)', 'lxml/etree import detected'),
+    ]
+
+    for body in heredoc_bodies:
+        for pattern, label in banned_patterns:
+            if re.search(pattern, body):
+                return (
+                    "BLOCKED: Inline Python script with {label} detected in terminal command.\n\n"
+                    "This bypasses the execute_code sandbox and all document safety guards. "
+                    "Use dedicated lexitool tools instead:\n"
+                    "- lex_read: read document text, paragraphs, tables\n"
+                    "- lex_edit: modify text with Track Changes tracking\n"
+                    "- lex_tc: accept/reject tracked changes\n"
+                    "- lex_format: apply formatting\n\n"
+                    "If you MUST run a multi-step Python script (complex data processing, "
+                    "not single-function calls), use the execute_code tool — it has built-in "
+                    "guards against unsafe docx operations.\n\n"
+                    "Do NOT wrap lexitool/docx/lxml calls in `python3 << 'EOF'` heredocs."
+                ).format(label=label)
+
+    return ""
+
+
 def terminal_tool(
     command: str,
     background: bool = False,
@@ -1631,6 +1694,16 @@ def terminal_tool(
                 "output": "",
                 "exit_code": -1,
                 "error": f"Invalid command: expected string, got {type(command).__name__}",
+                "status": "error",
+            }, ensure_ascii=False)
+
+        # Block inline Python heredocs that bypass execute_code with banned imports
+        _heredoc_blocked = _check_python_heredoc_abuse(command)
+        if _heredoc_blocked:
+            return json.dumps({
+                "output": _heredoc_blocked,
+                "exit_code": 1,
+                "error": "Inline Python heredoc blocked — use execute_code or dedicated lexitool tools",
                 "status": "error",
             }, ensure_ascii=False)
 

@@ -888,6 +888,9 @@ def _build_child_agent(
     # 'leaf' (default) cannot; 'orchestrator' retains the delegation
     # toolset subject to depth/kill-switch bounds applied below.
     role: str = "leaf",
+    # Hermes profile name — when set, the sub-agent uses the profile's
+    # isolated HERMES_HOME, config.yaml, SOUL.md, and toolsets.
+    profile: Optional[str] = None,
 ):
     """
     Build a child AIAgent on the main thread (thread-safe construction).
@@ -897,6 +900,10 @@ def _build_child_agent(
     those credentials instead of inheriting from the parent.  This enables
     routing subagents to a different provider:model pair (e.g. cheap/fast
     model on OpenRouter while the parent runs on Nous Portal).
+
+    When profile is set, the child loads the named Hermes profile's
+    SOUL.md, config.yaml, and toolsets — giving the sub-agent a true
+    multi-agent identity with isolated HERMES_HOME.
     """
     from run_agent import AIAgent
     import uuid as _uuid
@@ -968,6 +975,47 @@ def _build_child_agent(
         child_toolsets.append("delegation")
 
     workspace_hint = _resolve_workspace_hint(parent_agent)
+
+    # ── Profile resolution ────────────────────────────────────────────────
+    # When a profile is specified, resolve its directory and load its
+    # config for toolsets.  The ContextVar HERMES_HOME override is applied
+    # later in _run_single_child (on the worker thread) so that all file
+    # resolution (config.yaml, SOUL.md, sessions) uses the profile dir.
+    child_profile_dir: Optional[str] = None
+    child_load_soul = False
+    if profile and profile.strip():
+        try:
+            from hermes_cli.profiles import get_profile_dir
+
+            _pd = get_profile_dir(profile.strip())
+            if _pd.is_dir():
+                child_profile_dir = str(_pd)
+                child_load_soul = True
+                # When no explicit toolsets were provided, load from the
+                # profile's config.yaml instead of inheriting from parent.
+                if not toolsets:
+                    try:
+                        import yaml
+                        _cfg_path = _pd / "config.yaml"
+                        if _cfg_path.is_file():
+                            with open(_cfg_path, "r", encoding="utf-8") as _f:
+                                _cfg = yaml.safe_load(_f) or {}
+                            _pts = _cfg.get("platform_toolsets", {})
+                            _profile_toolsets = _pts.get("cli") if isinstance(_pts, dict) else None
+                            if _profile_toolsets and isinstance(_profile_toolsets, list):
+                                # _strip_blocked_tools still applies — children
+                                # must never gain blocked tools even from profile
+                                child_toolsets = _strip_blocked_tools(list(_profile_toolsets))
+                    except Exception:
+                        pass  # fall back to inherited toolsets
+            else:
+                logger.warning(
+                    "delegate_task: profile '%s' not found at %s, using parent tools",
+                    profile, _pd,
+                )
+        except Exception as exc:
+            logger.warning("delegate_task: failed to resolve profile '%s': %s", profile, exc)
+
     child_prompt = _build_child_system_prompt(
         goal,
         context,
@@ -1121,7 +1169,8 @@ def _build_child_agent(
         ephemeral_system_prompt=child_prompt,
         log_prefix=f"[subagent-{task_index}]",
         platform=parent_agent.platform,
-        skip_context_files=True,
+        load_soul_identity=child_load_soul,
+        skip_context_files=not child_load_soul,
         skip_memory=True,
         clarify_callback=None,
         thinking_callback=child_thinking_cb,
@@ -1145,6 +1194,7 @@ def _build_child_agent(
     # for _run_single_child / interrupt_subagent to look up by id.
     child._subagent_id = subagent_id
     child._parent_subagent_id = parent_subagent_id
+    child._delegate_profile_dir = child_profile_dir
     child._subagent_goal = goal
 
     # Share a credential pool with the child when possible so subagents can
@@ -1504,10 +1554,22 @@ def _run_single_child(
 
         def _run_with_thread_capture():
             _worker_thread_holder["t"] = threading.current_thread()
-            return child.run_conversation(
-                user_message=goal,
-                task_id=child_task_id,
-            )
+            # Apply profile HERMES_HOME override so the child loads its
+            # profile's SOUL.md, config.yaml, and sessions directory.
+            _profile_token = None
+            _profile_dir = getattr(child, "_delegate_profile_dir", None)
+            if _profile_dir:
+                from hermes_constants import set_hermes_home_override
+                _profile_token = set_hermes_home_override(_profile_dir)
+            try:
+                return child.run_conversation(
+                    user_message=goal,
+                    task_id=child_task_id,
+                )
+            finally:
+                if _profile_token is not None:
+                    from hermes_constants import reset_hermes_home_override
+                    reset_hermes_home_override(_profile_token)
 
         _child_future = _timeout_executor.submit(_run_with_thread_capture)
         try:
@@ -1924,19 +1986,24 @@ def delegate_task(
     acp_command: Optional[str] = None,
     acp_args: Optional[List[str]] = None,
     role: Optional[str] = None,
+    profile: Optional[str] = None,
     parent_agent=None,
 ) -> str:
     """
     Spawn one or more child agents to handle delegated tasks.
 
     Supports two modes:
-      - Single: provide goal (+ optional context, toolsets, role)
-      - Batch:  provide tasks array [{goal, context, toolsets, role}, ...]
+      - Single: provide goal (+ optional context, toolsets, role, profile)
+      - Batch:  provide tasks array [{goal, context, toolsets, role, profile}, ...]
 
     The 'role' parameter controls whether a child can further delegate:
     'leaf' (default) cannot; 'orchestrator' retains the delegation
     toolset and can spawn its own workers, bounded by
     delegation.max_spawn_depth.  Per-task role beats the top-level one.
+
+    The 'profile' parameter gives the sub-agent a true multi-agent identity:
+    it loads the profile's SOUL.md, config.yaml, and toolsets via an
+    isolated HERMES_HOME.  Per-task profile beats the top-level one.
 
     Returns JSON with results array, one entry per task.
     """
@@ -2017,7 +2084,7 @@ def delegate_task(
         task_list = tasks
     elif goal and isinstance(goal, str) and goal.strip():
         task_list = [
-            {"goal": goal, "context": context, "toolsets": toolsets, "role": top_role}
+            {"goal": goal, "context": context, "toolsets": toolsets, "role": top_role, "profile": profile}
         ]
     else:
         return tool_error("Provide either 'goal' (single task) or 'tasks' (batch).")
@@ -2058,6 +2125,7 @@ def delegate_task(
             # Per-task role beats top-level; normalise again so unknown
             # per-task values warn and degrade to leaf uniformly.
             effective_role = _normalize_role(t.get("role") or top_role)
+            effective_profile = t.get("profile") or profile
             child = _build_child_agent(
                 task_index=i,
                 goal=t["goal"],
@@ -2080,6 +2148,7 @@ def delegate_task(
                     else (acp_args if acp_args is not None else creds.get("args"))
                 ),
                 role=effective_role,
+                profile=effective_profile,
             )
             # Override with correct parent tool names (before child construction mutated global)
             child._delegate_saved_tool_names = _parent_tool_names
@@ -2736,6 +2805,10 @@ DELEGATE_TASK_SCHEMA = {
                             "enum": ["leaf", "orchestrator"],
                             "description": "Per-task role override. See top-level 'role' for semantics.",
                         },
+                        "profile": {
+                            "type": "string",
+                            "description": "Profile name for this specific task (e.g. 'lex-drafter'). Overrides top-level profile for this task only.",
+                        },
                     },
                     "required": ["goal"],
                 },
@@ -2760,6 +2833,17 @@ DELEGATE_TASK_SCHEMA = {
                     "IMPORTANT: Do NOT set this unless the user has explicitly told you "
                     "a specific ACP-compatible CLI is installed and configured. "
                     "Leave empty to use the parent's default transport (Hermes subagents)."
+                ),
+            },
+            "profile": {
+                "type": "string",
+                "description": (
+                    "Hermes profile name for the sub-agent (e.g. 'lex-drafter', "
+                    "'lex-reviewer-content'). When set, the sub-agent loads the "
+                    "profile's SOUL.md, config.yaml, and toolsets — giving it a "
+                    "true multi-agent identity with isolated HERMES_HOME. Prefer "
+                    "profiles for all legal document work. Omit only for trivial "
+                    "non-legal queries (file search, system info)."
                 ),
             },
             "acp_args": {
@@ -2793,6 +2877,7 @@ registry.register(
         acp_command=args.get("acp_command"),
         acp_args=args.get("acp_args"),
         role=args.get("role"),
+        profile=args.get("profile"),
         parent_agent=kw.get("parent_agent"),
     ),
     check_fn=check_delegate_requirements,

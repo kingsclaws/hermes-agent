@@ -2567,33 +2567,58 @@ import shutil as _shutil
 
 
 def _scan_projects_dir(base: str = "/data/projects") -> list[dict]:
-    """Scan a directory tree for .hermes-project/project-meta.json files."""
+    """Scan for .hermes-project/project-meta.json files across multiple roots.
+
+    Returns projects with both 'directory' (management/bootstrap dir) and
+    'cwd' (working directory where documents live).
+    """
     projects = []
-    try:
-        root = Path(base)
-    except Exception:
-        return projects
-    if not root.is_dir():
-        return projects
-    for meta_path in sorted(root.rglob(".hermes-project/project-meta.json")):
+    for base_dir in ("/data/projects", "/workingfile", "/workspace"):
         try:
-            meta = json.loads(meta_path.read_text())
-            project_dir = str(meta_path.parent.parent)
-            doc_count = 0
-            for pattern in ("*.docx", "*.pdf"):
-                doc_count += len(list(Path(project_dir).rglob(pattern)))
-            projects.append({
-                "id": project_dir.replace("/", "_").lstrip("_"),
-                "name": meta.get("name", "Unnamed"),
-                "client": meta.get("client", ""),
-                "goal": meta.get("goal", ""),
-                "directory": project_dir,
-                "created": meta.get("created", ""),
-                "doc_count": doc_count,
-            })
+            root = Path(base_dir)
         except Exception:
             continue
-    return projects
+        if not root.is_dir():
+            continue
+        for meta_path in sorted(root.rglob(".hermes-project/project-meta.json")):
+            try:
+                meta = json.loads(meta_path.read_text())
+                mgmt_dir = str(meta_path.parent.parent)
+                cwd = meta.get("cwd", mgmt_dir)
+                # Count docs in CWD (where documents actually live), not mgmt dir
+                doc_count = 0
+                cwd_path = Path(cwd) if cwd else Path(mgmt_dir)
+                if cwd_path.is_dir():
+                    for pattern in ("*.docx", "*.pdf"):
+                        doc_count += len(list(cwd_path.rglob(pattern)))
+                projects.append({
+                    "id": mgmt_dir.replace("/", "_").lstrip("_"),
+                    "name": meta.get("name", "Unnamed"),
+                    "client": meta.get("client", ""),
+                    "goal": meta.get("goal", ""),
+                    "directory": mgmt_dir,
+                    "cwd": cwd,
+                    "created": meta.get("created", ""),
+                    "doc_count": doc_count,
+                })
+            except Exception:
+                continue
+    # Deduplicate by project name — merge CWD info, prefer mgmt_dir from /workspace/
+    seen = {}
+    for p in projects:
+        name = p["name"]
+        if name in seen:
+            existing = seen[name]
+            # Keep the one that has separate cwd != directory (better data)
+            if p.get("cwd") and p["cwd"] != p["directory"]:
+                seen[name] = p
+            elif existing.get("cwd") and existing["cwd"] != existing["directory"]:
+                pass  # keep existing
+            elif "/workingfile/" in p.get("cwd", "") and "/workingfile/" not in existing.get("cwd", ""):
+                seen[name] = p
+        else:
+            seen[name] = p
+    return list(seen.values())
 
 
 @app.get("/api/projects")
@@ -2622,12 +2647,19 @@ async def create_project(request: Request):
     dir_path = body.get("dir_path", "").strip()
     language = body.get("language", "ch")
     recursive = body.get("recursive", False)
+    in_place = body.get("in_place", False)
 
     if not project_name or not dir_path:
         raise HTTPException(status_code=400, detail="project_name and dir_path are required")
 
     try:
         from lexitool.project_init import scan_and_init_project
+        from hermes_cli.project_commands import _register_in_db
+        src = Path(dir_path)
+        # Auto-detect: if source dir already has .hermes-project scaffolding, use in_place
+        if not in_place and (src / ".hermes-project" / "project-meta.json").is_file():
+            in_place = True
+        management_dir = body.get("management_dir", "").strip() or None
         result = scan_and_init_project(
             dir_path=dir_path,
             project_name=project_name,
@@ -2635,9 +2667,14 @@ async def create_project(request: Request):
             goal=goal,
             language=language,
             recursive=recursive,
-            project_parent_dir="/data/projects",
+            management_dir=management_dir,
+            in_place=in_place,
         )
         if result.get("ok"):
+            # Register in DB with proper cwd/management_dir separation
+            cwd = result.get("cwd", dir_path)
+            mgmt_dir = result.get("project_dir", "")
+            _register_in_db(project_name, mgmt_dir, client_name, goal, cwd)
             return result
         raise HTTPException(status_code=400, detail=result.get("error", "Project init failed"))
     except ImportError:
@@ -3536,6 +3573,12 @@ def _ws_client_is_allowed(ws: "WebSocket") -> bool:
     blocks DNS-rebinding here, not the peer IP.
     """
     if getattr(app.state, "auth_required", False):
+        return True
+    # 0.0.0.0 / :: bind means the operator explicitly opted into all-interfaces
+    # (requires --insecure). No IP-level defence possible; rely on token auth
+    # and network controls — same trade-off as _is_accepted_host.
+    bound_host = getattr(app.state, "bound_host", None)
+    if bound_host in {"0.0.0.0", "::"}:
         return True
     client_host = ws.client.host if ws.client else ""
     if not client_host:

@@ -1221,9 +1221,7 @@ def _get_platform_tools(
 
         # Auto-enable lexitool when the library is importable
         if _toolset_allowed_for_platform("lexitool", platform) and _lexitool_available():
-            enabled_toolsets.add("lexitool")
-        # Auto-enable lexitool when the library is importable
-        if _toolset_allowed_for_platform("lexitool", platform) and _lexitool_available():
+            import tools.lexitool_tool  # noqa: F401 — triggers registry.register()
             enabled_toolsets.add("lexitool")
         # Auto-enable lex-docx when the library is importable
         if _toolset_allowed_for_platform("lex-docx", platform) and _lex_docx_available():
@@ -1284,6 +1282,10 @@ def _get_platform_tools(
             default_off.remove("x_search")
         enabled_toolsets -= default_off
 
+        # Auto-enable lexitool when the library is importable
+        if _toolset_allowed_for_platform("lexitool", platform) and _lexitool_available():
+            import tools.lexitool_tool  # noqa: F401 — triggers registry.register()
+            enabled_toolsets.add("lexitool")
         # Auto-enable lex-docx when the library is importable
         if _toolset_allowed_for_platform("lex-docx", platform) and _lex_docx_available():
             enabled_toolsets.add("lex-docx")

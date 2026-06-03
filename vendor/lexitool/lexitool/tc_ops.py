@@ -90,8 +90,14 @@ def _quoted_text_map(doc, para_range: tuple[int, int] | None = None) -> dict[str
 
 def _tc_candidates(doc, author_filter: str | None = None,
                    para_range: tuple[int, int] | None = None,
-                   type_filter: str | None = None) -> dict[str, list]:
-    """Return filtered candidate XML elements for accept/reject actions."""
+                   type_filter: str | None = None,
+                   include_tables: bool = False) -> dict[str, list]:
+    """Return filtered candidate XML elements for accept/reject actions.
+
+    When include_tables=True, TC entries inside tables (which have no paragraph
+    index) are included even when para_range filtering is active. This is
+    essential for sections that span both paragraphs and tables.
+    """
     body = doc.element.body
     para_map = _body_paragraph_index_map(doc)
 
@@ -102,7 +108,7 @@ def _tc_candidates(doc, author_filter: str | None = None,
             return False
         p_el = _ancestor_paragraph(el)
         para_idx = para_map.get(_el_key(p_el)) if p_el is not None else None
-        return _in_para_range(para_idx, para_range)
+        return _in_para_range(para_idx, para_range, include_tables=include_tables)
 
     ins_text = [el for el in _collect_body_ins(body, author_filter) if _match(el, "ins")]
     del_text = [el for el in _collect_body_del(body, author_filter, skip_para_mark=True) if _match(el, "del")]
@@ -149,7 +155,8 @@ def _tc_candidates(doc, author_filter: str | None = None,
 
 def accept_all(doc, author_filter: str | None = None,
                para_range: tuple[int, int] | None = None,
-               type_filter: str | None = None) -> dict:
+               type_filter: str | None = None,
+               include_tables: bool = False) -> dict:
     """
     Accept tracked changes in the document, optionally filtered by author / range / type.
 
@@ -166,7 +173,7 @@ def accept_all(doc, author_filter: str | None = None,
         "row_del_accepted": 0,
         "para_mark_cleaned": 0,
     }
-    cands = _tc_candidates(doc, author_filter, para_range, type_filter)
+    cands = _tc_candidates(doc, author_filter, para_range, type_filter, include_tables=include_tables)
 
     # ── 1. Table-row TC ───────────────────────────────────────────────── #
     rows_to_remove: set = set()
@@ -223,7 +230,8 @@ def accept_all(doc, author_filter: str | None = None,
 
 def reject_all(doc, author_filter: str | None = None,
                para_range: tuple[int, int] | None = None,
-               type_filter: str | None = None) -> dict:
+               type_filter: str | None = None,
+               include_tables: bool = False) -> dict:
     """
     Reject tracked changes in the document, optionally filtered by author / range / type.
 
@@ -240,7 +248,7 @@ def reject_all(doc, author_filter: str | None = None,
         "row_del_rejected": 0,
         "para_mark_cleaned": 0,
     }
-    cands = _tc_candidates(doc, author_filter, para_range, type_filter)
+    cands = _tc_candidates(doc, author_filter, para_range, type_filter, include_tables=include_tables)
 
     # ── 1. Table-row TC ───────────────────────────────────────────────── #
     rows_to_remove: set = set()

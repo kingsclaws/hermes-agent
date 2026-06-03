@@ -8,10 +8,10 @@
 #
 # Run (WebUI dashboard — default):
 #   docker run -d --rm \
-#     -v ~/.hermes/config.yaml:/root/.hermes/config.yaml:ro \
+#     -v /root/.hermes/config.yaml:/root/.hermes/config.yaml:ro \
 #     -p 9119:9119 \
 #     lex-hermes
-#   → Open http://localhost:9119 → Chat tab
+#   → Open http://localhost:9119 → Chat tab (gateway auto-started internally)
 #
 # Run (interactive chat with lex_docx tools):
 #   docker run -it --rm \
@@ -57,6 +57,11 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     poppler-utils \
     && rm -rf /var/lib/apt/lists/*
 
+# ── Mirror config (avoids SSL issues with default registries) ──
+RUN pip config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple && \
+    pip config set global.trusted-host pypi.tuna.tsinghua.edu.cn && \
+    npm config set registry https://registry.npmmirror.com
+
 WORKDIR /opt/lex-hermes
 
 # ── lexitool (replaces legacy lex-docx) ──
@@ -66,8 +71,15 @@ RUN pip install --no-cache-dir /opt/lexitool
 
 # ── hermes-agent fork ──
 COPY . /opt/lex-hermes
-RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install --no-cache-dir -e ".[web]"
+RUN pip install --no-cache-dir --retries 10 -e ".[web]"
+
+# ── Pre-install edge-tts + ptyprocess so lazy_ensure doesn't hang ──
+RUN pip install --no-cache-dir --retries 10 edge-tts ptyprocess
+
+# ── Pre-compile bytecode so imports (docx/lxml/etc.) are fast ──
+RUN python3 -c "import docx, lxml" && \
+    python3 -m compileall -q -f /usr/local/lib/python3.11/site-packages/ && \
+    python3 -m compileall -q -f /opt/lex-hermes/
 
 # ── Claude Code CLI (self-healing) ──
 RUN npm install -g @anthropic-ai/claude-code && \
@@ -79,17 +91,27 @@ RUN cd /opt/lex-hermes/web && \
     npm run build && \
     npm cache clean --force
 
+# ── TUI (terminal UI for Chat tab PTY) ──
+RUN cd /opt/lex-hermes/ui-tui && \
+    npm install --prefer-offline --no-audit && \
+    npm run build && \
+    npm cache clean --force
+
 EXPOSE 9119
 
 # ── Runtime dirs ──
 RUN mkdir -p /root/.hermes /workspace /project
+
+# ── Startup script (gateway + dashboard) ──
+COPY start-lex-hermes.sh /usr/local/bin/start-lex-hermes.sh
+RUN chmod +x /usr/local/bin/start-lex-hermes.sh
 
 # ── Default SOUL.md (writing-focused identity) ──
 COPY SOUL.md /root/.hermes/SOUL.md
 
 ENV HERMES_HOME=/root/.hermes
 ENV HERMES_DASHBOARD_TUI=1
+ENV HERMES_TUI_DIR=/opt/lex-hermes/ui-tui
 
 WORKDIR /workspace
-ENTRYPOINT ["hermes"]
-CMD ["dashboard", "--host", "0.0.0.0", "--insecure"]
+ENTRYPOINT ["/usr/local/bin/start-lex-hermes.sh"]

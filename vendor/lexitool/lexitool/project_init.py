@@ -231,22 +231,26 @@ def scan_and_init_project(
     *,
     language: str = "ch",
     recursive: bool = False,
-    project_parent_dir: str | None = None,
+    management_dir: str | None = None,
+    in_place: bool = False,
 ) -> dict:
     """Scan a directory for legal documents and initialise a project.
 
     Args:
-        dir_path: Directory containing .docx and .pdf source files.
+        dir_path: Working directory (CWD) containing .docx and .pdf source files.
         project_name: Short project identifier.
         client_name: Client or organisation name.
         goal: Project goal description.
         language: Document language for OCR (default 'ch').
         recursive: Scan subdirectories recursively.
-        project_parent_dir: Where to create the project directory.
-            Default: parent of dir_path.
+        management_dir: Where to create bootstrap files (AGENTS.md, .hermes-project/, etc.).
+            Default: /workspace/<project_name>/.
+        in_place: If true, management_dir == dir_path (bootstrap lives alongside docs).
 
     Returns:
-        {"ok": True, "project_dir": "...", "files_scanned": N, ...}
+        {"ok": True, "project_dir": "...", "cwd": "...", "files_scanned": N, ...}
+        - project_dir: management/bootstrap directory
+        - cwd: working directory where documents live
     """
     source_dir = Path(dir_path).resolve()
     if not source_dir.is_dir():
@@ -317,13 +321,20 @@ def scan_and_init_project(
     )
 
     # ── 5. Create project scaffold ──
-    parent = Path(project_parent_dir).resolve() if project_parent_dir else source_dir.parent
-    project_dir = parent / project_name
+    # CWD: where documents actually live (the source directory)
+    cwd = str(source_dir)
+
+    if in_place:
+        project_dir = source_dir
+    elif management_dir:
+        project_dir = Path(management_dir).resolve()
+    else:
+        project_dir = Path("/workspace") / project_name
     project_dir.mkdir(parents=True, exist_ok=True)
 
     try:
         from hermes_cli.project_commands import _create_scaffolding
-        _create_scaffolding(project_dir, project_name, client_name, goal)
+        _create_scaffolding(project_dir, project_name, client_name, goal, cwd=cwd)
     except ImportError:
         # Fallback: create minimal scaffold ourselves
         hermes_dir = project_dir / ".hermes-project"
@@ -333,7 +344,7 @@ def scan_and_init_project(
         now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         meta = {
             "name": project_name, "client": client_name, "goal": goal,
-            "cwd": str(project_dir), "created": now, "toolsets": ["lexitool"],
+            "cwd": cwd, "created": now, "toolsets": ["lexitool"],
         }
         (hermes_dir / "project-meta.json").write_text(
             json.dumps(meta, indent=2, ensure_ascii=False) + "\n"
@@ -373,6 +384,7 @@ def scan_and_init_project(
     return {
         "ok": True,
         "project_dir": str(project_dir),
+        "cwd": cwd,
         "files_scanned": len(all_files),
         "docx_count": len(docx_files),
         "pdf_count": len(pdf_files),

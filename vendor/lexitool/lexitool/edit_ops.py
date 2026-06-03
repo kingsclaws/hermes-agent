@@ -545,3 +545,316 @@ def delete_paragraph_tc(docx_path: str, para: int, *,
     return EditResult(ok=True, para=para, tc_mode=True, tc_id=tid,
                       message=f"段落 {para} 已标记为删除（TC）",
                       path=output or docx_path)
+
+
+# ── Table helpers ──────────────────────────────────────────────────────────────
+
+def _find_table(root: etree._Element, table_index: int) -> etree._Element | None:
+	"""Find the Nth w:tbl element at body level (0-indexed)."""
+	count = 0
+	body = root.find(f"{W}body")
+	if body is None:
+		return None
+	for el in body:
+		if el.tag == f"{W}tbl":
+			if count == table_index:
+				return el
+			count += 1
+	return None
+
+
+def _find_cell_by_text(table: etree._Element, text: str) -> etree._Element | None:
+	"""Find the first w:tc in a table that contains the given text."""
+	for tc in table.iter(f"{W}tc"):
+		cell_text = _get_cell_text(tc)
+		if text in cell_text:
+			return tc
+	return None
+
+
+def _get_cell_text(tc: etree._Element) -> str:
+	"""Get the plain text content of a w:tc element."""
+	parts = []
+	for t in tc.iter(f"{W}t"):
+		parts.append(t.text or "")
+	return "".join(parts)
+
+
+def _set_cell_text(tc: etree._Element, new_text: str, bold: bool = False,
+                   font: str = "宋体", sz: float = 22.0) -> None:
+	"""Replace all text content in a w:tc with new_text."""
+	# Remove all existing w:p elements and their contents
+	for p in tc.findall(f"{W}p"):
+		tc.remove(p)
+	# Create a new w:p with the new text
+	new_p = etree.SubElement(tc, f"{W}p")
+	new_p.append(_make_run(new_text, bold=bold, font=font, sz=sz))
+
+
+def _get_cell_paragraphs(tc: etree._Element) -> list[etree._Element]:
+	"""Get all w:p elements inside a w:tc."""
+	return tc.findall(f"{W}p")
+
+
+# ── Table cell text editing ───────────────────────────────────────────────────
+
+def replace_table_cell_text(docx_path: str, table_index: int, old: str, new: str, *,
+                            tc: bool = False,
+                            author: str = "agent",
+                            bold: bool = False,
+                            font: str = "宋体", font_size: float = 11.0,
+                            output: str | None = None) -> EditResult:
+	"""
+	Replace text in a specific table cell (first cell whose text contains `old`).
+
+	table_index: 0-indexed table number in the document body
+	old: text to search for within the cell
+	new: replacement text
+	tc: if True, wraps old in w:del and new in w:ins
+	"""
+	doc_xml, other = _read_docx(docx_path)
+	root = etree.fromstring(doc_xml)
+	table = _find_table(root, table_index)
+	if table is None:
+		return EditResult(ok=False, message=f"Table {table_index} not found", path=docx_path)
+
+	tc_el = _find_cell_by_text(table, old)
+	if tc_el is None:
+		return EditResult(ok=False, message=f"No cell in table {table_index} contains '{old}'",
+		                  path=docx_path)
+
+	sz = float(font_size) * 2
+
+	if tc:
+		tid = _next_tc_id(root)
+		from datetime import datetime
+		dt = datetime.now().strftime("%Y-%m-%dT%H:%M:%SZ")
+
+		# Wrap old text paragraphs in w:del
+		for p in _get_cell_paragraphs(tc_el):
+			del_el = etree.Element(f"{W}del")
+			del_el.set(f"{W}id", str(tid)); tid += 1
+			del_el.set(f"{W}author", author); del_el.set(f"{W}date", dt)
+			pPr = p.find(f"{W}pPr")
+			# Move children to del_el EXCEPT pPr (which stays in p as anchor point)
+			children = [c for c in p if c is not pPr]
+			insert_anchor = pPr if pPr is not None else None
+			for child in reversed(children):
+				p.remove(child)
+				del_el.append(child)
+			if insert_anchor is not None:
+				insert_anchor.addnext(del_el)
+			else:
+				p.insert(0, del_el)
+
+		# Add new text in w:ins
+		new_p = etree.SubElement(tc_el, f"{W}p")
+		ins = etree.SubElement(new_p, f"{W}ins")
+		ins.set(f"{W}id", str(tid))
+		ins.set(f"{W}author", author); ins.set(f"{W}date", dt)
+		ins.append(_make_run(new, bold=bold, font=font, sz=sz))
+
+		_write_docx(docx_path, etree.tostring(root, xml_declaration=True,
+		                                      encoding="UTF-8", standalone=True),
+		            other, output=output)
+		return EditResult(ok=True, tc_mode=True, tc_id=tid,
+		                  message=f"TC replaced cell text in table {table_index}: '{old}' -> '{new}'",
+		                  path=output or docx_path)
+	else:
+		_set_cell_text(tc_el, new, bold=bold, font=font, sz=sz)
+		_write_docx(docx_path, etree.tostring(root, xml_declaration=True,
+		                                      encoding="UTF-8", standalone=True),
+		            other, output=output)
+		return EditResult(ok=True,
+		                  message=f"Replaced cell text in table {table_index}: '{old}' -> '{new}'",
+		                  path=output or docx_path)
+
+
+def replace_table_cell_text_all(docx_path: str, table_index: int,
+                                replacements: list[dict], *,
+                                tc: bool = False,
+                                author: str = "agent",
+                                font: str = "宋体", font_size: float = 11.0,
+                                output: str | None = None) -> EditResult:
+	"""
+	Batch replace text across multiple cells in a single read/write pass.
+
+	replacements: list of {"old": "...", "new": "...", "bold": bool}
+	"""
+	if not replacements:
+		return EditResult(ok=False, message="No replacements provided", path=docx_path)
+
+	doc_xml, other = _read_docx(docx_path)
+	root = etree.fromstring(doc_xml)
+	table = _find_table(root, table_index)
+	if table is None:
+		return EditResult(ok=False, message=f"Table {table_index} not found", path=docx_path)
+
+	sz = float(font_size) * 2
+	matched = 0
+
+	for repl in replacements:
+		old_text = repl["old"]
+		new_text = repl["new"]
+		cell_bold = repl.get("bold", False)
+
+		tc_el = _find_cell_by_text(table, old_text)
+		if tc_el is None:
+			continue
+		matched += 1
+
+		if tc:
+			tid = _next_tc_id(root)
+			from datetime import datetime
+			dt = datetime.now().strftime("%Y-%m-%dT%H:%M:%SZ")
+
+			for p in _get_cell_paragraphs(tc_el):
+				del_el = etree.Element(f"{W}del")
+				del_el.set(f"{W}id", str(tid)); tid += 1
+				del_el.set(f"{W}author", author); del_el.set(f"{W}date", dt)
+				pPr = p.find(f"{W}pPr")
+				# Move children to del_el EXCEPT pPr (which stays in p as anchor point)
+				children = [c for c in p if c is not pPr]
+				insert_anchor = pPr if pPr is not None else None
+				for child in reversed(children):
+					p.remove(child)
+					del_el.append(child)
+				if insert_anchor is not None:
+					insert_anchor.addnext(del_el)
+				else:
+					p.insert(0, del_el)
+
+			new_p = etree.SubElement(tc_el, f"{W}p")
+			ins = etree.SubElement(new_p, f"{W}ins")
+			ins.set(f"{W}id", str(tid))
+			ins.set(f"{W}author", author); ins.set(f"{W}date", dt)
+			ins.append(_make_run(new_text, bold=cell_bold, font=font, sz=sz))
+		else:
+			_set_cell_text(tc_el, new_text, bold=cell_bold, font=font, sz=sz)
+
+	_write_docx(docx_path, etree.tostring(root, xml_declaration=True,
+	                                      encoding="UTF-8", standalone=True),
+	            other, output=output)
+	return EditResult(ok=True, tc_mode=tc,
+	                  message=f"Batch replaced {matched}/{len(replacements)} cells in table {table_index}",
+	                  path=output or docx_path)
+
+
+# ── Table row insertion ───────────────────────────────────────────────────────
+
+def insert_table_rows(docx_path: str, table_index: int, template_row_index: int,
+                      rows_data: list[list[str]], *,
+                      output: str | None = None) -> EditResult:
+	"""
+	Insert new rows into a table by copying a template row and replacing cell text.
+
+	table_index: 0-indexed table number in the document body
+	template_row_index: 0-indexed row within the table to use as a template
+	rows_data: list of rows, each row is a list of cell text strings
+	           (one string per cell in the template row)
+	New rows are inserted AFTER the template row.
+	"""
+	if not rows_data:
+		return EditResult(ok=False, message="No rows_data provided", path=docx_path)
+
+	doc_xml, other = _read_docx(docx_path)
+	root = etree.fromstring(doc_xml)
+	table = _find_table(root, table_index)
+	if table is None:
+		return EditResult(ok=False, message=f"Table {table_index} not found", path=docx_path)
+
+	# Find all w:tr in this table (not nested tables)
+	rows = [el for el in table if el.tag == f"{W}tr"]
+	if template_row_index < 0 or template_row_index >= len(rows):
+		return EditResult(ok=False,
+		                  message=f"Row {template_row_index} out of range (0-{len(rows)-1})",
+		                  path=docx_path)
+
+	template_row = rows[template_row_index]
+	n_cells = len(template_row.findall(f"{W}tc"))
+	inserted = 0
+
+	# Use the live table children for insertion so indices don't go stale
+	anchor = template_row
+
+	for row_idx, cell_texts in enumerate(rows_data):
+		new_row = copy.deepcopy(template_row)
+		cells = new_row.findall(f"{W}tc")
+
+		for ci in range(min(len(cell_texts), len(cells))):
+			_set_cell_text(cells[ci], cell_texts[ci])
+
+		# Insert after the anchor element, then advance anchor
+		anchor.addnext(new_row)
+		anchor = new_row
+		inserted += 1
+
+	_write_docx(docx_path, etree.tostring(root, xml_declaration=True,
+	                                      encoding="UTF-8", standalone=True),
+	            other, output=output)
+	return EditResult(ok=True,
+	                  message=f"Inserted {inserted} rows into table {table_index} (copied from row {template_row_index})",
+	                  path=output or docx_path)
+
+
+# ── Paragraph block insertion ─────────────────────────────────────────────────
+
+def insert_paragraph_block(docx_path: str, after_para: int,
+                           paragraphs: list[dict], *,
+                           output: str | None = None) -> EditResult:
+	"""
+	Insert a block of paragraphs after a specified paragraph number.
+
+	paragraphs: list of dicts with keys:
+	  - text (str, required)
+	  - bold (bool, default False)
+	  - page_break_before (bool, default False): insert a page break before this paragraph
+	"""
+	if not paragraphs:
+		return EditResult(ok=False, message="No paragraphs provided", path=docx_path)
+
+	doc_xml, other = _read_docx(docx_path)
+	root = etree.fromstring(doc_xml)
+	body = root.find(f"{W}body")
+	if body is None:
+		return EditResult(ok=False, message="Document body not found", path=docx_path)
+
+	all_paras = [el for el in body if el.tag == f"{W}p"]
+	if after_para < 0 or after_para >= len(all_paras):
+		return EditResult(ok=False,
+		                  message=f"Paragraph {after_para} out of range (0-{len(all_paras)-1})",
+		                  path=docx_path)
+
+	anchor = all_paras[after_para]
+	inserted = 0
+
+	for pg in paragraphs:
+		text = pg.get("text", "")
+		bold = pg.get("bold", False)
+		page_break = pg.get("page_break_before", False)
+
+		new_p = etree.Element(f"{W}p")
+
+		if page_break:
+			pPr = etree.SubElement(new_p, f"{W}pPr")
+			sectPr = body.find(f"{W}sectPr")
+			# Add page break before on the paragraph properties
+			pB = etree.SubElement(pPr, f"{W}pageBreakBefore")
+			# Also insert a page break run for broader compatibility
+			r_pb = etree.SubElement(new_p, f"{W}r")
+			br = etree.SubElement(r_pb, f"{W}br")
+			br.set(f"{W}type", "page")
+
+		if text:
+			new_p.append(_make_run(text, bold=bold))
+
+		anchor.addnext(new_p)
+		anchor = new_p  # subsequent paragraphs go after this one
+		inserted += 1
+
+	_write_docx(docx_path, etree.tostring(root, xml_declaration=True,
+	                                      encoding="UTF-8", standalone=True),
+	            other, output=output)
+	return EditResult(ok=True,
+	                  message=f"Inserted {inserted} paragraphs after paragraph {after_para}",
+	                  path=output or docx_path)
