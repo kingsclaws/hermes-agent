@@ -48,6 +48,11 @@ COPY ui-tui/packages/hermes-ink/ ui-tui/packages/hermes-ink/
 # check on every startup and triggers a runtime `npm install` that then
 # fails with EACCES (node_modules/ is root-owned from build time).
 ENV npm_config_install_links=false
+ENV npm_config_fetch_retries=5
+ENV npm_config_fetch_retry_factor=2
+ENV npm_config_fetch_retry_mintimeout=20000
+ENV npm_config_fetch_retry_maxtimeout=120000
+ENV npm_config_fetch_timeout=600000
 
 RUN npm install --prefer-offline --no-audit && \
     npx playwright install --with-deps chromium --only-shell && \
