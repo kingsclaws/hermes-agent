@@ -24,6 +24,7 @@ ui-tui/packages/hermes-ink/dist/
 *.md
 !README.md
 !SOUL.md
+!skills/**/SKILL.md
 
 # Runtime data (bind-mounted at /opt/data; must not leak into build context)
 data/

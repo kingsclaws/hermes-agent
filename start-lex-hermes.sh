@@ -8,37 +8,19 @@ set -euo pipefail
 # Ensure runtime directories
 mkdir -p /root/.hermes /workspace /project
 
-# ── Harness bootstrap: ensure coordinator toolset ───────────────────────
-# The coordinator MUST use lex-docx-coordinator (no lex_edit/lex_format).
-# This is enforced at the config level — the tools simply don't exist for
-# the parent agent, physically preventing direct document editing.
+# ── Harness bootstrap: ensure native Lex tools are visible ──────────────
+# The coordinator must see native lex_* tools directly. Multi-agent
+# orchestration is for complex workflows, not for hiding basic read/OCR/edit
+# operations behind shell commands or profile-only workers.
 HARNESS_CONFIG="/root/.hermes/.harness_config.yaml"
-if [ ! -f "$HARNESS_CONFIG" ]; then
-  echo "[lex-hermes] Bootstrapping coordinator harness config..."
-  cat > "$HARNESS_CONFIG" <<'HARNESS_EOF'
-# lex-hermes coordinator harness — AUTO-GENERATED
-# The coordinator (parent agent) uses lex-docx-coordinator: read-only tools.
-# Document editing requires delegate_task → Drafter sub-agent.
+echo "[lex-hermes] Bootstrapping Lex harness config..."
+cat > "$HARNESS_CONFIG" <<'HARNESS_EOF'
+# lex-hermes harness - AUTO-GENERATED
+# Native Lex tools are available to the coordinator. Use legal_orchestrate
+# or delegate_task for complex multi-agent legal workflows.
 platform_toolsets:
   cli:
-    - browser
-    - clarify
-    - cronjob
-    - delegation
-    - file
-    - image_gen
-    - kanban
-    - lex-docx-coordinator
-    - memory
-    - messaging
-    - project_management
-    - session_search
-    - skills
-    - terminal
-    - todo
-    - tts
-    - vision
-    - web
+    - hermes-cli
 delegation:
   max_spawn_depth: 1
   orchestrator_enabled: true
@@ -46,13 +28,12 @@ delegation:
   max_iterations: 50
   child_timeout_seconds: 600
 HARNESS_EOF
-fi
 
 # Merge harness config into main config if config.yaml exists and is not a dir
 if [ -f /root/.hermes/config.yaml ] && [ ! -d /root/.hermes/config.yaml ]; then
-  # Only apply harness if config doesn't already have lex-docx-coordinator
-  if ! grep -q "lex-docx-coordinator" /root/.hermes/config.yaml 2>/dev/null; then
-    echo "[lex-hermes] Applying coordinator harness to config..."
+  # Apply when native Lex tools are missing or stale coordinator-only toolsets remain.
+  if ! grep -q "hermes-cli" /root/.hermes/config.yaml 2>/dev/null || grep -Eq "lex-docx-(coordinator|worker)" /root/.hermes/config.yaml 2>/dev/null; then
+    echo "[lex-hermes] Applying Lex harness to config..."
     # Use Python to merge YAML safely
     python3 -c "
 import yaml, sys
@@ -69,7 +50,7 @@ try:
             config[key] = value
     with open('/root/.hermes/config.yaml', 'w') as f:
         yaml.safe_dump(config, f, allow_unicode=True, default_flow_style=False)
-    print('[lex-hermes] Harness config merged successfully')
+    print('[lex-hermes] Lex harness config merged successfully')
 except Exception as e:
     print(f'[lex-hermes] WARNING: Failed to merge harness config: {e}', file=sys.stderr)
 " 2>/dev/null || echo "[lex-hermes] WARNING: Could not merge harness config (python3/yaml unavailable?)"
@@ -95,12 +76,6 @@ fi
 bootstrap_profiles() {
   echo "[lex-hermes] Bootstrapping worker profiles..."
 
-  # Idempotent guard — skip if profiles already exist
-  if [ -d "/root/.hermes/profiles/lex-drafter" ]; then
-    echo "[lex-hermes] Profiles already exist, skipping bootstrap"
-    return 0
-  fi
-
   python3 -c "
 import os, sys, shutil
 sys.path.insert(0, '/opt/lex-hermes')
@@ -110,7 +85,7 @@ from hermes_cli import profiles as prof_mod
 specs = [
     ('lex-coordinator',
      'Legal document orchestration: analyze requirements, decompose tasks, '
-     'route to specialists, aggregate results. Does NOT edit documents directly.', True),
+     'route to specialists, aggregate results. Can use native Lex tools directly.', True),
     ('lex-drafter',
      'Document drafting and editing: create new .docx contracts, modify existing '
      'documents, apply formatting revisions with Track Changes. Handles all content '
@@ -149,11 +124,11 @@ for name, desc, is_coord in specs:
     if os.path.isfile(soul_src):
         shutil.copy2(soul_src, profile_dir / 'SOUL.md')
 
-    # Write config.yaml with correct toolset
-    toolset = 'lex-docx-coordinator' if is_coord else 'lex-docx-worker'
+    # Write config.yaml with native Lex-capable toolsets.
+    toolsets = ['hermes-cli'] if is_coord else ['lexitool', 'file', 'browser', 'delegation', 'skills', 'terminal', 'todo', 'web']
     config = {
         'platform_toolsets': {
-            'cli': [toolset, 'file', 'browser', 'delegation', 'skills', 'terminal', 'todo', 'web']
+            'cli': toolsets
         },
         'delegation': {
             'max_spawn_depth': 1,
@@ -173,7 +148,8 @@ for name, desc, is_coord in specs:
 
     with open(profile_dir / 'config.yaml', 'w', encoding='utf-8') as f:
         yaml.safe_dump(config, f, allow_unicode=True, default_flow_style=False)
-    print(f'[lex-hermes] Configured profile: {name} ({toolset})')
+    toolsets_label = ', '.join(toolsets)
+    print(f'[lex-hermes] Configured profile: {name} ({toolsets_label})')
 
 print('[lex-hermes] Profile bootstrap complete')
 " 2>/dev/null || echo "[lex-hermes] WARNING: Profile bootstrap failed (python3 modules unavailable?)"
