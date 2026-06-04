@@ -225,7 +225,11 @@ def export_paragraphs(
     if body is None:
         return ""
 
+    # Coerce to int (LLMs sometimes pass strings despite integer schema)
+    para_indices = [int(p) for p in para_indices] if para_indices else None
     para_set = set(para_indices) if para_indices else None
+    para_min = min(para_indices) if para_indices else 0
+    para_max = max(para_indices) if para_indices else 0
     lines: list[str] = []
     para_count = 0
     # Track bookmark starts/ends across paragraphs
@@ -242,11 +246,13 @@ def export_paragraphs(
             )
             lines.append(line)
 
-        elif child.tag == f"{W}tbl" and para_set is None:
-            # Export tables as structured text when exporting all paragraphs
-            table_text = _export_table(child, show_tc, show_format)
-            if table_text:
-                lines.append(table_text)
+        elif child.tag == f"{W}tbl":
+            # Include table when reading all paragraphs, or when it falls
+            # within (or immediately before) the requested paragraph range.
+            if para_set is None or (para_min - 1 <= para_count <= para_max):
+                table_text = _export_table(child, show_tc, show_format)
+                if table_text:
+                    lines.append(table_text)
 
     return "\n".join(lines)
 
