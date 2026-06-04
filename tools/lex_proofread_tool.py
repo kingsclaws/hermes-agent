@@ -177,19 +177,36 @@ def _compute_chunks(
     Returns:
         List of (start_para, end_para, section_label) tuples
     """
-    # Parse "§N [H?] text" lines
+    # Parse "§N [H?] text" or "§N [TOC?] text" lines
+    # TOC headings are flattened to one level below their number so they
+    # sort correctly alongside H1/H2 headings.
     headings: list[tuple[int, int, str]] = []  # (para, level, text)
     for line in structure_text.split("\n"):
         line = line.strip()
         if not line:
             continue
+        # Match [H1], [H2], ... — standard heading styles
         m = re.match(r"§(\d+)\s+\[H(\d+)\]\s+(.*)", line)
-        if not m:
+        if m:
+            para = int(m.group(1))
+            level = int(m.group(2))
+            text = m.group(3).strip()[:80]
+            headings.append((para, level, text))
             continue
-        para = int(m.group(1))
-        level = int(m.group(2))
-        text = m.group(3).strip()[:80]
-        headings.append((para, level, text))
+        # Match [TOC1], [TOC2], ... — TOC field-based headings
+        m = re.match(r"§(\d+)\s+\[TOC(\d+)\]\s+(.*)", line)
+        if m:
+            para = int(m.group(1))
+            level = int(m.group(2)) + 1  # TOC1 → level 2 (like H2)
+            text = m.group(3).strip()[:80]
+            headings.append((para, level, text))
+            continue
+        # Match [?] — unclassifiable heading (treat as H2)
+        m = re.match(r"§(\d+)\s+\[\?\]\s+(.*)", line)
+        if m:
+            para = int(m.group(1))
+            text = m.group(2).strip()[:80]
+            headings.append((para, 2, text))
 
     if not headings:
         # No headings — create fixed-size chunks
@@ -212,33 +229,58 @@ def _compute_chunks(
     if not sections:
         return []
 
-    # Group sections into chunks respecting max_size
+    # Pre-heading content: paragraphs before the first heading
+    if sections[0][0] > 1:
+        sections.insert(0, (1, sections[0][0] - 1, 0, "Preamble"))
+
+    # Group sections into chunks respecting max_size.
+    # Sections smaller than max_size are merged together; a section larger
+    # than max_size is force-split at fixed boundaries.
     chunks: list[tuple[int, int, str]] = []
-    chunk_start = sections[0][0]
-    chunk_end = sections[0][1]
-    chunk_label = sections[0][3]
-    current_level = sections[0][2]
-
-    for i in range(1, len(sections)):
+    i = 0
+    while i < len(sections):
         sec_start, sec_end, sec_level, sec_text = sections[i]
-        candidate_end = sec_end
 
-        if candidate_end - chunk_start + 1 <= max_size:
-            # Extend current chunk
-            chunk_end = candidate_end
+        # If this single section exceeds max_size, split it internally
+        if sec_end - sec_start + 1 > max_size:
+            pos = sec_start
+            part = 1
+            while pos <= sec_end:
+                sub_end = min(pos + max_size - 1, sec_end)
+                chunks.append((pos, sub_end, f"{sec_text} ({part})"))
+                pos = sub_end + 1
+                part += 1
+            i += 1
+            continue
+
+        # Try to merge consecutive sections into one chunk
+        chunk_start = sec_start
+        chunk_end = sec_end
+        chunk_label = sec_text
+        i += 1
+
+        while i < len(sections):
+            n_start, n_end, n_level, n_text = sections[i]
+            if n_end - chunk_start + 1 > max_size:
+                break
+            chunk_end = n_end
+            i += 1
+
+        chunks.append((chunk_start, chunk_end, chunk_label))
+
+    # Post-process: merge tiny tail chunks (< 20 paras) into the previous chunk
+    MIN_CHUNK = 20
+    merged: list[tuple[int, int, str]] = []
+    for i, (start, end, label) in enumerate(chunks):
+        size = end - start + 1
+        if size < MIN_CHUNK and merged:
+            # Absorb into previous chunk (may exceed max_size slightly)
+            prev_start, prev_end, prev_label = merged.pop()
+            merged.append((prev_start, end, prev_label))
         else:
-            # Finalize current chunk
-            chunks.append((chunk_start, chunk_end, chunk_label))
-            # Start new chunk
-            chunk_start = sec_start
-            chunk_end = sec_end
-            chunk_label = sec_text
-            current_level = sec_level
+            merged.append((start, end, label))
 
-    # Final chunk
-    chunks.append((chunk_start, chunk_end, chunk_label))
-
-    return chunks
+    return merged
 
 
 # ── Result aggregation ─────────────────────────────────────────────────────── #
