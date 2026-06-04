@@ -1414,7 +1414,39 @@ def _load_cursorrules(cwd_path: Path) -> str:
     return _truncate_content(cursorrules_content, ".cursorrules")
 
 
-def build_context_files_prompt(cwd: Optional[str] = None, skip_soul: bool = False) -> str:
+def _resolve_session_project_cwd(session_id: Optional[str]) -> Optional[str]:
+    if not session_id:
+        return None
+    try:
+        from hermes_state import SessionDB
+
+        db = SessionDB()
+        try:
+            project = db.get_session_project(session_id)
+            if project and project.get("cwd"):
+                return str(project["cwd"])
+        finally:
+            db.close()
+    except Exception:
+        return None
+    return None
+
+
+def _load_hermes_project_context(cwd: Path) -> str:
+    project_context = cwd / ".hermes-project" / "project-context.md"
+    if not project_context.exists():
+        return ""
+    try:
+        return _truncate_context(project_context.read_text(encoding="utf-8"), max_chars=20000)
+    except Exception:
+        return ""
+
+
+def build_context_files_prompt(
+    cwd: Optional[str] = None,
+    skip_soul: bool = False,
+    session_id: Optional[str] = None,
+) -> str:
     """Discover and load context files for the system prompt.
 
     Priority (first found wins — only ONE project context type is loaded):
@@ -1429,7 +1461,10 @@ def build_context_files_prompt(cwd: Optional[str] = None, skip_soul: bool = Fals
     When *skip_soul* is True, SOUL.md is not included here (it was already
     loaded via ``load_soul_md()`` for the identity slot).
     """
-    if cwd is None:
+    selected_project_cwd = _resolve_session_project_cwd(session_id)
+    if selected_project_cwd:
+        cwd = selected_project_cwd
+    elif cwd is None:
         cwd = os.getcwd()
 
     cwd_path = Path(cwd).resolve()
@@ -1437,7 +1472,8 @@ def build_context_files_prompt(cwd: Optional[str] = None, skip_soul: bool = Fals
 
     # Priority-based project context: first match wins
     project_context = (
-        _load_hermes_md(cwd_path)
+        _load_hermes_project_context(cwd_path)
+        or _load_hermes_md(cwd_path)
         or _load_agents_md(cwd_path)
         or _load_claude_md(cwd_path)
         or _load_cursorrules(cwd_path)

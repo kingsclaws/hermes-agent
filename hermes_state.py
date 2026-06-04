@@ -21,6 +21,7 @@ import re
 import sqlite3
 import threading
 import time
+import uuid
 from pathlib import Path
 
 from agent.memory_manager import sanitize_context
@@ -33,7 +34,7 @@ T = TypeVar("T")
 
 DEFAULT_DB_PATH = get_hermes_home() / "state.db"
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 13
 
 # ---------------------------------------------------------------------------
 # WAL-compatibility fallback
@@ -191,6 +192,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     id TEXT PRIMARY KEY,
     source TEXT NOT NULL,
     user_id TEXT,
+    project_id TEXT,
+    project_cwd TEXT,
     model TEXT,
     model_config TEXT,
     system_prompt TEXT,
@@ -244,10 +247,74 @@ CREATE TABLE IF NOT EXISTS state_meta (
     value TEXT
 );
 
+CREATE TABLE IF NOT EXISTS projects (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE,
+    path TEXT NOT NULL UNIQUE,
+    client TEXT,
+    goal TEXT,
+    status TEXT NOT NULL DEFAULT 'INIT',
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS clients (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE,
+    path TEXT NOT NULL,
+    project_count INTEGER NOT NULL DEFAULT 0,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS subagent_runs (
+    id TEXT PRIMARY KEY,
+    parent_session_id TEXT REFERENCES sessions(id),
+    parent_subagent_id TEXT,
+    task_index INTEGER DEFAULT 0,
+    task_count INTEGER DEFAULT 1,
+    goal TEXT,
+    status TEXT,
+    role TEXT,
+    model TEXT,
+    toolsets TEXT,
+    started_at REAL NOT NULL,
+    ended_at REAL,
+    duration_seconds REAL,
+    tool_count INTEGER DEFAULT 0,
+    api_calls INTEGER DEFAULT 0,
+    input_tokens INTEGER DEFAULT 0,
+    output_tokens INTEGER DEFAULT 0,
+    reasoning_tokens INTEGER DEFAULT 0,
+    cost_usd REAL,
+    summary TEXT,
+    error TEXT
+);
+
+CREATE TABLE IF NOT EXISTS subagent_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id TEXT NOT NULL REFERENCES subagent_runs(id) ON DELETE CASCADE,
+    event_type TEXT NOT NULL,
+    payload TEXT,
+    created_at REAL NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_sessions_source ON sessions(source);
 CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_session_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_started ON sessions(started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, timestamp);
+CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_id, started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_projects_status ON projects(status, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_projects_client ON projects(client, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_clients_name ON clients(name);
+CREATE INDEX IF NOT EXISTS idx_subagent_runs_parent_session
+    ON subagent_runs(parent_session_id, started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_subagent_runs_parent_subagent
+    ON subagent_runs(parent_subagent_id, started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_subagent_runs_status
+    ON subagent_runs(status, started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_subagent_events_run
+    ON subagent_events(run_id, created_at);
 """
 
 FTS_SQL = """
@@ -690,17 +757,21 @@ class SessionDB:
         system_prompt: str = None,
         user_id: str = None,
         parent_session_id: str = None,
+        project_id: str = None,
+        project_cwd: str = None,
     ) -> None:
         """Shared INSERT OR IGNORE for session rows."""
         def _do(conn):
             conn.execute(
-                """INSERT OR IGNORE INTO sessions (id, source, user_id, model, model_config,
-                   system_prompt, parent_session_id, started_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                """INSERT OR IGNORE INTO sessions (id, source, user_id, project_id, project_cwd,
+                   model, model_config, system_prompt, parent_session_id, started_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     session_id,
                     source,
                     user_id,
+                    project_id,
+                    project_cwd,
                     model,
                     json.dumps(model_config) if model_config else None,
                     system_prompt,
@@ -749,6 +820,44 @@ class SessionDB:
                 (system_prompt, session_id),
             )
         self._execute_write(_do)
+
+    def set_session_project(
+        self,
+        session_id: str,
+        project_id: Optional[str],
+        project_cwd: Optional[str] = None,
+    ) -> None:
+        """Bind a session to a project and working directory."""
+        def _do(conn):
+            conn.execute(
+                "UPDATE sessions SET project_id = ?, project_cwd = ? WHERE id = ?",
+                (project_id, project_cwd, session_id),
+            )
+        self._execute_write(_do)
+
+    def clear_session_project(self, session_id: str) -> None:
+        """Remove any project binding from a session."""
+        self.set_session_project(session_id, None, None)
+
+    def get_session_project(self, session_id: str) -> Optional[Dict[str, Any]]:
+        """Return the selected project binding for a session, if any."""
+        session = self.get_session(session_id)
+        if not session:
+            return None
+        project_id = session.get("project_id")
+        project = self.get_project(project_id) if project_id else None
+        if not project and session.get("project_cwd"):
+            return {
+                "cwd": session.get("project_cwd"),
+                "id": project_id,
+                "path": session.get("project_cwd"),
+            }
+        if project:
+            project = dict(project)
+            if session.get("project_cwd"):
+                project["cwd"] = session["project_cwd"]
+            return project
+        return None
 
     def update_token_counts(
         self,
@@ -937,6 +1046,210 @@ class SessionDB:
             )
             row = cursor.fetchone()
         return dict(row) if row else None
+
+    @staticmethod
+    def _decode_subagent_run_row(row: Optional[sqlite3.Row]) -> Optional[Dict[str, Any]]:
+        if not row:
+            return None
+        data = dict(row)
+        raw_toolsets = data.get("toolsets")
+        if raw_toolsets:
+            try:
+                data["toolsets"] = json.loads(raw_toolsets)
+            except (TypeError, ValueError):
+                data["toolsets"] = []
+        else:
+            data["toolsets"] = []
+        return data
+
+    @staticmethod
+    def _decode_subagent_event_row(row: sqlite3.Row) -> Dict[str, Any]:
+        data = dict(row)
+        raw_payload = data.get("payload")
+        if raw_payload:
+            try:
+                data["payload"] = json.loads(raw_payload)
+            except (TypeError, ValueError):
+                data["payload"] = {"raw": raw_payload}
+        else:
+            data["payload"] = {}
+        return data
+
+    def create_subagent_run(
+        self,
+        run_id: str,
+        *,
+        parent_session_id: Optional[str] = None,
+        parent_subagent_id: Optional[str] = None,
+        task_index: int = 0,
+        task_count: int = 1,
+        goal: Optional[str] = None,
+        status: str = "queued",
+        role: Optional[str] = None,
+        model: Optional[str] = None,
+        toolsets: Optional[List[str]] = None,
+        started_at: Optional[float] = None,
+    ) -> str:
+        """Create or replace a subagent run record."""
+
+        started = float(started_at if started_at is not None else time.time())
+
+        def _do(conn):
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO subagent_runs (
+                    id, parent_session_id, parent_subagent_id,
+                    task_index, task_count, goal, status, role, model, toolsets,
+                    started_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    run_id,
+                    parent_session_id,
+                    parent_subagent_id,
+                    int(task_index),
+                    max(1, int(task_count)),
+                    goal,
+                    status,
+                    role,
+                    model,
+                    json.dumps(list(toolsets or []), ensure_ascii=False),
+                    started,
+                ),
+            )
+
+        self._execute_write(_do)
+        return run_id
+
+    def update_subagent_run(self, run_id: str, **fields) -> None:
+        """Patch mutable columns on a subagent run record."""
+        allowed = {
+            "api_calls",
+            "cost_usd",
+            "duration_seconds",
+            "ended_at",
+            "error",
+            "goal",
+            "input_tokens",
+            "model",
+            "output_tokens",
+            "parent_session_id",
+            "parent_subagent_id",
+            "reasoning_tokens",
+            "role",
+            "started_at",
+            "status",
+            "summary",
+            "task_count",
+            "task_index",
+            "tool_count",
+            "toolsets",
+        }
+        updates = []
+        values: List[Any] = []
+        for key, value in fields.items():
+            if key not in allowed:
+                continue
+            if key == "toolsets" and value is not None:
+                value = json.dumps(list(value), ensure_ascii=False)
+            updates.append(f"{key} = ?")
+            values.append(value)
+        if not updates:
+            return
+
+        def _do(conn):
+            conn.execute(
+                f"UPDATE subagent_runs SET {', '.join(updates)} WHERE id = ?",
+                (*values, run_id),
+            )
+
+        self._execute_write(_do)
+
+    def get_subagent_run(self, run_id: str) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM subagent_runs WHERE id = ?",
+                (run_id,),
+            ).fetchone()
+        return self._decode_subagent_run_row(row)
+
+    def list_subagent_runs(
+        self,
+        *,
+        parent_session_id: Optional[str] = None,
+        parent_subagent_id: Optional[str] = None,
+        status: Optional[str] = None,
+        limit: int = 100,
+    ) -> List[Dict[str, Any]]:
+        clauses: List[str] = []
+        params: List[Any] = []
+        if parent_session_id is not None:
+            clauses.append("parent_session_id = ?")
+            params.append(parent_session_id)
+        if parent_subagent_id is not None:
+            clauses.append("parent_subagent_id = ?")
+            params.append(parent_subagent_id)
+        if status is not None:
+            clauses.append("status = ?")
+            params.append(status)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        safe_limit = max(1, min(int(limit), 500))
+        with self._lock:
+            rows = self._conn.execute(
+                f"""
+                SELECT * FROM subagent_runs
+                {where}
+                ORDER BY started_at DESC
+                LIMIT ?
+                """,
+                (*params, safe_limit),
+            ).fetchall()
+        return [
+            decoded
+            for row in rows
+            if (decoded := self._decode_subagent_run_row(row)) is not None
+        ]
+
+    def add_subagent_event(
+        self,
+        run_id: str,
+        event_type: str,
+        payload: Optional[Dict[str, Any]] = None,
+        *,
+        created_at: Optional[float] = None,
+    ) -> int:
+        created = float(created_at if created_at is not None else time.time())
+
+        def _do(conn):
+            cursor = conn.execute(
+                """
+                INSERT INTO subagent_events (run_id, event_type, payload, created_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (
+                    run_id,
+                    event_type,
+                    json.dumps(payload or {}, ensure_ascii=False),
+                    created,
+                ),
+            )
+            return int(cursor.lastrowid)
+
+        return self._execute_write(_do)
+
+    def list_subagent_events(self, run_id: str, *, limit: int = 200) -> List[Dict[str, Any]]:
+        safe_limit = max(1, min(int(limit), 1000))
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT * FROM subagent_events
+                WHERE run_id = ?
+                ORDER BY created_at ASC
+                LIMIT ?
+                """,
+                (run_id, safe_limit),
+            ).fetchall()
+        return [self._decode_subagent_event_row(row) for row in rows]
 
     def resolve_session_id(self, session_id_or_prefix: str) -> Optional[str]:
         """Resolve an exact or uniquely prefixed session ID to the full ID.
@@ -2234,6 +2547,129 @@ class SessionDB:
             results.append({**session, "messages": messages})
         return results
 
+    # =========================================================================
+    # Projects / clients
+    # =========================================================================
+
+    def create_project(
+        self,
+        name: str,
+        path: str,
+        client: Optional[str] = None,
+        goal: Optional[str] = None,
+        status: str = "INIT",
+    ) -> str:
+        project_id = uuid.uuid4().hex
+        now = time.time()
+
+        def _do(conn):
+            conn.execute(
+                """
+                INSERT INTO projects (
+                    id, name, path, client, goal, status, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (project_id, name, path, client, goal, status, now, now),
+            )
+
+        self._execute_write(_do)
+        return project_id
+
+    def get_project(self, name_or_id: str) -> Optional[Dict[str, Any]]:
+        if not name_or_id:
+            return None
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM projects WHERE id = ? OR name = ? OR path = ? LIMIT 1",
+                (name_or_id, name_or_id, name_or_id),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def list_projects(self, status: Optional[str] = None) -> List[Dict[str, Any]]:
+        with self._lock:
+            if status:
+                rows = self._conn.execute(
+                    "SELECT * FROM projects WHERE status = ? ORDER BY updated_at DESC, name ASC",
+                    (status,),
+                ).fetchall()
+            else:
+                rows = self._conn.execute(
+                    "SELECT * FROM projects ORDER BY updated_at DESC, name ASC"
+                ).fetchall()
+        return [dict(row) for row in rows]
+
+    def update_project(self, project_id: str, **fields) -> None:
+        allowed = {"client", "goal", "name", "path", "status"}
+        updates: List[str] = []
+        values: List[Any] = []
+        for key, value in fields.items():
+            if key in allowed:
+                updates.append(f"{key} = ?")
+                values.append(value)
+        if not updates:
+            return
+        updates.append("updated_at = ?")
+        values.append(time.time())
+
+        def _do(conn):
+            conn.execute(
+                f"UPDATE projects SET {', '.join(updates)} WHERE id = ?",
+                (*values, project_id),
+            )
+
+        self._execute_write(_do)
+
+    def list_project_sessions(self, project_id: str) -> List[Dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT * FROM sessions
+                WHERE project_id = ?
+                ORDER BY started_at DESC
+                """,
+                (project_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def create_client(self, name: str, path: str) -> str:
+        client_id = uuid.uuid4().hex
+        now = time.time()
+
+        def _do(conn):
+            conn.execute(
+                """
+                INSERT INTO clients (id, name, path, project_count, created_at, updated_at)
+                VALUES (?, ?, ?, 0, ?, ?)
+                """,
+                (client_id, name, path, now, now),
+            )
+
+        self._execute_write(_do)
+        return client_id
+
+    def get_client(self, name_or_id: str) -> Optional[Dict[str, Any]]:
+        if not name_or_id:
+            return None
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM clients WHERE id = ? OR name = ? LIMIT 1",
+                (name_or_id, name_or_id),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def increment_client_project_count(self, client_name_or_id: str) -> None:
+        def _do(conn):
+            conn.execute(
+                """
+                UPDATE clients
+                SET project_count = project_count + 1, updated_at = ?
+                WHERE id = ? OR name = ?
+                """,
+                (time.time(), client_name_or_id, client_name_or_id),
+            )
+
+        self._execute_write(_do)
+
     def clear_messages(self, session_id: str) -> None:
         """Delete all messages for a session and reset its counters."""
         def _do(conn):
@@ -2963,4 +3399,3 @@ class SessionDB:
                 (error[:500], session_id),
             )
         self._execute_write(_do)
-

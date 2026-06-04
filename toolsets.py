@@ -52,8 +52,12 @@ _HERMES_CORE_TOOLS = [
     "session_search",
     # Clarifying questions
     "clarify",
+    # Project management
+    "project_select", "project_status", "project_context", "project_list",
     # Code execution + delegation
     "execute_code", "delegate_task",
+    # Legal workflow orchestration
+    "legal_orchestrate",
     # Cronjob management
     "cronjob",
     # Cross-platform messaging (gated on gateway running via check_fn)
@@ -216,6 +220,30 @@ TOOLSETS = {
         "description": "Ask the user clarifying questions (multiple-choice or open-ended)",
         "tools": ["clarify"],
         "includes": []
+    },
+
+    "project_management": {
+        "description": "Project selection and project-context inspection tools",
+        "tools": ["project_select", "project_status", "project_context", "project_list"],
+        "includes": []
+    },
+
+    "legal_orchestration": {
+        "description": "Native legal workflow orchestration for drafting, review, revision, and delivery",
+        "tools": ["legal_orchestrate"],
+        "includes": []
+    },
+
+    "lexitool": {
+        "description": "Atomic legal document editing and review tools for .docx workflows",
+        "tools": [],
+        "includes": []
+    },
+
+    "lex-docx": {
+        "description": "Alias toolset for lexitool-based legal document workflows",
+        "tools": [],
+        "includes": ["lexitool"]
     },
     
     "code_execution": {

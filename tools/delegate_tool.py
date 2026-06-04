@@ -216,6 +216,68 @@ def list_active_subagents() -> List[Dict[str, Any]]:
         ]
 
 
+def _get_subagent_db(agent) -> Optional[Any]:
+    """Best-effort SessionDB lookup for delegation observability."""
+    db = getattr(agent, "_session_db", None)
+    return db if db is not None else None
+
+
+def _record_subagent_run(parent_agent, child) -> None:
+    """Persist the initial queued run row for a child subagent."""
+    db = _get_subagent_db(parent_agent)
+    run_id = getattr(child, "_subagent_id", None)
+    if db is None or not run_id:
+        return
+    try:
+        parent_session_id = getattr(parent_agent, "session_id", None)
+        if parent_session_id:
+            try:
+                db.ensure_session(
+                    parent_session_id,
+                    source=str(getattr(parent_agent, "platform", None) or "unknown"),
+                    model=getattr(parent_agent, "model", None),
+                )
+            except Exception:
+                pass
+        db.create_subagent_run(
+            run_id,
+            parent_session_id=parent_session_id,
+            parent_subagent_id=getattr(child, "_parent_subagent_id", None),
+            task_index=int(getattr(child, "_subagent_task_index", 0) or 0),
+            task_count=int(getattr(child, "_subagent_task_count", 1) or 1),
+            goal=getattr(child, "_subagent_goal", None),
+            status="queued",
+            role=getattr(child, "_delegate_role", None),
+            model=getattr(child, "model", None),
+            toolsets=getattr(child, "_subagent_toolsets", None) or [],
+            started_at=float(time.time()),
+        )
+    except Exception as exc:
+        logger.debug("Could not persist subagent run %s: %s", run_id, exc)
+
+
+def _record_subagent_event(parent_agent, run_id: Optional[str], event_type: str, payload: Dict[str, Any]) -> None:
+    """Append a lifecycle event for a subagent run."""
+    db = _get_subagent_db(parent_agent)
+    if db is None or not run_id:
+        return
+    try:
+        db.add_subagent_event(run_id, event_type, payload)
+    except Exception as exc:
+        logger.debug("Could not persist subagent event %s for %s: %s", event_type, run_id, exc)
+
+
+def _update_subagent_run(parent_agent, run_id: Optional[str], **fields) -> None:
+    """Best-effort patch for a persisted subagent run row."""
+    db = _get_subagent_db(parent_agent)
+    if db is None or not run_id:
+        return
+    try:
+        db.update_subagent_run(run_id, **fields)
+    except Exception as exc:
+        logger.debug("Could not update subagent run %s: %s", run_id, exc)
+
+
 def _extract_output_tail(
     result: Dict[str, Any],
     *,
@@ -686,6 +748,7 @@ def _build_child_progress_callback(
     depth: Optional[int] = None,
     model: Optional[str] = None,
     toolsets: Optional[List[str]] = None,
+    role: Optional[str] = None,
 ) -> Optional[callable]:
     """Build a callback that relays child agent tool calls to the parent display.
 
@@ -733,16 +796,38 @@ def _build_child_progress_callback(
             kw["model"] = model
         if toolsets is not None:
             kw["toolsets"] = list(toolsets)
+        if role is not None:
+            kw["role"] = role
         kw["tool_count"] = _tool_count[0]
         return kw
 
     def _relay(
         event_type: str, tool_name: str = None, preview: str = None, args=None, **kwargs
     ):
-        if not parent_cb:
-            return
         payload = _identity_kwargs()
         payload.update(kwargs)  # caller overrides (e.g. status, duration_seconds)
+        payload_for_db: Dict[str, Any] = dict(payload)
+        if tool_name:
+            payload_for_db["tool_name"] = tool_name
+        if preview:
+            payload_for_db["text"] = preview
+        _record_subagent_event(parent_agent, payload.get("subagent_id"), event_type, payload_for_db)
+        if event_type == "subagent.start":
+            _update_subagent_run(
+                parent_agent,
+                payload.get("subagent_id"),
+                status="running",
+                started_at=time.time(),
+            )
+        elif event_type == "subagent.tool":
+            _update_subagent_run(
+                parent_agent,
+                payload.get("subagent_id"),
+                status="running",
+                tool_count=int(payload.get("tool_count") or 0),
+            )
+        if not parent_cb:
+            return
         try:
             parent_cb(event_type, tool_name, preview, args, **payload)
         except Exception as e:
@@ -843,8 +928,8 @@ def _build_child_progress_callback(
             except Exception as e:
                 logger.debug("Spinner print_above failed: %s", e)
 
+        _relay("subagent.tool", tool_name, preview, args)
         if parent_cb:
-            _relay("subagent.tool", tool_name, preview, args)
             _batch.append(tool_name or "")
             if len(_batch) >= _BATCH_SIZE:
                 summary = ", ".join(_batch)
@@ -992,6 +1077,7 @@ def _build_child_agent(
         depth=tui_depth,
         model=effective_model_for_cb,
         toolsets=child_toolsets,
+        role=effective_role,
     )
 
     # Each subagent gets its own iteration budget capped at max_iterations
@@ -1141,6 +1227,9 @@ def _build_child_agent(
     child._subagent_id = subagent_id
     child._parent_subagent_id = parent_subagent_id
     child._subagent_goal = goal
+    child._subagent_task_index = task_index
+    child._subagent_task_count = task_count
+    child._subagent_toolsets = list(child_toolsets)
 
     # Share a credential pool with the child when possible so subagents can
     # rotate credentials on rate limits instead of getting pinned to one key.
@@ -1156,6 +1245,8 @@ def _build_child_agent(
                 parent_agent._active_children.append(child)
         else:
             parent_agent._active_children.append(child)
+
+    _record_subagent_run(parent_agent, child)
 
     # Announce the spawn immediately — the child may sit in a queue
     # for seconds if max_concurrent_children is saturated, so the TUI
@@ -1453,11 +1544,21 @@ def _run_single_child(
                     if isinstance(getattr(child, "model", None), str)
                     else None
                 ),
+                "role": getattr(child, "_delegate_role", None),
                 "started_at": time.time(),
                 "status": "running",
                 "tool_count": 0,
+                "toolsets": list(getattr(child, "_subagent_toolsets", None) or []),
                 "agent": child,
             }
+        )
+        _update_subagent_run(
+            parent_agent,
+            _subagent_id,
+            status="running",
+            started_at=time.time(),
+            parent_session_id=getattr(parent_agent, "session_id", None),
+            parent_subagent_id=_parent_sid if isinstance(_parent_sid, str) else None,
         )
 
     try:
@@ -1586,6 +1687,17 @@ def _run_single_child(
                     )
             else:
                 _err = str(_timeout_exc)
+
+            _update_subagent_run(
+                parent_agent,
+                _subagent_id,
+                status="timeout" if is_timeout else "error",
+                ended_at=time.time(),
+                duration_seconds=duration,
+                api_calls=child_api_calls,
+                summary="",
+                error=_err,
+            )
 
             return {
                 "task_index": task_index,
@@ -1808,6 +1920,30 @@ def _run_single_child(
             except Exception as e:
                 logger.debug("Progress callback completion failed: %s", e)
 
+        _update_subagent_run(
+            parent_agent,
+            _subagent_id,
+            status=status,
+            ended_at=time.time(),
+            duration_seconds=duration,
+            tool_count=int(len(tool_trace)),
+            api_calls=int(api_calls) if isinstance(api_calls, (int, float)) else 0,
+            input_tokens=(
+                int(_input_tokens) if isinstance(_input_tokens, (int, float)) else 0
+            ),
+            output_tokens=(
+                int(_output_tokens) if isinstance(_output_tokens, (int, float)) else 0
+            ),
+            reasoning_tokens=(
+                int(_reasoning_tokens)
+                if isinstance(_reasoning_tokens, (int, float))
+                else 0
+            ),
+            cost_usd=float(_cost_usd) if isinstance(_cost_usd, (int, float)) else None,
+            summary=summary,
+            error=entry.get("error"),
+        )
+
         return entry
 
     except Exception as exc:
@@ -1824,6 +1960,14 @@ def _run_single_child(
                 )
             except Exception as e:
                 logger.debug("Progress callback failure relay failed: %s", e)
+        _update_subagent_run(
+            parent_agent,
+            _subagent_id,
+            status="error",
+            ended_at=time.time(),
+            duration_seconds=duration,
+            error=str(exc),
+        )
         return {
             "task_index": task_index,
             "status": "error",

@@ -1966,6 +1966,9 @@ class AIAgent:
             "reasoning_config": reasoning_config,
             "max_tokens": max_tokens,
         }
+        self._selected_project_id = None
+        self._selected_project_cwd = None
+        self._hydrate_project_binding_from_session()
         
         # In-memory todo list for task planning (one per agent/session)
         from tools.todo_tool import TodoStore
@@ -6217,7 +6220,7 @@ class AIAgent:
             # other dev files — inflating token usage by ~10k for no benefit.
             _context_cwd = os.getenv("TERMINAL_CWD") or None
             context_files_prompt = build_context_files_prompt(
-                cwd=_context_cwd, skip_soul=_soul_loaded)
+                cwd=_context_cwd, skip_soul=_soul_loaded, session_id=self.session_id)
             if context_files_prompt:
                 context_parts.append(context_files_prompt)
 
@@ -10914,6 +10917,90 @@ class AIAgent:
             parent_agent=self,
         )
 
+    def _hydrate_project_binding_from_session(self) -> None:
+        """Load any persisted session->project binding into the agent."""
+        if not self._session_db or not self.session_id:
+            return
+        try:
+            try:
+                self._session_db.ensure_session(
+                    self.session_id,
+                    source=str(self.platform or "unknown"),
+                    model=self.model,
+                )
+            except Exception:
+                pass
+            from tools.project_management_tool import apply_project_binding
+
+            project = self._session_db.get_session_project(self.session_id)
+            if project:
+                apply_project_binding(self, project, persist=False)
+                return
+            self._auto_bind_project_from_cwd()
+        except Exception as exc:
+            logger.debug("Could not hydrate project binding for %s: %s", self.session_id, exc)
+
+    def _auto_bind_project_from_cwd(self) -> None:
+        """Best-effort auto-binding when running inside a project directory."""
+        if not self._session_db or not self.session_id:
+            return
+        try:
+            from tools.project_management_tool import apply_project_binding
+
+            cwd = None
+            for candidate in (
+                Path(os.getcwd()).resolve(),
+                Path(os.getenv("TERMINAL_CWD") or "").expanduser().resolve() if os.getenv("TERMINAL_CWD") else None,
+            ):
+                if candidate is None:
+                    continue
+                meta_candidate = candidate / ".hermes-project" / "project-meta.json"
+                if meta_candidate.exists():
+                    cwd = candidate
+                    meta_path = meta_candidate
+                    break
+            if cwd is None:
+                return
+            project = self._session_db.get_project(str(cwd))
+            if not project:
+                try:
+                    with meta_path.open("r", encoding="utf-8") as fh:
+                        meta = json.load(fh)
+                except Exception:
+                    meta = {}
+                project_id = self._session_db.create_project(
+                    str(meta.get("name") or cwd.name),
+                    str(cwd),
+                    meta.get("client"),
+                    meta.get("goal"),
+                )
+                project = self._session_db.get_project(project_id)
+            if project:
+                apply_project_binding(self, project, persist=True)
+        except Exception as exc:
+            logger.debug("Could not auto-bind project from cwd: %s", exc)
+
+    def _dispatch_project_management_tool(self, function_name: str, function_args: dict) -> str:
+        from tools.registry import registry
+
+        return registry.dispatch(
+            function_name,
+            function_args,
+            task_id=self.session_id or "",
+            session_id=self.session_id or "",
+            parent_agent=self,
+        )
+
+    def _dispatch_legal_orchestrate(self, function_args: dict) -> str:
+        from tools.legal_orchestration_tool import _handle_legal_orchestrate
+
+        return _handle_legal_orchestrate(
+            function_args,
+            parent_agent=self,
+            session_id=self.session_id or "",
+            task_id=self.session_id or "",
+        )
+
     def _invoke_tool(self, function_name: str, function_args: dict, effective_task_id: str,
                      tool_call_id: Optional[str] = None, messages: list = None,
                      pre_tool_block_checked: bool = False) -> str:
@@ -10992,6 +11079,10 @@ class AIAgent:
             )
         elif function_name == "delegate_task":
             return self._dispatch_delegate_task(function_args)
+        elif function_name in {"project_select", "project_status", "project_context", "project_list"}:
+            return self._dispatch_project_management_tool(function_name, function_args)
+        elif function_name == "legal_orchestrate":
+            return self._dispatch_legal_orchestrate(function_args)
         else:
             return handle_function_call(
                 function_name, function_args, effective_task_id,
@@ -11649,6 +11740,28 @@ class AIAgent:
                     self._delegate_spinner = None
                     tool_duration = time.time() - tool_start_time
                     cute_msg = _get_cute_tool_message_impl('delegate_task', function_args, tool_duration, result=_delegate_result)
+                    if spinner:
+                        spinner.stop(cute_msg)
+                    elif self._should_emit_quiet_tool_messages():
+                        self._vprint(f"  {cute_msg}")
+            elif function_name in {"project_select", "project_status", "project_context", "project_list"}:
+                function_result = self._dispatch_project_management_tool(function_name, function_args)
+                tool_duration = time.time() - tool_start_time
+                if self._should_emit_quiet_tool_messages():
+                    self._vprint(f"  {_get_cute_tool_message_impl(function_name, function_args, tool_duration, result=function_result)}")
+            elif function_name == "legal_orchestrate":
+                spinner = None
+                if self._should_emit_quiet_tool_messages() and self._should_start_quiet_spinner():
+                    face = random.choice(KawaiiSpinner.get_waiting_faces())
+                    spinner = KawaiiSpinner(f"{face} ⚖️ legal orchestration", spinner_type='dots', print_fn=self._print_fn)
+                    spinner.start()
+                _legal_result = None
+                try:
+                    function_result = self._dispatch_legal_orchestrate(function_args)
+                    _legal_result = function_result
+                finally:
+                    tool_duration = time.time() - tool_start_time
+                    cute_msg = _get_cute_tool_message_impl("legal_orchestrate", function_args, tool_duration, result=_legal_result)
                     if spinner:
                         spinner.stop(cute_msg)
                     elif self._should_emit_quiet_tool_messages():
