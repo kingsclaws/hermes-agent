@@ -31,8 +31,8 @@ RUN cp /tmp/patch_src/vendor/lexitool/lexitool/*.py /opt/lexitool/lexitool/ \
     && mkdir -p /opt/lex-hermes/profiles/ \
     && cp /tmp/patch_src/profiles/*.soul.md /opt/lex-hermes/profiles/ \
     && rm -rf /tmp/patch_src \
-    && pip install --no-cache-dir /opt/lexitool \
-    && pip install --no-cache-dir -e ".[web]" \
+    && pip install --no-cache-dir --no-deps /opt/lexitool \
+    && pip install --no-cache-dir --no-deps -e ".[web]" \
     && cd /opt/lex-hermes/web && npm run build \
     && cd /opt/lex-hermes/ui-tui && npm run build \
     && python3 -c "import docx, lxml" \
