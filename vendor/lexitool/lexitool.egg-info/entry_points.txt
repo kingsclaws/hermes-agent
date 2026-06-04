@@ -1,0 +1,2 @@
+[console_scripts]
+lex-docx = lexitool.cli:main

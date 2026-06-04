@@ -724,6 +724,7 @@ LEX_REF_SCHEMA = {
         "  resolve_fields  — Convert [ref:name]/[page-ref:name] markup in runs to real field codes\n"
         "  scan_xref       — Dry-run scan: find static '第X条' patterns and what they'd link to\n"
         "  xref_audit      — Comprehensive audit: validate in-document clause refs and dead refs\n"
+        "  convert_static_refs — Convert hardcoded '第X条' text to exact REF fields\n"
         "  auto_xref       — Full conversion: add bookmarks to headings, wrap xref text in hyperlinks"
     ),
     "parameters": {
@@ -737,7 +738,8 @@ LEX_REF_SCHEMA = {
                 "type": "string",
                 "enum": ["add_bookmark", "remove_bookmark", "add_ref", "add_page_ref",
                          "add_noteref", "add_styleref", "list", "list_fields",
-                         "resolve_fields", "scan_xref", "xref_audit", "auto_xref", "cross_doc_scan"],
+                         "resolve_fields", "scan_xref", "xref_audit",
+                         "convert_static_refs", "auto_xref", "cross_doc_scan"],
                 "description": "Operation to perform.",
             },
             "name": {
@@ -756,6 +758,19 @@ LEX_REF_SCHEMA = {
                 "type": "array",
                 "items": {"type": "string"},
                 "description": "List of document paths for cross_doc_scan. All docs are scanned for cross-references to each other.",
+            },
+            "clauses": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Optional exact clause numbers to convert for convert_static_refs, e.g. ['17.1', '18.3']. Omit to scan all plain-text article refs.",
+            },
+            "dry_run": {
+                "type": "boolean",
+                "description": "For convert_static_refs: preview changes without modifying the document. Default: true.",
+            },
+            "skip_toc": {
+                "type": "boolean",
+                "description": "For convert_static_refs: skip table-of-contents paragraphs. Default: true.",
             },
         },
         "required": ["path", "op"],
@@ -783,12 +798,19 @@ def _handle_ref(args: dict, **kwargs) -> str:
             fields.update_fields(path)
         return tool_result(result)
 
-    if op in ("scan_xref", "xref_audit", "auto_xref", "cross_doc_scan"):
+    if op in ("scan_xref", "xref_audit", "convert_static_refs", "auto_xref", "cross_doc_scan"):
         from lexitool import xref
         if op == "scan_xref":
             result = xref.scan_xrefs(path)
         elif op == "xref_audit":
             result = xref.xref_audit(path)
+        elif op == "convert_static_refs":
+            result = xref.convert_static_refs(
+                path,
+                clauses=args.get("clauses"),
+                dry_run=args.get("dry_run", True),
+                skip_toc=args.get("skip_toc", True),
+            )
         elif op == "cross_doc_scan":
             docs = args.get("docs", [])
             if not docs:
