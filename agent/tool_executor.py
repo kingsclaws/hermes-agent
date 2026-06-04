@@ -666,6 +666,26 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
             tool_duration = time.time() - tool_start_time
             if agent._should_emit_quiet_tool_messages():
                 agent._vprint(f"  {_get_cute_tool_message_impl('clarify', function_args, tool_duration, result=function_result)}")
+        elif function_name == "lex_proofread":
+            review_type = function_args.get("review_type", "content")
+            spinner_label = f"🔍 proofreading ({review_type})"
+            spinner = None
+            if agent._should_emit_quiet_tool_messages() and agent._should_start_quiet_spinner():
+                face = random.choice(KawaiiSpinner.get_waiting_faces())
+                spinner = KawaiiSpinner(f"{face} {spinner_label}", spinner_type='dots', print_fn=agent._print_fn)
+                spinner.start()
+            agent._delegate_spinner = spinner
+            _proofread_result = None
+            try:
+                from tools.lex_proofread_tool import _handle_proofread
+                function_result = _handle_proofread(function_args, parent_agent=agent)
+                _proofread_result = function_result
+            finally:
+                agent._delegate_spinner = None
+                tool_duration = time.time() - tool_start_time
+                cute_msg = _get_cute_tool_message_impl('lex_proofread', function_args, tool_duration, result=_proofread_result)
+                if cute_msg:
+                    agent._print_fn(cute_msg, markup_links=False, no_emojis=True)
         elif function_name == "delegate_task":
             tasks_arg = function_args.get("tasks")
             if tasks_arg and isinstance(tasks_arg, list):

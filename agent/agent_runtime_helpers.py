@@ -1694,6 +1694,9 @@ def invoke_tool(agent, function_name: str, function_args: dict, effective_task_i
         )
     elif function_name == "delegate_task":
         return agent._dispatch_delegate_task(function_args)
+    elif function_name == "lex_proofread":
+        from tools.lex_proofread_tool import _handle_proofread
+        return _handle_proofread(function_args, parent_agent=agent)
     else:
         return _ra().handle_function_call(
             function_name, function_args, effective_task_id,
