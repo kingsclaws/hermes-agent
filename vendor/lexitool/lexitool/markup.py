@@ -904,7 +904,7 @@ def _export_structure(path: str) -> str:
 
 
 def _export_stats(path: str) -> str:
-    """Export document statistics."""
+    """Export document statistics including table locations."""
     with zipfile.ZipFile(path, "r") as zf:
         doc_xml = zf.read("word/document.xml")
 
@@ -917,6 +917,7 @@ def _export_stats(path: str) -> str:
     tc_ins = 0
     tc_del = 0
     sections = 0
+    tables: list[dict] = []
 
     for child in body:
         if child.tag == f"{W}p":
@@ -935,14 +936,42 @@ def _export_stats(path: str) -> str:
             tc_ins += len(child.findall(f".//{W}ins"))
             tc_del += len(child.findall(f".//{W}del"))
 
+        elif child.tag == f"{W}tbl":
+            rows = child.findall(f"{W}tr")
+            ncols = 0
+            if rows:
+                ncols = len(rows[0].findall(f"{W}tc"))
+            header = ""
+            if rows:
+                cells = rows[0].findall(f"{W}tc")
+                parts = []
+                for c in cells:
+                    for p_el in c.findall(f"{W}p"):
+                        parts.append(_get_para_plain_text(p_el))
+                header = " | ".join(parts)[:120]
+            tables.append({
+                "after_para": para_count,
+                "rows": len(rows),
+                "cols": ncols,
+                "header": header,
+            })
+
         elif child.tag == f"{W}sectPr":
             sections += 1
 
-    return (
-        f"Paragraphs: {para_count}\n"
-        f"Characters: {word_count}\n"
-        f"Sections: {sections}\n"
-        f"Fonts: {', '.join(sorted(fonts)) if fonts else '(none)'}\n"
-        f"TC Insertions: {tc_ins}\n"
-        f"TC Deletions: {tc_del}"
-    )
+    lines = [
+        f"Paragraphs: {para_count}",
+        f"Characters: {word_count}",
+        f"Sections: {sections}",
+        f"Tables: {len(tables)}",
+    ]
+    for i, t in enumerate(tables):
+        lines.append(
+            f"  Table {i}: after §{t['after_para']} | "
+            f"{t['rows']}r × {t['cols']}c | header: {t['header']}"
+        )
+    lines.append(f"Fonts: {', '.join(sorted(fonts)) if fonts else '(none)'}")
+    lines.append(f"TC Insertions: {tc_ins}")
+    lines.append(f"TC Deletions: {tc_del}")
+
+    return "\n".join(lines)
