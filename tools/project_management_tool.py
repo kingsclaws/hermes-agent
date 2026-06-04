@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -127,6 +128,38 @@ PROJECT_CREATE_SCHEMA = {
             },
         },
         "required": ["name", "path"],
+    },
+}
+
+PROJECT_DELETE_SCHEMA = {
+    "name": "project_delete",
+    "description": (
+        "Delete a project from the native Hermes project registry. By default "
+        "it removes the project row and associated Hermes sessions, but does "
+        "not delete source files. Set delete_files=true only when the user "
+        "explicitly asks to remove the project directory from disk."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "name": {
+                "type": "string",
+                "description": "Project name, id, or exact path.",
+            },
+            "delete_sessions": {
+                "type": "boolean",
+                "description": "Delete sessions associated with this project. Default: true.",
+            },
+            "delete_files": {
+                "type": "boolean",
+                "description": "Also delete the project directory from disk. Default: false.",
+            },
+            "confirm": {
+                "type": "boolean",
+                "description": "Required true to execute deletion.",
+            },
+        },
+        "required": ["name", "confirm"],
     },
 }
 
@@ -253,6 +286,75 @@ def _handle_project_create(args: dict, **kwargs) -> str:
             db.close()
 
 
+def _handle_project_delete(args: dict, **kwargs) -> str:
+    parent_agent = kwargs.get("parent_agent")
+    db = _get_db(parent_agent)
+    should_close = db is not getattr(parent_agent, "_session_db", None)
+
+    name = str(args.get("name") or "").strip()
+    if not name:
+        return tool_error("name is required")
+    if args.get("confirm") is not True:
+        return tool_error("confirm=true is required to delete a project")
+
+    delete_sessions = args.get("delete_sessions", True)
+    delete_files = args.get("delete_files", False)
+    sessions_dir = Path(os.environ.get("HERMES_SESSIONS_DIR") or Path.home() / ".hermes" / "sessions")
+
+    try:
+        project = db.get_project(name)
+        if not project:
+            return tool_error(f"Project not found: {name}")
+
+        project_id = project.get("id")
+        project_path = project.get("path")
+        summary = db.delete_project(
+            name,
+            delete_sessions=bool(delete_sessions),
+            sessions_dir=sessions_dir,
+        )
+        if summary is None:
+            return tool_error(f"Project not found: {name}")
+
+        deleted_files = False
+        file_error = None
+        if delete_files:
+            try:
+                if not project_path:
+                    file_error = "Project path is empty; no files deleted."
+                else:
+                    path = Path(str(project_path)).expanduser().resolve()
+                    if path.exists():
+                        shutil.rmtree(path)
+                        deleted_files = True
+            except Exception as exc:
+                file_error = str(exc)
+
+        if parent_agent is not None and getattr(parent_agent, "_selected_project_id", None) == project_id:
+            setattr(parent_agent, "_selected_project_id", None)
+            setattr(parent_agent, "_selected_project_cwd", None)
+            os.environ.pop("HERMES_ACTIVE_PROJECT_ID", None)
+            os.environ.pop("HERMES_ACTIVE_PROJECT_CWD", None)
+
+        return tool_result(
+            {
+                "deleted": True,
+                "id": project_id,
+                "name": project.get("name"),
+                "path": project_path,
+                "deleted_sessions": summary.get("deleted_sessions", 0),
+                "deleted_session_ids": summary.get("deleted_session_ids", []),
+                "unbound_sessions": summary.get("unbound_sessions", 0),
+                "delete_files": bool(delete_files),
+                "deleted_files": deleted_files,
+                "file_error": file_error,
+            }
+        )
+    finally:
+        if should_close:
+            db.close()
+
+
 def _handle_project_select(args: dict, **kwargs) -> str:
     parent_agent = kwargs.get("parent_agent")
     db = _get_db(parent_agent)
@@ -367,6 +469,14 @@ registry.register(
     schema=PROJECT_CREATE_SCHEMA,
     handler=_handle_project_create,
     description=PROJECT_CREATE_SCHEMA["description"],
+)
+
+registry.register(
+    name="project_delete",
+    toolset="project_management",
+    schema=PROJECT_DELETE_SCHEMA,
+    handler=_handle_project_delete,
+    description=PROJECT_DELETE_SCHEMA["description"],
 )
 
 registry.register(

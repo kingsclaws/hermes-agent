@@ -72,7 +72,7 @@ _HERMES_CORE_TOOLS = [
     # Clarifying questions
     "clarify",
     # Project management
-    "project_create", "project_select", "project_status", "project_context", "project_list",
+    "project_create", "project_delete", "project_select", "project_status", "project_context", "project_list",
     # Code execution + delegation
     "execute_code", "delegate_task",
     # Legal workflow orchestration
@@ -244,7 +244,7 @@ TOOLSETS = {
 
     "project_management": {
         "description": "Project selection and project-context inspection tools",
-        "tools": ["project_create", "project_select", "project_status", "project_context", "project_list"],
+        "tools": ["project_create", "project_delete", "project_select", "project_status", "project_context", "project_list"],
         "includes": []
     },
 

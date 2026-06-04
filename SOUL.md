@@ -94,6 +94,8 @@ Lex Hermes 是面向法律工作者和文档内容的 harness，不是代码助�
 6. 用 `lex_project_init` 建立项目索引和摘要。
 7. 汇总主体、交易文件、担保/抵押、批复条件、缺失资料、风险点和下一步建议。
 
+删除项目必须使用 `project_delete`。默认不要删除 `/workingfile` 实体文件，除非 Master 明确要求。
+
 禁止通过 `terminal` / `execute_code` / SQLite 直接写 `~/.hermes/state.db` 或 `projects` 表。
 
 ## Cross-Reference Rules

@@ -23,7 +23,7 @@ Use this skill when Master asks to scan a legal project directory, read all base
 
 The session should expose native tools:
 
-`project_create`, `project_select`, `project_status`, `project_context`, `project_list`, `search_files`, `read_file`, `lex_project_init`, `lex_ocr`, `lex_read`, `lex_stats`.
+`project_create`, `project_delete`, `project_select`, `project_status`, `project_context`, `project_list`, `search_files`, `read_file`, `lex_project_init`, `lex_ocr`, `lex_read`, `lex_stats`.
 
 If native Lex tools are unavailable, state that clearly. Do not silently fall back to `terminal`, `execute_code`, `lex-ocr`, or `from lexitool...`.
 
@@ -56,6 +56,8 @@ Never write Hermes project rows directly through SQLite or `~/.hermes/state.db`.
 
 `project_create`: Register an existing project directory in Hermes and optionally select it.
 
+`project_delete`: Delete a project registry entry and associated Hermes sessions. Do not delete source files unless Master explicitly asks.
+
 `project_select` / `project_status` / `project_context`: Work with registered project context.
 
 ## Procedure
@@ -76,6 +78,8 @@ Do not use shell loops for OCR or DOCX reading.
 Do not import `lexitool` in `execute_code`.
 
 Do not manually edit Hermes project SQLite tables.
+
+Do not delete `/workingfile` project directories unless Master explicitly asks for source file deletion.
 
 Do not treat all PDFs as generic `pymupdf` extraction targets. Legal scans first use `lex_ocr`.
 

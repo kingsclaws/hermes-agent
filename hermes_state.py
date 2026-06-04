@@ -2619,6 +2619,69 @@ class SessionDB:
 
         self._execute_write(_do)
 
+    def delete_project(
+        self,
+        name_or_id: str,
+        *,
+        delete_sessions: bool = False,
+        sessions_dir: Optional[Path] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Delete a project registry row and optionally its associated sessions.
+
+        Associated sessions are those whose ``project_id`` matches the project
+        or whose ``project_cwd`` matches the project's path. Returns a summary,
+        or None when the project does not exist.
+        """
+        project = self.get_project(name_or_id)
+        if not project:
+            return None
+
+        project_id = project.get("id")
+        project_path = project.get("path")
+        session_ids: List[str] = []
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT id FROM sessions
+                WHERE project_id = ?
+                   OR (? IS NOT NULL AND project_cwd = ?)
+                ORDER BY started_at DESC
+                """,
+                (project_id, project_path, project_path),
+            ).fetchall()
+            session_ids = [row["id"] for row in rows]
+
+        deleted_sessions: List[str] = []
+        if delete_sessions:
+            for session_id in session_ids:
+                if self.delete_session(session_id, sessions_dir=sessions_dir):
+                    deleted_sessions.append(session_id)
+        else:
+            def _unbind(conn):
+                conn.execute(
+                    """
+                    UPDATE sessions
+                    SET project_id = NULL, project_cwd = NULL
+                    WHERE project_id = ?
+                       OR (? IS NOT NULL AND project_cwd = ?)
+                    """,
+                    (project_id, project_path, project_path),
+                )
+
+            self._execute_write(_unbind)
+
+        def _delete_project(conn):
+            conn.execute("DELETE FROM projects WHERE id = ?", (project_id,))
+
+        self._execute_write(_delete_project)
+        return {
+            "project": project,
+            "associated_session_ids": session_ids,
+            "deleted_session_ids": deleted_sessions,
+            "deleted_sessions": len(deleted_sessions),
+            "unbound_sessions": 0 if delete_sessions else len(session_ids),
+        }
+
     def list_project_sessions(self, project_id: str) -> List[Dict[str, Any]]:
         with self._lock:
             rows = self._conn.execute(
@@ -2731,6 +2794,11 @@ class SessionDB:
             # Orphan child sessions so FK constraint is satisfied
             conn.execute(
                 "UPDATE sessions SET parent_session_id = NULL "
+                "WHERE parent_session_id = ?",
+                (session_id,),
+            )
+            conn.execute(
+                "UPDATE subagent_runs SET parent_session_id = NULL "
                 "WHERE parent_session_id = ?",
                 (session_id,),
             )

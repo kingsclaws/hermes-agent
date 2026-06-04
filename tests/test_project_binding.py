@@ -48,3 +48,46 @@ def test_session_project_lookup_without_agent_attrs(tmp_path):
         assert resolved["cwd"] == str(project_root)
     finally:
         db.close()
+
+
+def test_delete_project_with_associated_sessions(tmp_path):
+    db = SessionDB(db_path=tmp_path / "state.db")
+    try:
+        db.create_session("sess-3", source="cli", model="test-model")
+        project_root = tmp_path / "deal-c"
+        project_root.mkdir()
+        project_id = db.create_project("Deal C", str(project_root), "Client C", "Delete test")
+        db.set_session_project("sess-3", project_id, str(project_root))
+
+        summary = db.delete_project("Deal C", delete_sessions=True, sessions_dir=tmp_path / "sessions")
+
+        assert summary is not None
+        assert summary["deleted_sessions"] == 1
+        assert db.get_project("Deal C") is None
+        assert db.get_session("sess-3") is None
+    finally:
+        db.close()
+
+
+def test_delete_session_orphans_subagent_runs(tmp_path):
+    db = SessionDB(db_path=tmp_path / "state.db")
+    try:
+        db.create_session("sess-4", source="cli", model="test-model")
+        db._conn.execute(
+            """
+            INSERT INTO subagent_runs (id, parent_session_id, goal, status, started_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            ("run-1", "sess-4", "test", "completed", 1.0),
+        )
+        db._conn.commit()
+
+        assert db.delete_session("sess-4", sessions_dir=tmp_path / "sessions") is True
+
+        row = db._conn.execute(
+            "SELECT parent_session_id FROM subagent_runs WHERE id = ?",
+            ("run-1",),
+        ).fetchone()
+        assert row["parent_session_id"] is None
+    finally:
+        db.close()
