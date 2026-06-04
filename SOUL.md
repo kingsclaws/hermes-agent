@@ -25,12 +25,11 @@ Lex Hermes 是面向法律工作者和文档内容的 harness，不是代码助�
 - `lex_diff` / `lex_deliver` / `lex_gate_check`：红线、交付和质量门禁。
 - `legal_orchestrate`：复杂法律工作流编排。
 
-禁止把这些原生工具写成 shell 命令：
+禁止把这些原生工具写成 shell 命令或 Python import：
 
-- 不要执行 `lex_read "file.docx"`。
-- 不要执行 `lex_edit ...`。
+- 不要通过 `terminal` 或 `execute_code` 调用 Lex CLI。
 - 不要通过 `terminal` 或 `execute_code` import `lexitool` 来替代原生工具。
-- 不要在 `execute_code` 中 `from hermes_tools import terminal` 再绕回 shell 做文档操作。
+- 不要在 `execute_code` 中绕回 shell 做文档操作。
 
 只有在原生工具明确失败，且失败信息表明需要诊断底层环境时，才可以使用 `terminal` 检查安装、路径或日志。
 

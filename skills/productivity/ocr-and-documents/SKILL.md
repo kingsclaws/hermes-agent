@@ -1,7 +1,7 @@
 ---
 name: ocr-and-documents
 description: "Extract text from legal PDFs and scanned documents."
-version: 2.3.0
+version: 2.4.0
 author: Hermes Agent
 license: MIT
 platforms: [linux, macos, windows]
@@ -13,178 +13,61 @@ metadata:
 
 # PDF & Document Extraction
 
-For DOCX: use `python-docx` (parses actual document structure, far better than OCR).
-For PPTX: see the `powerpoint` skill (uses `python-pptx` with full slide/notes support).
-This skill covers **PDFs and scanned documents**.
+This skill handles legal PDFs, scanned due-diligence materials, and general PDF extraction. In Lex Hermes legal workflows, native tools are mandatory for local legal documents.
 
-## Lex Hermes Priority
+## When to Use
 
-In Lex Hermes legal-document workflows, local PDFs and scanned legal materials should use the native `lex_ocr` tool first. Do not call `vision_analyze` on PDF files; it only accepts real image files. Do not install `pymupdf`, `marker-pdf`, or other OCR packages until `lex_ocr` has failed or the user explicitly asks for a different extractor.
+Use this skill when the user asks to read, OCR, summarize, or extract text from PDFs, scanned legal materials, business licenses, IDs, articles of association, partnership agreements, approvals, property certificates, or project base documents.
 
-Use `lex_ocr` for:
-- Scanned business licenses, IDs, articles of association, partnership agreements, property certificates, approvals, contracts, and other legal due-diligence PDFs.
-- Local PDF paths under `/workingfile`, `/data/projects`, or the active project directory.
-- Chinese legal documents where MinerU OCR is preferable to generic PDF text extraction.
+## Prerequisites
 
-Example:
+The session should expose the native `lex_ocr` tool. If `lex_ocr` is unavailable, state that native Lex OCR is not exposed in this session before considering fallback extraction.
 
-```
+## How to Run
+
+For local legal PDFs and scans, call native `lex_ocr` directly.
+
+```text
 lex_ocr(file_path="/workingfile/project/营业执照.pdf", language="ch")
 lex_ocr(file_path="/workingfile/project/章程.pdf", language="ch", page_range="1-10")
 ```
 
-If `lex_ocr` is unavailable, say that the native Lex OCR tool is not exposed in this session and then fall back to the local extraction steps below.
+Do not run `lex-ocr` in `terminal`. Do not install or import `pymupdf`, `marker-pdf`, or `tesseract` before trying native `lex_ocr`.
 
-## Step 1: Remote URL Available?
+For remote PDF URLs, use `web_extract` first.
 
-If the document has a URL, **always try `web_extract` first**:
-
-```
-web_extract(urls=["https://arxiv.org/pdf/2402.03300"])
+```text
 web_extract(urls=["https://example.com/report.pdf"])
 ```
 
-This handles PDF-to-markdown conversion via Firecrawl with no local dependencies.
+## Quick Reference
 
-Only use local extraction when: the file is local, web_extract fails, or you need batch processing.
+`lex_ocr`: Primary tool for local legal PDFs and scanned documents.
 
-## Step 2: Choose Local Extractor
+`web_extract`: Primary tool for remote PDF URLs.
 
-| Feature | pymupdf (~25MB) | marker-pdf (~3-5GB) |
-|---------|-----------------|---------------------|
-| **Text-based PDF** | ✅ | ✅ |
-| **Scanned PDF (OCR)** | ❌ | ✅ (90+ languages) |
-| **Tables** | ✅ (basic) | ✅ (high accuracy) |
-| **Equations / LaTeX** | ❌ | ✅ |
-| **Code blocks** | ❌ | ✅ |
-| **Forms** | ❌ | ✅ |
-| **Headers/footers removal** | ❌ | ✅ |
-| **Reading order detection** | ❌ | ✅ |
-| **Images extraction** | ✅ (embedded) | ✅ (with context) |
-| **Images → text (OCR)** | ❌ | ✅ |
-| **EPUB** | ✅ | ✅ |
-| **Markdown output** | ✅ (via pymupdf4llm) | ✅ (native, higher quality) |
-| **Install size** | ~25MB | ~3-5GB (PyTorch + models) |
-| **Speed** | Instant | ~1-14s/page (CPU), ~0.2s/page (GPU) |
+`vision_analyze`: Only for actual image files, not PDFs.
 
-**Decision**: Use pymupdf unless you need OCR, equations, forms, or complex layout analysis.
+`lex_read`: Use for `.docx` files. Do not OCR Word documents.
 
-If the user needs marker capabilities but the system lacks ~5GB free disk:
-> "This document needs OCR/advanced extraction (marker-pdf), which requires ~5GB for PyTorch and models. Your system has [X]GB free. Options: free up space, provide a URL so I can use web_extract, or I can try pymupdf which works for text-based PDFs but not scanned documents or equations."
+## Procedure
 
----
+1. Identify whether the file is local or remote.
+2. For local legal PDFs/scans, call `lex_ocr`.
+3. For `.docx`, call `lex_read` instead of OCR.
+4. For remote PDFs, call `web_extract`.
+5. After OCR, report source file, page range, API/method used, and whether extraction appears complete.
 
-## pymupdf (lightweight)
+## Pitfalls
 
-```bash
-pip install pymupdf pymupdf4llm
-```
+Do not call `terminal` with `lex-ocr`.
 
-**Via helper script**:
-```bash
-python scripts/extract_pymupdf.py document.pdf              # Plain text
-python scripts/extract_pymupdf.py document.pdf --markdown    # Markdown
-python scripts/extract_pymupdf.py document.pdf --tables      # Tables
-python scripts/extract_pymupdf.py document.pdf --images out/ # Extract images
-python scripts/extract_pymupdf.py document.pdf --metadata    # Title, author, pages
-python scripts/extract_pymupdf.py document.pdf --pages 0-4   # Specific pages
-```
+Do not use `execute_code` to import OCR libraries for legal PDFs.
 
-**Inline**:
-```bash
-python3 -c "
-import pymupdf
-doc = pymupdf.open('document.pdf')
-for page in doc:
-    print(page.get_text())
-"
-```
+Do not call `vision_analyze` on PDFs.
 
----
+Do not batch OCR through shell loops unless native `lex_ocr` is unavailable and Master explicitly approves fallback.
 
-## marker-pdf (high-quality OCR)
+## Verification
 
-```bash
-# Check disk space first
-python scripts/extract_marker.py --check
-
-pip install marker-pdf
-```
-
-**Via helper script**:
-```bash
-python scripts/extract_marker.py document.pdf                # Markdown
-python scripts/extract_marker.py document.pdf --json         # JSON with metadata
-python scripts/extract_marker.py document.pdf --output_dir out/  # Save images
-python scripts/extract_marker.py scanned.pdf                 # Scanned PDF (OCR)
-python scripts/extract_marker.py document.pdf --use_llm      # LLM-boosted accuracy
-```
-
-**CLI** (installed with marker-pdf):
-```bash
-marker_single document.pdf --output_dir ./output
-marker /path/to/folder --workers 4    # Batch
-```
-
----
-
-## Arxiv Papers
-
-```
-# Abstract only (fast)
-web_extract(urls=["https://arxiv.org/abs/2402.03300"])
-
-# Full paper
-web_extract(urls=["https://arxiv.org/pdf/2402.03300"])
-
-# Search
-web_search(query="arxiv GRPO reinforcement learning 2026")
-```
-
-## Split, Merge & Search
-
-pymupdf handles these natively — use `execute_code` or inline Python:
-
-```python
-# Split: extract pages 1-5 to a new PDF
-import pymupdf
-doc = pymupdf.open("report.pdf")
-new = pymupdf.open()
-for i in range(5):
-    new.insert_pdf(doc, from_page=i, to_page=i)
-new.save("pages_1-5.pdf")
-```
-
-```python
-# Merge multiple PDFs
-import pymupdf
-result = pymupdf.open()
-for path in ["a.pdf", "b.pdf", "c.pdf"]:
-    result.insert_pdf(pymupdf.open(path))
-result.save("merged.pdf")
-```
-
-```python
-# Search for text across all pages
-import pymupdf
-doc = pymupdf.open("report.pdf")
-for i, page in enumerate(doc):
-    results = page.search_for("revenue")
-    if results:
-        print(f"Page {i+1}: {len(results)} match(es)")
-        print(page.get_text("text"))
-```
-
-No extra dependencies needed — pymupdf covers split, merge, search, and text extraction in one package.
-
----
-
-## Notes
-
-- `web_extract` is always first choice for URLs
-- pymupdf is the safe default — instant, no models, works everywhere
-- marker-pdf is for OCR, scanned docs, equations, complex layouts — install only when needed
-- Both helper scripts accept `--help` for full usage
-- marker-pdf downloads ~2.5GB of models to `~/.cache/huggingface/` on first use
-- For Word docs: `pip install python-docx` (better than OCR — parses actual structure)
-- For PowerPoint: see the `powerpoint` skill (uses python-pptx)
+Confirm OCR output has meaningful Chinese text, key legal identifiers, and enough content length. If OCR fails, report the exact failure and then ask whether to use fallback extraction.

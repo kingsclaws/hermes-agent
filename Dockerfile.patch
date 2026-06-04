@@ -22,10 +22,18 @@ RUN set -eux; \
     cp /tmp/patch_src/start-lex-hermes.sh /usr/local/bin/; \
     cp /tmp/patch_src/start-lex-hermes.sh /opt/lex-hermes/; \
     cp /tmp/patch_src/SOUL.md /root/.hermes/; \
-    mkdir -p /opt/lex-hermes/skills/legal/lexitool-operations/; \
-    cp -a /tmp/patch_src/skills/legal/lexitool-operations/. /opt/lex-hermes/skills/legal/lexitool-operations/; \
-    mkdir -p /root/.hermes/skills/legal/lexitool-operations/; \
-    cp -a /tmp/patch_src/skills/legal/lexitool-operations/. /root/.hermes/skills/legal/lexitool-operations/; \
+    rm -rf /opt/lex-hermes/skills/productivity/ocr-and-documents/ \
+      /root/.hermes/skills/productivity/ocr-and-documents/ \
+      /opt/lex-hermes/skills/productivity/legal-project-workflow/ \
+      /root/.hermes/skills/productivity/legal-project-workflow/; \
+    for s in \
+      skills/productivity/ocr-and-documents \
+      skills/productivity/legal-project-workflow \
+      skills/legal/lexitool-operations; do \
+      mkdir -p "/opt/lex-hermes/$s" "/root/.hermes/$s"; \
+      cp -a "/tmp/patch_src/$s/." "/opt/lex-hermes/$s/"; \
+      cp -a "/tmp/patch_src/$s/." "/root/.hermes/$s/"; \
+    done; \
     mkdir -p /opt/lex-hermes/profiles/; \
     (cp /tmp/patch_src/profiles/*.soul.md /opt/lex-hermes/profiles/ 2>/dev/null || true); \
     rm -rf /tmp/patch_src; \

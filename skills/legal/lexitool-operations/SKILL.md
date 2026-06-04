@@ -38,13 +38,7 @@ lex_edit(path="/workingfile/project/D01.docx", op="replace", target="§29", new_
 lex_ref(path="/workingfile/project/D01.docx", op="xref_audit")
 ```
 
-Never run these as terminal commands:
-
-```text
-lex_read "file.docx" mode=structure
-lex_edit ...
-python3 -c "from lexitool.markup import lex_read ..."
-```
+Never run native Lex tools as terminal commands or direct Python imports.
 
 ## Quick Reference
 

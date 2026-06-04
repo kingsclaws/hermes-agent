@@ -1710,13 +1710,14 @@ def terminal_tool(
                 "status": "error",
             }, ensure_ascii=False)
 
-        from tools.legal_ocr_guard import generic_ocr_attempt_reason
-        guard_reason = generic_ocr_attempt_reason(command)
-        if guard_reason:
+        from tools.legal_ocr_guard import lex_harness_guard_reason
+        guard = lex_harness_guard_reason(command)
+        if guard:
+            error_code, guard_reason = guard
             return json.dumps({
                 "output": guard_reason,
                 "exit_code": 2,
-                "error": "lex_ocr_required",
+                "error": error_code,
                 "status": "error",
             }, ensure_ascii=False)
 
