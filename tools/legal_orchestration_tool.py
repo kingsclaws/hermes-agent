@@ -5,8 +5,9 @@ from __future__ import annotations
 import json
 import logging
 import re
+from itertools import zip_longest
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
 from tools.delegate_tool import delegate_task
 from tools.project_management_tool import resolve_selected_project
@@ -41,6 +42,17 @@ _REVIEW_TASK_TYPES = {
     "review_ts",
     "review_xref",
     "review_translation",
+}
+
+_XREF_REVIEW_AUTO_EXCLUDE_DIRS = {
+    ".git",
+    ".hermes-project",
+    ".venv",
+    "__pycache__",
+    "delivery",
+    "deliverables",
+    "node_modules",
+    "venv",
 }
 
 
@@ -149,6 +161,42 @@ def _load_project_context(project_root: Path) -> str:
     return "\n".join(pieces).strip()
 
 
+def _resolve_path_like(value: Optional[str], *, project_root: Path) -> Optional[str]:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    path = Path(raw).expanduser()
+    if not path.is_absolute():
+        path = (project_root / path).resolve()
+    else:
+        path = path.resolve()
+    return str(path)
+
+
+def _dedupe_paths(paths: Sequence[str]) -> List[str]:
+    ordered: List[str] = []
+    seen = set()
+    for item in paths:
+        key = str(item).strip()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        ordered.append(key)
+    return ordered
+
+
+def _discover_project_docx_paths(project_root: Path) -> List[str]:
+    if not project_root.exists():
+        return []
+    docx_paths: List[str] = []
+    for path in project_root.rglob("*.docx"):
+        parts = {part.lower() for part in path.parts}
+        if parts & _XREF_REVIEW_AUTO_EXCLUDE_DIRS:
+            continue
+        docx_paths.append(str(path.resolve()))
+    return sorted(docx_paths)
+
+
 def _review_contract(review_type: str, document_path: str) -> str:
     return (
         "\n## Output Contract\n"
@@ -226,6 +274,150 @@ def _fallback_finding(review_type: str, document_path: Optional[str], summary: s
         "suggestion": "Re-run review with stricter JSON formatting.",
         "title": "Unstructured reviewer output",
     }
+
+
+def _dedupe_findings(findings: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    unique: List[Dict[str, Any]] = []
+    seen = set()
+    for item in findings:
+        key = (
+            str(item.get("review_type") or ""),
+            str(item.get("document_path") or ""),
+            str(item.get("location") or ""),
+            str(item.get("title") or ""),
+            str(item.get("finding") or ""),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(item)
+    return unique
+
+
+def _xref_internal_finding(document_path: str, entry: Dict[str, Any]) -> Dict[str, Any]:
+    para = entry.get("para")
+    location = f"Paragraph {para}" if para else ""
+    ref_text = str(entry.get("ref_text") or entry.get("clause_num") or "cross-reference")
+    target_para = entry.get("target_para")
+    return {
+        "document_path": document_path,
+        "finding": (
+            f"{ref_text} does not resolve to an existing clause in the document. "
+            f"Context: {str(entry.get('context') or '').strip()}"
+        ).strip(),
+        "location": location,
+        "review_type": "review_xref",
+        "severity": "major",
+        "suggestion": "Correct the clause number or add the missing target heading.",
+        "title": f"Dead internal cross-reference: {ref_text}",
+        "target_para": target_para,
+    }
+
+
+def _xref_cross_doc_finding(entry: Dict[str, Any]) -> Dict[str, Any]:
+    source_path = str(entry.get("source") or "")
+    para = entry.get("source_para")
+    target_doc = str(entry.get("target_doc") or "")
+    clause = str(entry.get("clause") or "")
+    location = f"Paragraph {para}" if para else ""
+    return {
+        "document_path": source_path,
+        "finding": str(entry.get("reason") or "").strip(),
+        "location": location,
+        "review_type": "review_xref",
+        "severity": "major",
+        "suggestion": "Fix the target document name or referenced clause so the citation resolves.",
+        "title": f"Broken cross-document reference: 《{target_doc}》第{clause}条",
+        "target_doc": target_doc,
+    }
+
+
+def _run_xref_preflight(
+    *,
+    project_root: Path,
+    document_path: Optional[str],
+    related_paths: Sequence[str],
+) -> Dict[str, Any]:
+    primary = _resolve_path_like(document_path, project_root=project_root)
+    if not primary:
+        return {
+            "document_path": None,
+            "error": "review_xref requires document_path.",
+            "findings": [],
+            "ok": False,
+        }
+
+    try:
+        from lexitool import xref
+    except Exception as exc:
+        return {
+            "document_path": primary,
+            "error": f"lexitool.xref is unavailable: {exc}",
+            "findings": [],
+            "ok": False,
+        }
+
+    related_abs = [
+        resolved
+        for resolved in (
+            _resolve_path_like(path, project_root=project_root) for path in related_paths
+        )
+        if resolved
+    ]
+    project_docs = _discover_project_docx_paths(project_root)
+    cross_docs = _dedupe_paths([primary] + related_abs + project_docs)
+
+    single_doc = xref.xref_audit(primary)
+    cross_doc = None
+    if len(cross_docs) >= 2:
+        cross_doc = xref.cross_doc_scan(cross_docs)
+
+    findings: List[Dict[str, Any]] = []
+    for entry in single_doc.get("dead_refs") or []:
+        if isinstance(entry, dict):
+            findings.append(_xref_internal_finding(primary, entry))
+    if isinstance(cross_doc, dict):
+        for entry in cross_doc.get("broken_refs") or []:
+            if isinstance(entry, dict):
+                findings.append(_xref_cross_doc_finding(entry))
+
+    summary_bits = [str(single_doc.get("summary") or "").strip()]
+    if isinstance(cross_doc, dict) and cross_doc.get("summary"):
+        summary = cross_doc["summary"]
+        if isinstance(summary, dict):
+            summary_bits.append(
+                "Cross-document refs: "
+                f"{summary.get('valid', 0)} valid, {summary.get('broken', 0)} broken"
+            )
+        else:
+            summary_bits.append(str(summary).strip())
+
+    return {
+        "document_path": primary,
+        "cross_doc_scan": cross_doc,
+        "docs_scanned": cross_docs,
+        "findings": _dedupe_findings(findings),
+        "ok": not findings and bool(single_doc.get("ok", True)) and (cross_doc is None or bool(cross_doc.get("ok", True))),
+        "single_doc_audit": single_doc,
+        "summary": "; ".join(bit for bit in summary_bits if bit),
+    }
+
+
+def _xref_review_appendix(preflight: Dict[str, Any]) -> str:
+    payload = {
+        "document_path": preflight.get("document_path"),
+        "docs_scanned": preflight.get("docs_scanned") or [],
+        "findings": preflight.get("findings") or [],
+        "single_doc_audit": preflight.get("single_doc_audit") or {},
+        "cross_doc_scan": preflight.get("cross_doc_scan") or {},
+        "summary": preflight.get("summary") or "",
+    }
+    return (
+        "\n## Cross-Reference Preflight\n"
+        "Treat the following machine scan as ground truth input. "
+        "Verify it, add any missing issues, but do not ignore broken references already detected.\n"
+        f"{json.dumps(payload, ensure_ascii=False, indent=2)}"
+    )
 
 
 def _normalize_findings(
@@ -321,10 +513,20 @@ def _build_review_subtasks(
     tasks: List[Dict[str, Any]] = []
     for review_type in review_types:
         role_file = _ROLE_FILE_BY_TASK_TYPE[review_type]
+        preflight = None
+        extra_context = ""
+        if review_type == "review_xref":
+            preflight = _run_xref_preflight(
+                project_root=project_root,
+                document_path=document_path,
+                related_paths=related_paths,
+            )
+            extra_context = _xref_review_appendix(preflight)
         context = (
             _role_prompt(project_root, role_file)
             + "\n\n"
             + project_context
+            + extra_context
             + "\n\n"
             + _review_contract(review_type, document_path or "")
         ).strip()
@@ -338,6 +540,10 @@ def _build_review_subtasks(
                     related_paths=related_paths,
                     term_sheet_path=term_sheet_path,
                 ),
+                "review_type": review_type,
+                "machine_error": (preflight or {}).get("error"),
+                "machine_findings": (preflight or {}).get("findings", []),
+                "machine_summary": (preflight or {}).get("summary", ""),
                 "role": "leaf",
                 "toolsets": _TOOLSETS_BY_TASK_TYPE[review_type],
             }
@@ -374,14 +580,14 @@ def _handle_legal_orchestrate(args: dict, **kwargs) -> str:
     if task_type == "review":
         review_types = [str(v).strip() for v in (args.get("review_types") or []) if str(v).strip()]
         if not review_types:
-            review_types = ["review_content", "review_format"]
+            review_types = ["review_content", "review_format", "review_xref"]
             if term_sheet_path:
                 review_types.append("review_ts")
-            if related_paths:
-                review_types.append("review_xref")
         invalid = [name for name in review_types if name not in _REVIEW_TASK_TYPES]
         if invalid:
             return tool_error(f"Unknown review_types: {', '.join(invalid)}")
+        if "review_xref" in review_types and not document_path:
+            return tool_error("review_xref requires document_path.")
         tasks = _build_review_subtasks(
             project_root=project_root,
             document_path=document_path,
@@ -390,6 +596,16 @@ def _handle_legal_orchestrate(args: dict, **kwargs) -> str:
             term_sheet_path=term_sheet_path,
             review_types=review_types,
         )
+        xref_task_error = next(
+            (
+                str(task.get("machine_error") or "").strip()
+                for task in tasks
+                if task.get("review_type") == "review_xref" and str(task.get("machine_error") or "").strip()
+            ),
+            "",
+        )
+        if xref_task_error:
+            return tool_error(xref_task_error)
         batch = json.loads(
             delegate_task(
                 tasks=tasks,
@@ -401,7 +617,10 @@ def _handle_legal_orchestrate(args: dict, **kwargs) -> str:
             return tool_error(batch["error"])
         findings: List[Dict[str, Any]] = []
         subtasks: List[Dict[str, Any]] = []
-        for review_type, result in zip(review_types, batch.get("results") or []):
+        for task, result in zip_longest(tasks, batch.get("results") or [], fillvalue={}):
+            if not task:
+                continue
+            review_type = str(task.get("review_type") or "")
             summary = str(result.get("summary") or result.get("error") or "")
             structured = _extract_json_payload(summary)
             task_findings = _normalize_findings(
@@ -410,15 +629,21 @@ def _handle_legal_orchestrate(args: dict, **kwargs) -> str:
                 document_path=document_path,
                 raw_summary=summary,
             )
+            task_findings = _dedupe_findings(list(task.get("machine_findings") or []) + task_findings)
             findings.extend(task_findings)
             subtasks.append(
                 {
                     "review_type": review_type,
                     "status": result.get("status"),
-                    "summary": (structured or {}).get("summary") if isinstance(structured, dict) else summary,
+                    "summary": (
+                        (structured or {}).get("summary")
+                        if isinstance(structured, dict)
+                        else summary
+                    ) or str(task.get("machine_summary") or ""),
                     "finding_count": len(task_findings),
                 }
             )
+        findings = _dedupe_findings(findings)
         return _tool_ok(
             {
                 "document_path": document_path,
@@ -435,12 +660,30 @@ def _handle_legal_orchestrate(args: dict, **kwargs) -> str:
 
     role_file = _ROLE_FILE_BY_TASK_TYPE[task_type]
     project_context = _load_project_context(project_root)
+    preflight = None
+    extra_context = ""
+    if task_type == "review_xref":
+        preflight = _run_xref_preflight(
+            project_root=project_root,
+            document_path=document_path,
+            related_paths=related_paths,
+        )
+        if preflight.get("error"):
+            return tool_error(str(preflight["error"]))
+        extra_context = _xref_review_appendix(preflight)
     if task_type in _REVIEW_TASK_TYPES:
         contract = _review_contract(task_type, document_path or "")
     else:
         contract = _draft_contract(document_path)
 
-    context = (_role_prompt(project_root, role_file) + "\n\n" + project_context + "\n\n" + contract).strip()
+    context = (
+        _role_prompt(project_root, role_file)
+        + "\n\n"
+        + project_context
+        + extra_context
+        + "\n\n"
+        + contract
+    ).strip()
     delegated = _dispatch_single_child(
         parent_agent=parent_agent,
         task_type=task_type,
@@ -466,13 +709,19 @@ def _handle_legal_orchestrate(args: dict, **kwargs) -> str:
             document_path=document_path,
             raw_summary=summary,
         )
+        if task_type == "review_xref":
+            findings = _dedupe_findings(list((preflight or {}).get("findings") or []) + findings)
         return _tool_ok(
             {
                 "document_path": document_path,
                 "findings": findings,
                 "project_dir": str(project_root),
                 "status": (structured or {}).get("status", "completed") if isinstance(structured, dict) else "completed",
-                "summary": (structured or {}).get("summary", summary) if isinstance(structured, dict) else summary,
+                "summary": (
+                    (structured or {}).get("summary", summary)
+                    if isinstance(structured, dict)
+                    else summary
+                ) or str((preflight or {}).get("summary") or ""),
                 "task_type": task_type,
             }
         )
