@@ -14,7 +14,7 @@ RUN set -eux; \
     find /tmp/patch_src/hermes_cli -maxdepth 1 -type f -name '*.py' -exec cp {} /opt/lex-hermes/hermes_cli/ \; ; \
     find /tmp/patch_src/agent -maxdepth 1 -type f -name '*.py' -exec cp {} /opt/lex-hermes/agent/ \; ; \
     find /tmp/patch_src/tui_gateway -maxdepth 1 -type f -name '*.py' -exec cp {} /opt/lex-hermes/tui_gateway/ \; ; \
-    for f in run_agent.py model_tools.py toolsets.py hermes_state.py cli.py; do \
+    for f in run_agent.py model_tools.py toolsets.py hermes_state.py hermes_constants.py cli.py; do \
       if [ -f "/tmp/patch_src/$f" ]; then cp "/tmp/patch_src/$f" "/opt/lex-hermes/$f"; fi; \
     done; \
     cp /tmp/patch_src/start-lex-hermes.sh /usr/local/bin/; \
