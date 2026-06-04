@@ -4,27 +4,11 @@ FROM ${BASE_IMAGE}
 ENV PIP_BREAK_SYSTEM_PACKAGES=1 PIP_ROOT_USER_ACTION=ignore
 WORKDIR /opt/lex-hermes
 
-# Single COPY of everything, then distribute in RUN
+# Single COPY of everything, then overlay the source tree in RUN
 COPY . /tmp/patch_src/
 
-RUN cp /tmp/patch_src/vendor/lexitool/lexitool/*.py /opt/lexitool/lexitool/ \
-    && cp /tmp/patch_src/toolsets.py . \
-    && cp /tmp/patch_src/tools/code_execution_tool.py tools/ \
-    && cp /tmp/patch_src/tools/lexitool_tool.py tools/ \
-    && cp /tmp/patch_src/tools/terminal_tool.py tools/ \
-    && cp /tmp/patch_src/tools/memory_tool.py tools/ \
-    && cp /tmp/patch_src/tools/delegate_tool.py tools/ \
-    && cp /tmp/patch_src/tools/legal_orchestration_tool.py tools/ \
-    && cp /tmp/patch_src/tools/project_management_tool.py tools/ \
-    && cp /tmp/patch_src/hermes_cli/project_commands.py hermes_cli/ \
-    && cp /tmp/patch_src/hermes_cli/web_server.py hermes_cli/ \
-    && cp /tmp/patch_src/hermes_cli/tools_config.py hermes_cli/ \
-    && cp /tmp/patch_src/hermes_state.py hermes_state.py \
-    && cp /tmp/patch_src/agent/agent_init.py agent/ \
-    && cp /tmp/patch_src/agent/agent_runtime_helpers.py agent/ \
-    && cp /tmp/patch_src/agent/title_generator.py agent/ \
-    && cp /tmp/patch_src/agent/tool_executor.py agent/ \
-    && cp /tmp/patch_src/web/src/pages/ProjectsPage.tsx web/src/pages/ \
+RUN cp -a /tmp/patch_src/. /opt/lex-hermes/ \
+    && cp -a /tmp/patch_src/vendor/lexitool/lexitool/. /opt/lexitool/lexitool/ \
     && cp /tmp/patch_src/start-lex-hermes.sh /usr/local/bin/ \
     && cp /tmp/patch_src/start-lex-hermes.sh /opt/lex-hermes/ \
     && cp /tmp/patch_src/SOUL.md /root/.hermes/ \
