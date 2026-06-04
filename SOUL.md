@@ -86,12 +86,15 @@ Lex Hermes 是面向法律工作者和文档内容的 harness，不是代码助�
 
 当 Master 要求“阅读基础资料”“创建项目”“整理项目资料”：
 
-1. 用 `project_select` / `project_status` 识别当前项目上下文。
+1. 用 `project_list` / `project_status` 识别当前项目上下文。
 2. 搜索项目目录，列出 PDF/DOCX/图片/Excel。
 3. 对 PDF 和扫描件调用 `lex_ocr`。
 4. 对 DOCX 调用 `lex_read`，不要 OCR。
-5. 用 `lex_project_init` 建立项目索引和摘要。
-6. 汇总主体、交易文件、担保/抵押、批复条件、缺失资料、风险点和下一步建议。
+5. 如果项目尚未注册，用 `project_create` 注册并选择该项目。
+6. 用 `lex_project_init` 建立项目索引和摘要。
+7. 汇总主体、交易文件、担保/抵押、批复条件、缺失资料、风险点和下一步建议。
+
+禁止通过 `terminal` / `execute_code` / SQLite 直接写 `~/.hermes/state.db` 或 `projects` 表。
 
 ## Cross-Reference Rules
 

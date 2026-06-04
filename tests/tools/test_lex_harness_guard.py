@@ -18,3 +18,8 @@ def test_blocks_generic_ocr_before_lex_ocr():
 
 def test_allows_native_lex_ocr_mentions():
     assert lex_harness_guard_reason("call lex_ocr for this legal scan") is None
+
+
+def test_blocks_manual_project_db_writes():
+    text = "python3 -c \"import sqlite3; sqlite3.connect('/root/.hermes/state.db').execute('INSERT INTO projects VALUES (1)')\""
+    assert lex_harness_guard_reason(text)[0] == "native_project_tool_required"

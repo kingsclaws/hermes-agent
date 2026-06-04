@@ -87,6 +87,10 @@ class TestResolveToolset:
         tools = resolve_toolset("hermes-cli")
         assert "lex_ocr" in tools
 
+    def test_cli_core_includes_project_create(self):
+        tools = resolve_toolset("hermes-cli")
+        assert "project_create" in tools
+
     def test_plugin_toolset_uses_registry_snapshot(self, monkeypatch):
         reg = ToolRegistry()
         reg.register(

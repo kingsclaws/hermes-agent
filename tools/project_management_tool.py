@@ -91,6 +91,45 @@ PROJECT_SELECT_SCHEMA = {
     },
 }
 
+PROJECT_CREATE_SCHEMA = {
+    "name": "project_create",
+    "description": (
+        "Create/register a legal project in the native Hermes project registry. "
+        "Use this when the user asks to create a project from an existing folder. "
+        "Do not write ~/.hermes/state.db manually."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "name": {
+                "type": "string",
+                "description": "Project display name, e.g. 颐保银团.",
+            },
+            "path": {
+                "type": "string",
+                "description": "Existing project directory path, e.g. /workingfile/140. 颐保银团.",
+            },
+            "client": {
+                "type": "string",
+                "description": "Optional client or lead party.",
+            },
+            "goal": {
+                "type": "string",
+                "description": "Optional project goal/description.",
+            },
+            "status": {
+                "type": "string",
+                "description": "Project status. Default: INIT.",
+            },
+            "select": {
+                "type": "boolean",
+                "description": "Select the project as active after creation. Default: true.",
+            },
+        },
+        "required": ["name", "path"],
+    },
+}
+
 PROJECT_STATUS_SCHEMA = {
     "name": "project_status",
     "description": "Show the current active project or a named project from the project registry.",
@@ -134,6 +173,86 @@ PROJECT_LIST_SCHEMA = {
 }
 
 
+def _handle_project_create(args: dict, **kwargs) -> str:
+    parent_agent = kwargs.get("parent_agent")
+    db = _get_db(parent_agent)
+    should_close = db is not getattr(parent_agent, "_session_db", None)
+
+    name = str(args.get("name") or "").strip()
+    path_raw = str(args.get("path") or "").strip()
+    if not name:
+        return tool_error("name is required")
+    if not path_raw:
+        return tool_error("path is required")
+
+    path = str(Path(path_raw).expanduser().resolve())
+    if not Path(path).exists():
+        return tool_error(f"Project path does not exist: {path}")
+    if not Path(path).is_dir():
+        return tool_error(f"Project path is not a directory: {path}")
+
+    client = args.get("client")
+    goal = args.get("goal")
+    status = str(args.get("status") or "INIT").strip() or "INIT"
+    select_after_create = args.get("select", True)
+
+    try:
+        existing = db.get_project(name) or db.get_project(path)
+        if existing:
+            project_id = existing.get("id")
+            updates = {
+                "name": name,
+                "path": path,
+                "status": status,
+            }
+            if client is not None:
+                updates["client"] = client
+            if goal is not None:
+                updates["goal"] = goal
+            db.update_project(project_id, **updates)
+            project = db.get_project(project_id) or {**existing, **updates}
+            created = False
+        else:
+            project_id = db.create_project(
+                name=name,
+                path=path,
+                client=client,
+                goal=goal,
+                status=status,
+            )
+            project = db.get_project(project_id) or {
+                "id": project_id,
+                "name": name,
+                "path": path,
+                "client": client,
+                "goal": goal,
+                "status": status,
+            }
+            created = True
+
+        if select_after_create:
+            if parent_agent is not None:
+                apply_project_binding(parent_agent, project, persist=True)
+            elif kwargs.get("session_id"):
+                db.set_session_project(kwargs["session_id"], project.get("id"), project.get("path"))
+
+        return tool_result(
+            {
+                "created": created,
+                "active": bool(select_after_create),
+                "id": project.get("id"),
+                "name": project.get("name"),
+                "path": project.get("path"),
+                "client": project.get("client"),
+                "goal": project.get("goal"),
+                "status": project.get("status"),
+            }
+        )
+    finally:
+        if should_close:
+            db.close()
+
+
 def _handle_project_select(args: dict, **kwargs) -> str:
     parent_agent = kwargs.get("parent_agent")
     db = _get_db(parent_agent)
@@ -144,7 +263,7 @@ def _handle_project_select(args: dict, **kwargs) -> str:
     try:
         project = db.get_project(name)
         if not project:
-            return tool_error(f"Project not found: {name}")
+            return tool_error(f"Project not found: {name}. Use project_create to register an existing project directory.")
         if parent_agent is not None:
             apply_project_binding(parent_agent, project, persist=True)
         elif kwargs.get("session_id"):
@@ -241,6 +360,14 @@ def _handle_project_list(args: dict, **kwargs) -> str:
         if should_close:
             db.close()
 
+
+registry.register(
+    name="project_create",
+    toolset="project_management",
+    schema=PROJECT_CREATE_SCHEMA,
+    handler=_handle_project_create,
+    description=PROJECT_CREATE_SCHEMA["description"],
+)
 
 registry.register(
     name="project_select",

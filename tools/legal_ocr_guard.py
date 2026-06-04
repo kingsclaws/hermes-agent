@@ -30,6 +30,34 @@ _LEX_NATIVE_TOOL_PATTERNS = (
 )
 
 
+def state_db_write_attempt_reason(text: str | None) -> str | None:
+    """Return a rejection reason for manual Hermes state DB writes."""
+    if not text:
+        return None
+
+    lowered = text.lower()
+    touches_state_db = (
+        "state.db" in lowered
+        or "~/.hermes" in lowered
+        or "/root/.hermes" in lowered
+    )
+    writes_project_table = (
+        "insert" in lowered
+        or "update" in lowered
+        or "delete" in lowered
+        or "replace" in lowered
+    ) and "projects" in lowered
+    uses_sqlite = "sqlite3" in lowered or "sqlite3.connect" in lowered
+
+    if touches_state_db and writes_project_table and uses_sqlite:
+        return (
+            "Manual Hermes state DB writes are blocked. Use native project tools "
+            "instead: `project_create` to register an existing project directory, "
+            "`project_select` to activate it, and `project_status` to verify."
+        )
+    return None
+
+
 def native_lex_tool_attempt_reason(text: str | None) -> str | None:
     """Return a rejection reason for shell/Python attempts to call Lex tools."""
     if not text:
@@ -70,6 +98,10 @@ def generic_ocr_attempt_reason(text: str | None) -> str | None:
 
 def lex_harness_guard_reason(text: str | None) -> tuple[str, str] | None:
     """Return (error_code, reason) when Lex harness policy blocks execution."""
+    reason = state_db_write_attempt_reason(text)
+    if reason:
+        return "native_project_tool_required", reason
+
     reason = native_lex_tool_attempt_reason(text)
     if reason:
         return "native_lex_tool_required", reason

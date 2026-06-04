@@ -23,7 +23,7 @@ Use this skill when Master asks to scan a legal project directory, read all base
 
 The session should expose native tools:
 
-`project_select`, `project_status`, `project_context`, `project_list`, `search_files`, `read_file`, `lex_project_init`, `lex_ocr`, `lex_read`, `lex_stats`.
+`project_create`, `project_select`, `project_status`, `project_context`, `project_list`, `search_files`, `read_file`, `lex_project_init`, `lex_ocr`, `lex_read`, `lex_stats`.
 
 If native Lex tools are unavailable, state that clearly. Do not silently fall back to `terminal`, `execute_code`, `lex-ocr`, or `from lexitool...`.
 
@@ -35,10 +35,12 @@ Call native tools directly:
 search_files(path="/workingfile", pattern="*颐保*", target="files")
 lex_ocr(file_path="/workingfile/140. 颐保银团/基础资料/营业执照.pdf", language="ch")
 lex_read(path="/workingfile/140. 颐保银团/1. Execution/D01.docx", mode="structure")
+project_create(name="颐保银团", path="/workingfile/140. 颐保银团", client="交通银行", status="DRAFTING")
 lex_project_init(project_path="/workingfile/140. 颐保银团", project_name="140. 颐保银团")
 ```
 
 Never run Lex document operations through `terminal` or `execute_code`.
+Never write Hermes project rows directly through SQLite or `~/.hermes/state.db`.
 
 ## Quick Reference
 
@@ -52,6 +54,8 @@ Never run Lex document operations through `terminal` or `execute_code`.
 
 `lex_project_init`: Create or refresh project index/context.
 
+`project_create`: Register an existing project directory in Hermes and optionally select it.
+
 `project_select` / `project_status` / `project_context`: Work with registered project context.
 
 ## Procedure
@@ -61,14 +65,17 @@ Never run Lex document operations through `terminal` or `execute_code`.
 3. List and classify files: base documents, term sheet, approval, main agreements, security documents, legal opinions, CP materials.
 4. Use `lex_ocr` for local PDFs and scans.
 5. Use `lex_read` for DOCX files; use `mode="structure"` first, then targeted reads.
-6. Use `lex_project_init` to register/index the directory.
-7. Summarize parties, transaction structure, financing terms, security, approvals, missing documents, risk points, and next steps.
+6. If the project is not registered, use `project_create`.
+7. Use `lex_project_init` to index and summarize the directory.
+8. Summarize parties, transaction structure, financing terms, security, approvals, missing documents, risk points, and next steps.
 
 ## Pitfalls
 
 Do not use shell loops for OCR or DOCX reading.
 
 Do not import `lexitool` in `execute_code`.
+
+Do not manually edit Hermes project SQLite tables.
 
 Do not treat all PDFs as generic `pymupdf` extraction targets. Legal scans first use `lex_ocr`.
 
