@@ -10,10 +10,12 @@ COPY . /tmp/patch_src/
 RUN set -eux; \
     cp -a /tmp/patch_src/vendor/lexitool/lexitool/. /opt/lexitool/lexitool/; \
     cp /tmp/patch_src/vendor/lexitool/pyproject.toml /opt/lexitool/; \
-    find /tmp/patch_src/tools -maxdepth 1 -type f -name '*.py' -exec cp {} /opt/lex-hermes/tools/ \; ; \
-    find /tmp/patch_src/hermes_cli -maxdepth 1 -type f -name '*.py' -exec cp {} /opt/lex-hermes/hermes_cli/ \; ; \
-    find /tmp/patch_src/agent -maxdepth 1 -type f -name '*.py' -exec cp {} /opt/lex-hermes/agent/ \; ; \
-    find /tmp/patch_src/tui_gateway -maxdepth 1 -type f -name '*.py' -exec cp {} /opt/lex-hermes/tui_gateway/ \; ; \
+    for d in tools hermes_cli agent tui_gateway; do \
+      mkdir -p "/opt/lex-hermes/$d"; \
+      cp -a "/tmp/patch_src/$d/." "/opt/lex-hermes/$d/"; \
+    done; \
+    find /opt/lex-hermes/tools /opt/lex-hermes/hermes_cli /opt/lex-hermes/agent /opt/lex-hermes/tui_gateway \
+      \( -name '__pycache__' -o -name '*.pyc' \) -exec rm -rf {} +; \
     for f in run_agent.py model_tools.py toolsets.py hermes_state.py hermes_constants.py cli.py; do \
       if [ -f "/tmp/patch_src/$f" ]; then cp "/tmp/patch_src/$f" "/opt/lex-hermes/$f"; fi; \
     done; \
