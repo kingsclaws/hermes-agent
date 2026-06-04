@@ -27,10 +27,12 @@ logger = logging.getLogger(__name__)
 
 
 def _is_registry_register_call(node: ast.AST) -> bool:
-    """Return True when *node* is a ``registry.register(...)`` call expression."""
-    if not isinstance(node, ast.Expr) or not isinstance(node.value, ast.Call):
+    """Return True when *node* is a ``registry.register(...)`` call."""
+    if isinstance(node, ast.Expr):
+        node = node.value
+    if not isinstance(node, ast.Call):
         return False
-    func = node.value.func
+    func = node.func
     return (
         isinstance(func, ast.Attribute)
         and func.attr == "register"
@@ -39,11 +41,39 @@ def _is_registry_register_call(node: ast.AST) -> bool:
     )
 
 
-def _module_registers_tools(module_path: Path) -> bool:
-    """Return True when the module contains a top-level ``registry.register(...)`` call.
+class _TopLevelRegisterVisitor(ast.NodeVisitor):
+    """Find registry.register calls in top-level control-flow only.
 
-    Only inspects module-body statements so that helper modules which happen
-    to call ``registry.register()`` inside a function are not picked up.
+    Tool modules sometimes register many tools from a module-level loop. Those
+    are still import-time registrations and must be discovered. Function/class
+    bodies are skipped so helper functions that register dynamically are not
+    imported by discovery.
+    """
+
+    def __init__(self) -> None:
+        self.found = False
+
+    def visit_Call(self, node: ast.Call) -> None:  # noqa: N802 - ast visitor API
+        if _is_registry_register_call(node):
+            self.found = True
+            return
+        self.generic_visit(node)
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:  # noqa: N802
+        return
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:  # noqa: N802
+        return
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:  # noqa: N802
+        return
+
+
+def _module_registers_tools(module_path: Path) -> bool:
+    """Return True when the module registers tools at import time.
+
+    Inspects module-level statements and top-level control-flow, but skips
+    function/class bodies so dynamic helper registration is not picked up.
     """
     try:
         source = module_path.read_text(encoding="utf-8")
@@ -51,7 +81,12 @@ def _module_registers_tools(module_path: Path) -> bool:
     except (OSError, SyntaxError):
         return False
 
-    return any(_is_registry_register_call(stmt) for stmt in tree.body)
+    visitor = _TopLevelRegisterVisitor()
+    for stmt in tree.body:
+        visitor.visit(stmt)
+        if visitor.found:
+            return True
+    return False
 
 
 def discover_builtin_tools(tools_dir: Optional[Path] = None) -> List[str]:

@@ -1,6 +1,6 @@
 ---
 name: ocr-and-documents
-description: "Extract text from PDFs/scans (pymupdf, marker-pdf)."
+description: "Extract text from legal PDFs and scanned documents."
 version: 2.3.0
 author: Hermes Agent
 license: MIT
@@ -16,6 +16,24 @@ metadata:
 For DOCX: use `python-docx` (parses actual document structure, far better than OCR).
 For PPTX: see the `powerpoint` skill (uses `python-pptx` with full slide/notes support).
 This skill covers **PDFs and scanned documents**.
+
+## Lex Hermes Priority
+
+In Lex Hermes legal-document workflows, local PDFs and scanned legal materials should use the native `lex_ocr` tool first. Do not call `vision_analyze` on PDF files; it only accepts real image files. Do not install `pymupdf`, `marker-pdf`, or other OCR packages until `lex_ocr` has failed or the user explicitly asks for a different extractor.
+
+Use `lex_ocr` for:
+- Scanned business licenses, IDs, articles of association, partnership agreements, property certificates, approvals, contracts, and other legal due-diligence PDFs.
+- Local PDF paths under `/workingfile`, `/data/projects`, or the active project directory.
+- Chinese legal documents where MinerU OCR is preferable to generic PDF text extraction.
+
+Example:
+
+```
+lex_ocr(file_path="/workingfile/project/营业执照.pdf", language="ch")
+lex_ocr(file_path="/workingfile/project/章程.pdf", language="ch", page_range="1-10")
+```
+
+If `lex_ocr` is unavailable, say that the native Lex OCR tool is not exposed in this session and then fall back to the local extraction steps below.
 
 ## Step 1: Remote URL Available?
 

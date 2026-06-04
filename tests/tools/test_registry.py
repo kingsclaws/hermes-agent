@@ -320,6 +320,43 @@ class TestBuiltinDiscovery:
         assert imported == ["tools.alpha"]
         mock_import.assert_called_once_with("tools.alpha")
 
+    def test_detects_top_level_loop_registration(self, tmp_path):
+        tools_dir = tmp_path / "tools"
+        tools_dir.mkdir()
+        (tools_dir / "__init__.py").write_text("", encoding="utf-8")
+        (tools_dir / "registry.py").write_text("", encoding="utf-8")
+        (tools_dir / "batch.py").write_text(
+            "from tools.registry import registry\n"
+            "TOOLS = [('alpha', 'x'), ('beta', 'x')]\n"
+            "for name, toolset in TOOLS:\n"
+            "    registry.register(name=name, toolset=toolset, schema={}, handler=lambda *_a, **_k: '{}')\n",
+            encoding="utf-8",
+        )
+
+        with patch("tools.registry.importlib.import_module") as mock_import:
+            imported = discover_builtin_tools(tools_dir)
+
+        assert imported == ["tools.batch"]
+        mock_import.assert_called_once_with("tools.batch")
+
+    def test_ignores_function_local_registration(self, tmp_path):
+        tools_dir = tmp_path / "tools"
+        tools_dir.mkdir()
+        (tools_dir / "__init__.py").write_text("", encoding="utf-8")
+        (tools_dir / "registry.py").write_text("", encoding="utf-8")
+        (tools_dir / "dynamic.py").write_text(
+            "from tools.registry import registry\n"
+            "def register_later():\n"
+            "    registry.register(name='late', toolset='x', schema={}, handler=lambda *_a, **_k: '{}')\n",
+            encoding="utf-8",
+        )
+
+        with patch("tools.registry.importlib.import_module") as mock_import:
+            imported = discover_builtin_tools(tools_dir)
+
+        assert imported == []
+        mock_import.assert_not_called()
+
     def test_skips_mcp_tool_even_if_it_registers(self, tmp_path):
         tools_dir = tmp_path / "tools"
         tools_dir.mkdir()

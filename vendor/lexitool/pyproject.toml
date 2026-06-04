@@ -26,6 +26,8 @@ dev = [
 
 [project.scripts]
 lex-docx = "lexitool.cli:main"
+lexitool = "lexitool.cli:main"
+lex-ocr = "lexitool.ocr_cli:main"
 
 [tool.setuptools]
 packages = ["lexitool"]
