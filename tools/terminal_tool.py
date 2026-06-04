@@ -1710,6 +1710,16 @@ def terminal_tool(
                 "status": "error",
             }, ensure_ascii=False)
 
+        from tools.legal_ocr_guard import generic_ocr_attempt_reason
+        guard_reason = generic_ocr_attempt_reason(command)
+        if guard_reason:
+            return json.dumps({
+                "output": guard_reason,
+                "exit_code": 2,
+                "error": "lex_ocr_required",
+                "status": "error",
+            }, ensure_ascii=False)
+
         # Get configuration
         config = _get_env_config()
         env_type = config["env_type"]

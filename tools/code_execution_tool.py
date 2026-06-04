@@ -1063,6 +1063,15 @@ def execute_code(
     if not code or not code.strip():
         return tool_error("No code provided.")
 
+    from tools.legal_ocr_guard import generic_ocr_attempt_reason
+    guard_reason = generic_ocr_attempt_reason(code)
+    if guard_reason:
+        return json.dumps({
+            "status": "error",
+            "output": guard_reason,
+            "error": "lex_ocr_required",
+        }, ensure_ascii=False)
+
     # Dispatch: remote backends use file-based RPC, local uses UDS
     from tools.terminal_tool import _get_env_config
     env_type = _get_env_config()["env_type"]

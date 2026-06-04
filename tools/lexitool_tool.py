@@ -1290,11 +1290,15 @@ def _handle_corpus(args: dict, **kwargs) -> str:
 LEX_OCR_SCHEMA = {
     "name": "lex_ocr",
     "description": (
-        "Convert a scanned PDF to markdown text using MinerU OCR. "
+        "Native Lex Hermes OCR tool. Convert a scanned PDF to markdown text using MinerU OCR. "
         "Supports both the free Agent API (no key needed, lower quality) and "
         "the Precision API (set MINERU_API_KEY env var for best quality with "
-        "VLM-based recognition). Use this for legal documents, scanned "
-        "contracts, and any PDF that may contain non-extractable text or images."
+        "VLM-based recognition). ALWAYS use this first for local legal PDFs, scanned "
+        "contracts, business licenses, IDs, articles of association, partnership "
+        "agreements, certificates, approvals, and any PDF that may contain "
+        "non-extractable text or images. Do not use vision_analyze, execute_code, "
+        "terminal, pymupdf, marker-pdf, or tesseract for these PDFs unless lex_ocr "
+        "has failed or the user explicitly asks for a non-Lex extractor."
     ),
     "parameters": {
         "type": "object",
