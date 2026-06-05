@@ -31,7 +31,10 @@ const REVIEW_TYPES = [
 ] as const;
 
 type WorkflowAtom = {
+  depends_on?: string[];
   id: string;
+  instructions?: string;
+  requires_approval?: boolean;
   role: string;
   title: string;
   type: string;
@@ -68,6 +71,7 @@ export function LegalWorkflowPanel({
     "review_xref",
   ]);
   const [workflowAtoms, setWorkflowAtoms] = useState<WorkflowAtom[]>(DEFAULT_WORKFLOW_ATOMS);
+  const [selectedAtomIndex, setSelectedAtomIndex] = useState(0);
 
   const effectiveProjectDir = q(projectDir || cwd || "");
   const canRunProject = !!effectiveProjectDir && !disabled;
@@ -113,6 +117,7 @@ export function LegalWorkflowPanel({
 
   const removeAtom = (index: number) => {
     setWorkflowAtoms((prev) => prev.filter((_, i) => i !== index));
+    setSelectedAtomIndex((prev) => Math.max(0, Math.min(prev, workflowAtoms.length - 2)));
   };
 
   const addAtom = () => {
@@ -125,7 +130,10 @@ export function LegalWorkflowPanel({
         type: "manual",
       },
     ]);
+    setSelectedAtomIndex(workflowAtoms.length);
   };
+
+  const selectedAtom = workflowAtoms[selectedAtomIndex] ?? workflowAtoms[0];
 
   return (
     <Card className="overflow-hidden border-primary/20 bg-background-base/70 p-0">
@@ -179,6 +187,7 @@ export function LegalWorkflowPanel({
             {workflowAtoms.map((atom, index) => (
               <div
                 key={`${atom.id}-${index}`}
+                onClick={() => setSelectedAtomIndex(index)}
                 className="grid grid-cols-[auto_1fr_auto] items-start gap-1 rounded border border-current/10 bg-background-base/60 p-1"
               >
                 <GripVertical className="mt-1 h-3.5 w-3.5 text-muted-foreground" />
@@ -227,6 +236,79 @@ export function LegalWorkflowPanel({
               </div>
             ))}
           </div>
+          {selectedAtom && (
+            <div className="space-y-1 rounded border border-primary/20 bg-primary/5 p-2">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-[0.65rem] uppercase tracking-wider text-muted-foreground">
+                  选中原子 #{selectedAtomIndex + 1}
+                </span>
+                <button
+                  type="button"
+                  disabled={disabled}
+                  onClick={() =>
+                    run(`
+请运行 UI 选中的 workflow 原子，不要自由发挥。
+项目目录：${effectiveProjectDir || "使用当前 active project"}
+主文档：${q(documentPath) || "按 workflow 上下文"}
+TS/支持文件：${q(termSheetPath) || "无"}
+选中原子：
+${JSON.stringify(selectedAtom, null, 2)}
+要求：
+1. 如果该原子 requires_approval=true，先汇报计划并等待确认，不得修改文档。
+2. 如果 type=lex_read/source_read/analysis，只读取和产出结构化结果，不修改文档。
+3. 如果 type=lex_edit，必须先 lex_read 定位，再 lex_edit，最后验证。
+4. 如已有 workflow run_id，请用 legal_workflow(action="update_step") 回写状态和结果。
+                    `)
+                  }
+                  className="rounded border border-primary/30 px-2 py-0.5 text-[0.65rem] text-primary hover:bg-primary/10 disabled:opacity-50"
+                >
+                  运行选中
+                </button>
+              </div>
+              <div className="grid grid-cols-2 gap-1">
+                <input
+                  value={selectedAtom.id}
+                  onChange={(e) => updateAtom(selectedAtomIndex, { id: e.target.value })}
+                  className="rounded border border-current/10 bg-black/10 px-1.5 py-1 text-[0.65rem] outline-none focus:border-primary/60"
+                  placeholder="id"
+                />
+                <input
+                  value={(selectedAtom.depends_on ?? []).join(", ")}
+                  onChange={(e) =>
+                    updateAtom(selectedAtomIndex, {
+                      depends_on: e.target.value
+                        .split(",")
+                        .map((v) => v.trim())
+                        .filter(Boolean),
+                    })
+                  }
+                  className="rounded border border-current/10 bg-black/10 px-1.5 py-1 text-[0.65rem] outline-none focus:border-primary/60"
+                  placeholder="depends_on"
+                />
+              </div>
+              <textarea
+                value={selectedAtom.instructions ?? ""}
+                onChange={(e) =>
+                  updateAtom(selectedAtomIndex, { instructions: e.target.value })
+                }
+                rows={2}
+                className="w-full resize-none rounded border border-current/10 bg-black/10 px-1.5 py-1 text-[0.65rem] outline-none focus:border-primary/60"
+                placeholder="这个原子的具体执行要求"
+              />
+              <label className="flex items-center gap-1.5 text-[0.65rem] text-muted-foreground">
+                <input
+                  type="checkbox"
+                  checked={!!selectedAtom.requires_approval}
+                  onChange={(e) =>
+                    updateAtom(selectedAtomIndex, {
+                      requires_approval: e.target.checked,
+                    })
+                  }
+                />
+                执行前需要人工确认
+              </label>
+            </div>
+          )}
         </div>
 
         <div className="grid grid-cols-2 gap-1.5">
@@ -323,6 +405,7 @@ TS/支持文件：${q(termSheetPath) || "无"}
 指令：${q(instructions) || "按项目上下文和用户要求处理。"}
 要求：
 1. 调用 legal_orchestrate(task_type="plan") 或 legal_workflow(action="create_plan")。
+   如果直接调用 legal_workflow，必须把下方 UI 指定 workflow 原子作为 steps 参数传入。
 2. workflow 必须包含：通读模板、读取 TS、条款地图、TS-合同矩阵、修订计划、人审确认、执行修订、交叉引用、格式复核、交付检查。
 3. 在用户确认修订计划前，禁止调用 lex_edit 修改主文档。
 4. 创建后展示 workflow run_id 和每个 step_id，等待 Master 选择、修改或确认。

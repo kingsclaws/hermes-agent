@@ -125,6 +125,41 @@ def _default_contract_workflow_steps(
     ]
 
 
+def _normalize_custom_steps(raw_steps: Any) -> List[Dict[str, Any]]:
+    if not isinstance(raw_steps, list):
+        return []
+    normalized: List[Dict[str, Any]] = []
+    previous_id: Optional[str] = None
+    for index, item in enumerate(raw_steps):
+        if not isinstance(item, dict):
+            continue
+        step_id = str(item.get("id") or f"step-{index + 1}").strip()
+        title = str(item.get("title") or step_id).strip()
+        step_type = str(item.get("type") or "manual").strip()
+        role = str(item.get("role") or "coordinator").strip()
+        depends_on = item.get("depends_on")
+        if not isinstance(depends_on, list):
+            depends_on = [previous_id] if previous_id else []
+        input_payload = item.get("input") if isinstance(item.get("input"), dict) else {}
+        instructions = str(item.get("instructions") or "").strip()
+        if instructions:
+            input_payload = {**input_payload, "instructions": instructions}
+        normalized.append(
+            {
+                "id": step_id,
+                "step_index": index,
+                "title": title,
+                "type": step_type,
+                "role": role,
+                "depends_on": [str(v) for v in depends_on if str(v).strip()],
+                "input": input_payload,
+                "requires_approval": bool(item.get("requires_approval")),
+            }
+        )
+        previous_id = step_id
+    return normalized
+
+
 LEGAL_WORKFLOW_SCHEMA = {
     "name": "legal_workflow",
     "description": (
@@ -147,6 +182,23 @@ LEGAL_WORKFLOW_SCHEMA = {
             "term_sheet_path": {"type": "string"},
             "instructions": {"type": "string"},
             "status": {"type": "string"},
+            "steps": {
+                "type": "array",
+                "description": "Optional UI-edited workflow atoms/steps to persist instead of the default template.",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "string"},
+                        "title": {"type": "string"},
+                        "type": {"type": "string"},
+                        "role": {"type": "string"},
+                        "depends_on": {"type": "array", "items": {"type": "string"}},
+                        "instructions": {"type": "string"},
+                        "requires_approval": {"type": "boolean"},
+                        "input": {"type": "object"},
+                    },
+                },
+            },
             "step": {"type": "object"},
             "limit": {"type": "integer"},
         },
@@ -169,11 +221,13 @@ def _handle_legal_workflow(args: dict, **kwargs) -> str:
         term_sheet_path = str(args.get("term_sheet_path") or "").strip() or None
         instructions = str(args.get("instructions") or "").strip() or None
         name = str(args.get("name") or "").strip() or "法律文书修订 workflow"
-        steps = _default_contract_workflow_steps(
-            document_path=document_path,
-            term_sheet_path=term_sheet_path,
-            instructions=instructions,
-        )
+        steps = _normalize_custom_steps(args.get("steps"))
+        if not steps:
+            steps = _default_contract_workflow_steps(
+                document_path=document_path,
+                term_sheet_path=term_sheet_path,
+                instructions=instructions,
+            )
         run_id = db.create_legal_workflow(
             name=name,
             project_id=project["project_id"],
