@@ -1,6 +1,6 @@
 import { Badge } from "@nous-research/ui/ui/components/badge";
 import { Button } from "@nous-research/ui/ui/components/button";
-import { Card } from "@/components/ui/card";
+import { Card } from "@nous-research/ui/ui/components/card";
 import { cn } from "@/lib/utils";
 import {
   CheckSquare,

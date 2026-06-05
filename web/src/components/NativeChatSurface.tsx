@@ -1,5 +1,5 @@
 import { Button } from "@nous-research/ui/ui/components/button";
-import { Card } from "@/components/ui/card";
+import { Card } from "@nous-research/ui/ui/components/card";
 import { ToolCall, type ToolEntry } from "@/components/ToolCall";
 import { GatewayClient, type ConnectionState } from "@/lib/gatewayClient";
 import { executeSlash, parseSlash } from "@/lib/slashExec";
