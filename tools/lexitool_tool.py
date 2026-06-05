@@ -391,13 +391,28 @@ def _handle_edit(args: dict, **kwargs) -> str:
     body = root.find(f"{W}body")
 
     para_idx = target.para_start - 1
-    paras = [el for el in body if el.tag == f"{W}p"]
 
-    if para_idx < 0 or para_idx >= len(paras):
-        return tool_error(f"Paragraph {target.para_start} out of range (1-{len(paras)})")
+    # Build two paragraph lists:
+    #   body_paras — body-direct w:p only (matches lex_read numbering)
+    #   all_paras  — every w:p in document order including table cells
+    #                 (matches edit_ops._find_para semantics)
+    body_paras = [el for el in body if el.tag == f"{W}p"]
+    all_paras = [el for el in root.iter() if el.tag == f"{W}p"]
 
-    para_el = paras[para_idx]
+    if para_idx < 0 or para_idx >= len(body_paras):
+        return tool_error(f"Paragraph {target.para_start} out of range (1-{len(body_paras)})")
+
+    para_el = body_paras[para_idx]
     tc_id = _next_tc_id_from_body(body)
+
+    # Resolve the paragraph in the all_paras list for operations that need
+    # the canonical element from root.iter() (tc_replace_first_in_para
+    # requires the element's parent chain to match the root).
+    _all_idx = None
+    for i, el in enumerate(all_paras):
+        if el is para_el:
+            _all_idx = i
+            break
 
     try:
         if op == "delete":
@@ -413,9 +428,32 @@ def _handle_edit(args: dict, **kwargs) -> str:
             else:
                 old_text = _get_para_text(para_el)
             if tc:
-                tc_replace_first_in_para(para_el, old_text, new_text, tc_id, author)
+                tc_result = tc_replace_first_in_para(para_el, old_text, new_text, tc_id, author)
+                # Fallback: if text not found in the body-level paragraph,
+                # search ALL paragraphs including table cells.
+                if not tc_result.get("ok") and _all_idx is not None:
+                    tc_result = _search_and_tc_replace_nearby(
+                        all_paras, _all_idx, old_text, new_text, tc_id, author
+                    )
+                if not tc_result.get("ok"):
+                    return tool_error(
+                        f"Text '{old_text}' not found in paragraph {target.para_start}"
+                        + (" or nearby table cells" if _all_idx is not None else "")
+                    )
             else:
-                _direct_replace(para_el, old_text, new_text)
+                result = _direct_replace(para_el, old_text, new_text)
+                # Fallback: if text not found in the body-level paragraph,
+                # search ALL paragraphs including table cells.  This handles
+                # the case where the LLM identified a paragraph number from
+                # lex_read (which only counts body-level w:p) but the actual
+                # text lives inside a table adjacent to that paragraph.
+                if not result["ok"] and _all_idx is not None:
+                    result = _search_and_replace_nearby(
+                        all_paras, _all_idx, old_text, new_text
+                    )
+                if not result["ok"]:
+                    return tool_error(f"Text '{old_text}' not found in paragraph {target.para_start}" +
+                                      (" or nearby table cells" if _all_idx is not None else ""))
 
         elif op == "insert":
             if tc:
@@ -489,14 +527,113 @@ def _get_para_text(para_el) -> str:
 
 
 def _direct_replace(para_el, old_text: str, new_text: str) -> dict:
+    """Replace old_text with new_text in a paragraph element.
+
+    Uses iter() to find ALL w:t descendants (including those nested inside
+    w:ins, w:del, w:smartTag, and other wrappers common in table cells).
+    Supports cross-run matching: if old_text spans multiple w:t elements,
+    the combined text is flattened into the first w:t and the rest are
+    cleared — same strategy as edit_ops.replace_text().
+    """
     W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
-    from lxml import etree
-    for r_el in para_el.findall(f"{W}r"):
-        for t_el in r_el.findall(f"{W}t"):
-            if old_text in (t_el.text or ""):
-                t_el.text = (t_el.text or "").replace(old_text, new_text, 1)
-                return {"ok": True}
-    return {"ok": False, "reason": "text not found"}
+    t_elements = [el for el in para_el.iter() if el.tag == f"{W}t"]
+    if not t_elements:
+        return {"ok": False, "reason": "no text runs in paragraph"}
+
+    full_text = "".join(t.text or "" for t in t_elements)
+    if old_text not in full_text:
+        return {"ok": False, "reason": "text not found"}
+
+    new_full = full_text.replace(old_text, new_text, 1)
+    t_elements[0].text = new_full
+    for t in t_elements[1:]:
+        t.text = ""
+    return {"ok": True}
+
+
+def _search_and_replace_nearby(
+    all_paras: list, body_idx: int, old_text: str, new_text: str
+) -> dict:
+    """Fallback: search paragraphs near body_idx (including table cell paragraphs)
+    for old_text and replace it.  Handles the common case where lex_read shows
+    a table adjacent to paragraph N but the table's cell paragraphs aren't
+    individually numbered.
+    """
+    W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+    # Search window: from body_idx forward up to 200 paragraphs, then backward
+    n = len(all_paras)
+    # Find the body-level paragraph in the all_paras list
+    search_start = 0
+    body_para_count = 0
+    for i, el in enumerate(all_paras):
+        parent = el.getparent()
+        # A body-level paragraph has w:body as ancestor (not w:tc)
+        is_body = True
+        anc = parent
+        while anc is not None:
+            if anc.tag == f"{W}tc":
+                is_body = False
+                break
+            anc = anc.getparent()
+        if is_body:
+            if body_para_count == body_idx:
+                search_start = i
+                break
+            body_para_count += 1
+
+    # Search forward from the body paragraph (cover table cells that follow it)
+    for i in range(search_start, min(search_start + 200, n)):
+        result = _direct_replace(all_paras[i], old_text, new_text)
+        if result["ok"]:
+            return result
+
+    # Search backward as a last resort
+    for i in range(search_start - 1, max(search_start - 50, -1), -1):
+        result = _direct_replace(all_paras[i], old_text, new_text)
+        if result["ok"]:
+            return result
+
+    return {"ok": False, "reason": "text not found in nearby paragraphs"}
+
+
+def _search_and_tc_replace_nearby(
+    all_paras: list, body_idx: int, old_text: str, new_text: str,
+    tc_id: int, author: str,
+) -> dict:
+    """Same as _search_and_replace_nearby but for TC mode replacement."""
+    from lexitool.tc_utils import tc_replace_first_in_para
+
+    W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+    n = len(all_paras)
+    search_start = 0
+    body_para_count = 0
+    for i, el in enumerate(all_paras):
+        anc = el.getparent()
+        is_body = True
+        while anc is not None:
+            if anc.tag == f"{W}tc":
+                is_body = False
+                break
+            anc = anc.getparent()
+        if is_body:
+            if body_para_count == body_idx:
+                search_start = i
+                break
+            body_para_count += 1
+
+    # Search forward
+    for i in range(search_start, min(search_start + 200, n)):
+        result = tc_replace_first_in_para(all_paras[i], old_text, new_text, tc_id, author)
+        if result.get("ok"):
+            return result
+
+    # Search backward
+    for i in range(search_start - 1, max(search_start - 50, -1), -1):
+        result = tc_replace_first_in_para(all_paras[i], old_text, new_text, tc_id, author)
+        if result.get("ok"):
+            return result
+
+    return {"ok": False, "reason": "text not found in nearby paragraphs"}
 
 
 def _direct_insert(para_el, text: str, offset: int) -> None:
