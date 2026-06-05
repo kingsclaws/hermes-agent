@@ -1722,6 +1722,8 @@ def _on_tool_progress(
             payload["depth"] = int(_kwargs["depth"])
         if _kwargs.get("model"):
             payload["model"] = str(_kwargs["model"])
+        if _kwargs.get("role"):
+            payload["role"] = str(_kwargs["role"])
         if _kwargs.get("tool_count") is not None:
             payload["tool_count"] = int(_kwargs["tool_count"])
         if _kwargs.get("toolsets"):
@@ -3097,6 +3099,52 @@ def _(rid, params: dict) -> dict:
             "max_concurrent_children": _get_max_concurrent_children(),
         },
     )
+
+
+@method("delegation.list_runs")
+def _(rid, params: dict) -> dict:
+    from hermes_state import SessionDB
+
+    session, err = _sess(params, rid)
+    if err:
+        return err
+    status = str(params.get("status") or "").strip() or None
+    try:
+        limit = max(1, min(int(params.get("limit", 100) or 100), 500))
+    except (TypeError, ValueError):
+        limit = 100
+    db = SessionDB()
+    try:
+        runs = db.list_subagent_runs(
+            parent_session_id=session.get("session_key"),
+            status=status,
+            limit=limit,
+        )
+        return _ok(rid, {"runs": runs})
+    finally:
+        db.close()
+
+
+@method("delegation.get_run")
+def _(rid, params: dict) -> dict:
+    from hermes_state import SessionDB
+
+    run_id = str(params.get("run_id") or "").strip()
+    if not run_id:
+        return _err(rid, 4000, "run_id required")
+    try:
+        events_limit = max(1, min(int(params.get("events_limit", 200) or 200), 1000))
+    except (TypeError, ValueError):
+        events_limit = 200
+    db = SessionDB()
+    try:
+        run = db.get_subagent_run(run_id)
+        if not run:
+            return _err(rid, 4040, "subagent run not found")
+        events = db.list_subagent_events(run_id, limit=events_limit)
+        return _ok(rid, {"events": events, "run": run})
+    finally:
+        db.close()
 
 
 @method("delegation.pause")

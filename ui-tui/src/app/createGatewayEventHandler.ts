@@ -618,6 +618,13 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
         // Preserve completed state if a later event races in before this one.
         turnController.upsertSubagent(ev.payload, c => (isTerminalStatus(c.status) ? {} : { status: 'queued' }))
 
+        {
+          const label = String(ev.payload.subagent_id ?? `sa:${ev.payload.task_index}`).trim()
+          const goal = String(ev.payload.goal ?? 'subagent').trim()
+          const toolsets = ev.payload.toolsets?.length ? ` · ${ev.payload.toolsets.join(', ')}` : ''
+          sys(`subagent queued [${label}]${toolsets} · ${goal}`)
+        }
+
         // Prime the status-bar HUD: fetch caps (once every 5s) so we can
         // warn as depth/concurrency approaches the configured ceiling.
         if (getDelegationState().maxSpawnDepth === null) {
@@ -700,6 +707,15 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
           }),
           { createIfMissing: false }
         )
+
+        {
+          const label = String(ev.payload.subagent_id ?? `sa:${ev.payload.task_index}`).trim()
+          const status = normalizeSubagentStatus(ev.payload.status, 'completed')
+          const duration =
+            typeof ev.payload.duration_seconds === 'number' ? ` · ${Math.round(ev.payload.duration_seconds)}s` : ''
+          const detail = String(ev.payload.summary ?? ev.payload.text ?? '').trim()
+          sys(`subagent ${status} [${label}]${duration}${detail ? ` · ${detail}` : ''}`)
+        }
 
         return
 

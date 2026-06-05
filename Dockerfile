@@ -118,6 +118,11 @@ COPY ui-tui/packages/hermes-ink/ ui-tui/packages/hermes-ink/
 # runtime `npm install` that then failed with EACCES.  Keeping the env
 # guards against a future regression if the source npm version changes.
 ENV npm_config_install_links=false
+ENV npm_config_fetch_retries=5
+ENV npm_config_fetch_retry_factor=2
+ENV npm_config_fetch_retry_mintimeout=20000
+ENV npm_config_fetch_retry_maxtimeout=120000
+ENV npm_config_fetch_timeout=600000
 
 RUN npm install --prefer-offline --no-audit && \
     npx playwright install --with-deps chromium --only-shell && \
@@ -243,7 +248,6 @@ COPY --chmod=0755 docker/cont-init.d/02-reconcile-profiles /etc/cont-init.d/02-r
 # ---------- Runtime ----------
 ENV HERMES_WEB_DIST=/opt/hermes/hermes_cli/web_dist
 ENV HERMES_HOME=/opt/data
-
 # `docker exec` privilege-drop shim. When operators run
 # `docker exec <c> hermes ...` they default to root, and any file the
 # command writes under $HERMES_HOME (auth.json, .env, config.yaml) ends

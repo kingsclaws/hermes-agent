@@ -1,37 +1,45 @@
 # Patch build — MINIMAL layers: 1 COPY + 1 RUN
-FROM lex-hermes:latest
+ARG BASE_IMAGE=localhost:6678/lex-hermes:latest
+FROM ${BASE_IMAGE}
 ENV PIP_BREAK_SYSTEM_PACKAGES=1 PIP_ROOT_USER_ACTION=ignore
 WORKDIR /opt/lex-hermes
 
-# Single COPY of everything, then distribute in RUN
+# Single COPY of everything, then overlay the source tree in RUN
 COPY . /tmp/patch_src/
 
-RUN cp /tmp/patch_src/vendor/lexitool/lexitool/*.py /opt/lexitool/lexitool/ \
-    && cp /tmp/patch_src/toolsets.py . \
-    && cp /tmp/patch_src/tools/code_execution_tool.py tools/ \
-    && cp /tmp/patch_src/tools/lexitool_tool.py tools/ \
-    && cp /tmp/patch_src/tools/terminal_tool.py tools/ \
-    && cp /tmp/patch_src/tools/memory_tool.py tools/ \
-    && cp /tmp/patch_src/tools/delegate_tool.py tools/ \
-    && cp /tmp/patch_src/hermes_cli/project_commands.py hermes_cli/ \
-    && cp /tmp/patch_src/hermes_cli/web_server.py hermes_cli/ \
-    && cp /tmp/patch_src/hermes_cli/tools_config.py hermes_cli/ \
-    && cp /tmp/patch_src/hermes_state.py hermes_state.py \
-    && cp /tmp/patch_src/agent/agent_init.py agent/ \
-    && cp /tmp/patch_src/agent/agent_runtime_helpers.py agent/ \
-    && cp /tmp/patch_src/agent/title_generator.py agent/ \
-    && cp /tmp/patch_src/agent/tool_executor.py agent/ \
-    && cp /tmp/patch_src/web/src/pages/ProjectsPage.tsx web/src/pages/ \
-    && cp /tmp/patch_src/start-lex-hermes.sh /usr/local/bin/ \
-    && cp /tmp/patch_src/start-lex-hermes.sh /opt/lex-hermes/ \
-    && cp /tmp/patch_src/SOUL.md /root/.hermes/ \
-    && mkdir -p /opt/lex-hermes/profiles/ \
-    && cp /tmp/patch_src/profiles/*.soul.md /opt/lex-hermes/profiles/ \
-    && rm -rf /tmp/patch_src \
-    && pip install --no-cache-dir /opt/lexitool \
-    && pip install --no-cache-dir -e ".[web]" \
-    && cd /opt/lex-hermes/web && npm run build \
-    && cd /opt/lex-hermes/ui-tui && npm run build \
-    && python3 -c "import docx, lxml" \
-    && python3 -m compileall -q -f /usr/local/lib/python3.11/site-packages/ \
-    && python3 -m compileall -q -f /opt/lex-hermes/
+RUN set -eux; \
+    cp -a /tmp/patch_src/vendor/lexitool/lexitool/. /opt/lexitool/lexitool/; \
+    cp /tmp/patch_src/vendor/lexitool/pyproject.toml /opt/lexitool/; \
+    rm -rf /opt/lex-hermes/web/src; \
+    for d in tools hermes_cli agent tui_gateway web; do \
+      mkdir -p "/opt/lex-hermes/$d"; \
+      cp -a "/tmp/patch_src/$d/." "/opt/lex-hermes/$d/"; \
+    done; \
+    find /opt/lex-hermes/tools /opt/lex-hermes/hermes_cli /opt/lex-hermes/agent /opt/lex-hermes/tui_gateway \
+      \( -name '__pycache__' -o -name '*.pyc' \) -exec rm -rf {} +; \
+    for f in run_agent.py model_tools.py toolsets.py hermes_state.py hermes_constants.py cli.py; do \
+      if [ -f "/tmp/patch_src/$f" ]; then cp "/tmp/patch_src/$f" "/opt/lex-hermes/$f"; fi; \
+    done; \
+    cp /tmp/patch_src/start-lex-hermes.sh /usr/local/bin/; \
+    cp /tmp/patch_src/start-lex-hermes.sh /opt/lex-hermes/; \
+    cp /tmp/patch_src/SOUL.md /root/.hermes/; \
+    rm -rf /opt/lex-hermes/skills/productivity/ocr-and-documents/ \
+      /root/.hermes/skills/productivity/ocr-and-documents/ \
+      /opt/lex-hermes/skills/productivity/legal-project-workflow/ \
+      /root/.hermes/skills/productivity/legal-project-workflow/; \
+    for s in \
+      skills/productivity/ocr-and-documents \
+      skills/productivity/legal-project-workflow \
+      skills/legal/lexitool-operations; do \
+      mkdir -p "/opt/lex-hermes/$s" "/root/.hermes/$s"; \
+      cp -a "/tmp/patch_src/$s/." "/opt/lex-hermes/$s/"; \
+      cp -a "/tmp/patch_src/$s/." "/root/.hermes/$s/"; \
+    done; \
+    mkdir -p /opt/lex-hermes/profiles/; \
+    (cp /tmp/patch_src/profiles/*.soul.md /opt/lex-hermes/profiles/ 2>/dev/null || true); \
+    rm -rf /tmp/patch_src; \
+    pip install --no-cache-dir --no-deps /opt/lexitool; \
+    python3 -c "import docx, lxml"; \
+    cd /opt/lex-hermes/web && npm run build; \
+    python3 -m compileall -q -f /usr/local/lib/python3.11/site-packages/; \
+    python3 -m compileall -q -f /opt/lex-hermes/

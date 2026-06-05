@@ -897,6 +897,41 @@ describe('createGatewayEventHandler', () => {
     expect(getTurnState().subagents.find(s => s.id === 'sa-weird')?.status).toBe('completed')
   })
 
+  it('prints subagent queue and completion events into the transcript', () => {
+    const appended: Msg[] = []
+    const ctx = buildCtx(appended)
+    const onEvent = createGatewayEventHandler(ctx)
+
+    onEvent({
+      payload: {
+        goal: 'Review the SPA',
+        subagent_id: 'sa-queue',
+        task_index: 0,
+        toolsets: ['lex-docx', 'file']
+      },
+      type: 'subagent.spawn_requested'
+    } as any)
+
+    onEvent({
+      payload: {
+        duration_seconds: 4.2,
+        goal: 'Review the SPA',
+        status: 'completed',
+        subagent_id: 'sa-queue',
+        summary: 'Found three issues',
+        task_index: 0
+      },
+      type: 'subagent.complete'
+    } as any)
+
+    expect(ctx.system.sys).toHaveBeenCalledWith(
+      'subagent queued [sa-queue] · lex-docx, file · Review the SPA'
+    )
+    expect(ctx.system.sys).toHaveBeenCalledWith(
+      'subagent completed [sa-queue] · 4s · Found three issues'
+    )
+  })
+
   it('drops stale reasoning/tool/todos events after ctrl-c until the next message starts', () => {
     // Repro for the discord report: ctrl-c interrupts, but late reasoning/tool
     // events from the still-winding-down agent loop kept populating the UI for

@@ -2547,6 +2547,44 @@ async def get_session_messages(session_id: str):
         db.close()
 
 
+@app.get("/api/sessions/{session_id}/subagents")
+async def get_session_subagents(
+    session_id: str,
+    status: Optional[str] = None,
+    limit: int = 100,
+):
+    from hermes_state import SessionDB
+
+    db = SessionDB()
+    try:
+        sid = db.resolve_session_id(session_id)
+        if not sid:
+            raise HTTPException(status_code=404, detail="Session not found")
+        runs = db.list_subagent_runs(
+            parent_session_id=sid,
+            status=status,
+            limit=limit,
+        )
+        return {"runs": runs, "session_id": sid}
+    finally:
+        db.close()
+
+
+@app.get("/api/subagents/{run_id}")
+async def get_subagent_run_detail(run_id: str, events_limit: int = 200):
+    from hermes_state import SessionDB
+
+    db = SessionDB()
+    try:
+        run = db.get_subagent_run(run_id)
+        if not run:
+            raise HTTPException(status_code=404, detail="Subagent run not found")
+        events = db.list_subagent_events(run_id, limit=events_limit)
+        return {"events": events, "run": run}
+    finally:
+        db.close()
+
+
 @app.delete("/api/sessions/{session_id}")
 async def delete_session_endpoint(session_id: str):
     from hermes_state import SessionDB

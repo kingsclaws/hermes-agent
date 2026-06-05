@@ -26,6 +26,25 @@ Usage:
 from typing import List, Dict, Any, Set, Optional
 
 
+_LEXITOOL_TOOLS = [
+    "lex_read",
+    "lex_stats",
+    "lex_edit",
+    "lex_format",
+    "lex_list",
+    "lex_ref",
+    "lex_section",
+    "lex_doc",
+    "lex_clause",
+    "lex_corpus",
+    "lex_ocr",
+    "lex_project_init",
+    "lex_diff",
+    "lex_deliver",
+    "lex_gate_check",
+]
+
+
 # Shared tool list for CLI and all messaging platform toolsets.
 # Edit this once to update all platforms simultaneously.
 _HERMES_CORE_TOOLS = [
@@ -52,8 +71,13 @@ _HERMES_CORE_TOOLS = [
     "session_search",
     # Clarifying questions
     "clarify",
+    # Project management
+    "project_create", "project_delete", "project_select", "project_status", "project_context", "project_list",
     # Code execution + delegation
     "execute_code", "delegate_task",
+    # Legal workflow orchestration
+    "legal_orchestrate", "legal_workflow",
+    *_LEXITOOL_TOOLS,
     # Cronjob management
     "cronjob",
     # Cross-platform messaging (gated on gateway running via check_fn)
@@ -235,6 +259,30 @@ TOOLSETS = {
         "description": "Ask the user clarifying questions (multiple-choice or open-ended)",
         "tools": ["clarify"],
         "includes": []
+    },
+
+    "project_management": {
+        "description": "Project selection and project-context inspection tools",
+        "tools": ["project_create", "project_delete", "project_select", "project_status", "project_context", "project_list"],
+        "includes": []
+    },
+
+    "legal_orchestration": {
+        "description": "Native legal workflow orchestration for drafting, review, revision, and delivery",
+        "tools": ["legal_orchestrate", "legal_workflow"],
+        "includes": []
+    },
+
+    "lexitool": {
+        "description": "Atomic legal document editing and review tools for .docx workflows",
+        "tools": _LEXITOOL_TOOLS,
+        "includes": []
+    },
+
+    "lex-docx": {
+        "description": "Alias toolset for lexitool-based legal document workflows",
+        "tools": [],
+        "includes": ["lexitool"]
     },
     
     "code_execution": {

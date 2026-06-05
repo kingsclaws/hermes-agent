@@ -28,6 +28,7 @@ import { Badge } from "@nous-research/ui/ui/components/badge";
 import { Card } from "@nous-research/ui/ui/components/card";
 
 import { ModelPickerDialog } from "@/components/ModelPickerDialog";
+import { LegalWorkflowPanel } from "@/components/LegalWorkflowPanel";
 import { ToolCall, type ToolEntry } from "@/components/ToolCall";
 import { GatewayClient, type ConnectionState } from "@/lib/gatewayClient";
 import { HERMES_BASE_PATH, buildWsAuthParam } from "@/lib/api";
@@ -72,9 +73,14 @@ const STATE_TONE: Record<
 interface ChatSidebarProps {
   channel: string;
   className?: string;
+  onRunWorkflowPrompt?: (prompt: string) => void;
 }
 
-export function ChatSidebar({ channel, className }: ChatSidebarProps) {
+export function ChatSidebar({
+  channel,
+  className,
+  onRunWorkflowPrompt,
+}: ChatSidebarProps) {
   // `version` bumps on reconnect; gw is derived so we never call setState
   // for it inside an effect (React 19's set-state-in-effect rule). The
   // counter is the dependency on purpose — it's not read in the memo body,
@@ -313,7 +319,7 @@ export function ChatSidebar({ channel, className }: ChatSidebarProps) {
   return (
     <aside
       className={cn(
-        "flex h-full w-full min-w-0 shrink-0 flex-col gap-3 overflow-y-auto overflow-x-hidden pr-1 lg:w-80",
+        "flex h-full w-full min-w-0 shrink-0 flex-col gap-3 overflow-y-auto overflow-x-hidden pr-1 normal-case lg:w-96",
         className,
       )}
     >
@@ -364,6 +370,12 @@ export function ChatSidebar({ channel, className }: ChatSidebarProps) {
           </div>
         </Card>
       )}
+
+      <LegalWorkflowPanel
+        cwd={info.cwd}
+        disabled={!onRunWorkflowPrompt}
+        onRun={(prompt) => onRunWorkflowPrompt?.(prompt)}
+      />
 
       <Card className="flex min-h-0 flex-none flex-col px-2 py-2">
         <div className="text-display px-1 pb-2 text-xs tracking-wider text-text-tertiary">

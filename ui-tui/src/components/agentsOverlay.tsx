@@ -9,10 +9,17 @@ import {
   toggleOverlaySection
 } from '../app/delegationStore.js'
 import { patchOverlayState } from '../app/overlayStore.js'
+import { $uiSessionId } from '../app/uiStore.js'
 import { $spawnDiff, $spawnHistory, clearDiffPair, type SpawnSnapshot } from '../app/spawnHistoryStore.js'
 import { useTurnSelector } from '../app/turnStore.js'
 import type { GatewayClient } from '../gatewayClient.js'
-import type { DelegationPauseResponse, DelegationStatusResponse, SubagentInterruptResponse } from '../gatewayTypes.js'
+import type {
+  DelegationPauseResponse,
+  DelegationRunsResponse,
+  DelegationStatusResponse,
+  SubagentInterruptResponse,
+  SubagentRunRecord
+} from '../gatewayTypes.js'
 import { asRpcResult } from '../lib/rpc.js'
 import {
   buildSubagentTree,
@@ -84,6 +91,63 @@ const FILTER_PREDICATES: Record<FilterMode, (n: SubagentNode) => boolean> = {
     n.item.status === 'failed' ||
     n.item.status === 'interrupted' ||
     n.item.status === 'timeout'
+}
+
+const roleLabel = (role?: string) => {
+  const normalized = String(role ?? '').trim().toLowerCase()
+
+  return normalized === 'orchestrator' ? 'orch' : normalized === 'leaf' ? 'leaf' : normalized
+}
+
+const snapshotFromRuns = (runs: readonly SubagentRunRecord[], sessionId: null | string): null | SpawnSnapshot => {
+  if (!runs.length) {
+    return null
+  }
+
+  const subagents = runs.map((run, idx) => ({
+    apiCalls: typeof run.api_calls === 'number' ? run.api_calls : undefined,
+    costUsd: typeof run.cost_usd === 'number' ? run.cost_usd : undefined,
+    depth: 0,
+    durationSeconds: typeof run.duration_seconds === 'number' ? run.duration_seconds : undefined,
+    filesRead: undefined,
+    filesWritten: undefined,
+    goal: String(run.goal ?? 'subagent'),
+    id: String(run.id),
+    index: typeof run.task_index === 'number' ? run.task_index : idx,
+    inputTokens: typeof run.input_tokens === 'number' ? run.input_tokens : undefined,
+    iteration: undefined,
+    model: typeof run.model === 'string' ? run.model : undefined,
+    notes: [],
+    outputTail: undefined,
+    outputTokens: typeof run.output_tokens === 'number' ? run.output_tokens : undefined,
+    parentId: typeof run.parent_subagent_id === 'string' ? run.parent_subagent_id : null,
+    reasoningTokens: typeof run.reasoning_tokens === 'number' ? run.reasoning_tokens : undefined,
+    role: typeof run.role === 'string' ? run.role : undefined,
+    startedAt: typeof run.started_at === 'number' ? run.started_at * 1000 : undefined,
+    status: typeof run.status === 'string' ? (run.status as SubagentProgress['status']) : 'completed',
+    summary: typeof run.summary === 'string' && run.summary ? run.summary : run.error,
+    taskCount: typeof run.task_count === 'number' ? run.task_count : 1,
+    thinking: [],
+    toolCount: typeof run.tool_count === 'number' ? run.tool_count : 0,
+    tools: [],
+    toolsets: Array.isArray(run.toolsets) ? run.toolsets : undefined
+  }))
+
+  const startedAtCandidates = subagents.map(s => s.startedAt).filter((n): n is number => typeof n === 'number')
+  const endedAtCandidates = runs
+    .map(r => (typeof r.ended_at === 'number' ? r.ended_at * 1000 : undefined))
+    .filter((n): n is number => typeof n === 'number')
+  const startedAt = startedAtCandidates.length ? Math.min(...startedAtCandidates) : Date.now()
+  const finishedAt = endedAtCandidates.length ? Math.max(...endedAtCandidates) : Date.now()
+
+  return {
+    finishedAt,
+    id: `session-runs-${sessionId ?? 'current'}`,
+    label: `session runs · ${runs.length} agent${runs.length === 1 ? '' : 's'}`,
+    sessionId,
+    startedAt,
+    subagents
+  }
 }
 
 const STATUS_GLYPH: Record<Status, { color: (t: Theme) => string; glyph: string }> = {
@@ -429,6 +493,7 @@ function Detail({ id, node, t }: { id?: string; node: SubagentNode; t: Theme }) 
 
       <Box flexDirection="column" marginTop={1}>
         <Field name="depth" t={t} value={`${item.depth} · ${item.status}`} />
+        {item.role ? <Field name="role" t={t} value={item.role} /> : null}
         {item.model ? <Field name="model" t={t} value={item.model} /> : null}
         {item.toolsets?.length ? <Field name="toolsets" t={t} value={item.toolsets.join(', ')} /> : null}
         <Field name="tools" t={t} value={`${item.toolCount ?? 0} (subtree ${agg.totalTools})`} />
@@ -557,6 +622,7 @@ function ListRow({
   const heatMarker = heatIdx >= 2 ? palette[heatIdx]! : null
 
   const goal = compactPreview(node.item.goal || 'subagent', width - 28 - node.item.depth * 2)
+  const role = roleLabel(node.item.role)
   const toolsCount = node.aggregate.totalTools > 0 ? ` ·${node.aggregate.totalTools}t` : ''
   const kids = node.children.length ? ` ·${node.children.length}↓` : ''
   const line = node.item.status === 'running' ? node.item.tools.at(-1) : undefined
@@ -571,6 +637,7 @@ function ListRow({
       <Text color={active ? fg : t.color.muted}>{formatRowId(index)} </Text>
       {indentFor(node.item.depth)}
       {heatMarker ? <Text color={heatMarker}>▍</Text> : null}
+      {role ? <Text color={active ? fg : t.color.label}>[{role}] </Text> : null}
       <Text color={active ? fg : color}>{glyph}</Text> {goal}
       <Text color={active ? fg : t.color.muted}>
         {toolsCount}
@@ -696,6 +763,7 @@ export function AgentsOverlay({ gw, initialHistoryIndex = 0, onClose, t }: Agent
   const delegation = useStore($delegationState)
   const history = useStore($spawnHistory)
   const diffPair = useStore($spawnDiff)
+  const sessionId = useStore($uiSessionId)
   const { stdout } = useStdout()
 
   // historyIndex === 0: live turn.  1..N pulls the Nth-most-recent archived
@@ -709,6 +777,7 @@ export function AgentsOverlay({ gw, initialHistoryIndex = 0, onClose, t }: Agent
   const [cursor, setCursor] = useState(0)
   const [flash, setFlash] = useState<string>('')
   const [now, setNow] = useState(() => Date.now())
+  const [persistedRuns, setPersistedRuns] = useState<SubagentRunRecord[]>([])
   // cc-style view switching: list = full-width row picker, detail = full-width
   // scrollable pane.  Two panes side-by-side in Ink fought Yoga flex.
   const [mode, setMode] = useState<'detail' | 'list'>('list')
@@ -722,7 +791,11 @@ export function AgentsOverlay({ gw, initialHistoryIndex = 0, onClose, t }: Agent
   // Instant fallback to history[0] the moment the live list clears — avoids
   // a one-frame "no subagents" flash while the auto-follow effect fires.
   const justFinishedSnapshot = historyIndex === 0 && liveSubagents.length === 0 ? (history[0] ?? null) : null
-  const effectiveSnapshot = activeSnapshot ?? justFinishedSnapshot
+  const persistedSnapshot = useMemo(
+    () => (historyIndex === 0 && liveSubagents.length === 0 ? snapshotFromRuns(persistedRuns, sessionId) : null),
+    [historyIndex, liveSubagents.length, persistedRuns, sessionId]
+  )
+  const effectiveSnapshot = activeSnapshot ?? justFinishedSnapshot ?? persistedSnapshot
   const replayMode = effectiveSnapshot != null
   const subagents = replayMode ? effectiveSnapshot.subagents : liveSubagents
 
@@ -782,6 +855,18 @@ export function AgentsOverlay({ gw, initialHistoryIndex = 0, onClose, t }: Agent
       .then(r => applyDelegationStatus(asRpcResult<DelegationStatusResponse>(r)))
       .catch(() => {})
   }, [gw])
+
+  useEffect(() => {
+    if (!sessionId) {
+      setPersistedRuns([])
+
+      return
+    }
+
+    gw.request<DelegationRunsResponse>('delegation.list_runs', { limit: 200, session_id: sessionId })
+      .then(raw => setPersistedRuns(asRpcResult<DelegationRunsResponse>(raw)?.runs ?? []))
+      .catch(() => {})
+  }, [gw, sessionId, liveSubagents.length])
 
   useEffect(() => {
     if (cursor >= rows.length) {
@@ -973,9 +1058,13 @@ export function AgentsOverlay({ gw, initialHistoryIndex = 0, onClose, t }: Agent
 
   const title =
     replayMode && effectiveSnapshot
-      ? `${historyIndex > 0 ? `Replay ${historyIndex}/${history.length}` : 'Last turn'} · finished ${new Date(
-          effectiveSnapshot.finishedAt
-        ).toLocaleTimeString()}`
+      ? `${
+          historyIndex > 0
+            ? `Replay ${historyIndex}/${history.length}`
+            : persistedSnapshot
+              ? 'Session runs'
+              : 'Last turn'
+        } · finished ${new Date(effectiveSnapshot.finishedAt).toLocaleTimeString()}`
       : `Spawn tree${delegation.paused ? ' · ⏸ paused' : ''}`
 
   const metaLine = [formatSummary(totals), spark, capsLabel, mix ? `· ${mix}` : ''].filter(Boolean).join('  ')
@@ -1050,6 +1139,7 @@ export function AgentsOverlay({ gw, initialHistoryIndex = 0, onClose, t }: Agent
             ↑↓/jk move · g/G top/bottom · Enter/→ open detail{controlsHint} · s sort:{SORT_LABEL[sort]} · f filter:
             {FILTER_LABEL[filter]}
             {history.length > 0 ? ` · [ / ] history ${historyIndex}/${history.length}` : ''}
+            {persistedRuns.length > 0 ? ` · session ${persistedRuns.length} runs` : ''}
             {' · q close'}
           </Text>
         ) : (

@@ -271,22 +271,22 @@ def replace_text(docx_path: str, para: int, old: str, new: str, *,
         t_elements = list(p.iter(f"{W}t"))
         texts = [(i, t.text or "") for i, t in enumerate(t_elements)]
         full_text = "".join(t for _, t in texts)
-        
+
         if old not in full_text:
             return EditResult(ok=False, para=para, text=old,
                               message=f"段落 {para} 中未找到 '{old}'",
                               path=docx_path)
-        
+
         # 执行替换
         new_full = full_text.replace(old, new, 1)
-        
+
         # 重新分配文本到 w:t 元素
         # 策略：将新文本放入第一个 w:t，清空其余
         if t_elements:
             t_elements[0].text = new_full
             for t in t_elements[1:]:
                 t.text = ""
-        
+
         _write_docx(docx_path, etree.tostring(root, xml_declaration=True,
                                               encoding="UTF-8", standalone=True),
                     other, output=output)

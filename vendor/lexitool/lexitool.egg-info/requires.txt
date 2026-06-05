@@ -1,0 +1,7 @@
+python-docx>=0.8.11
+lxml>=4.9.0
+
+[dev]
+pytest>=7.0
+black>=22.0
+flake8>=4.0

@@ -213,30 +213,30 @@ def cleanup_all(
 
 def clean_docx(path: str, output: str | None = None) -> None:
     """Accept all tracked changes and clean the document.
-    
+
     This is a convenience wrapper used by `lex_doc clean`.
     It removes all <w:del> elements (keeping their content deleted)
     and unwraps all <w:ins> elements (keeping their content).
     """
     from lxml import etree
     import zipfile, shutil
-    
+
     W = '{http://schemas.openxmlformats.org/wordprocessingml/2006/main}'
     out = output or path
     tmp = path + '.tmp'
-    
+
     with zipfile.ZipFile(path, 'r') as zin:
         with zin.open('word/document.xml') as f:
             tree = etree.parse(f)
             root = tree.getroot()
-        
+
         # Accept tracked changes:
         # 1. Remove <w:del> elements entirely (delete the deleted text)
         for del_el in root.iter(f'{W}del'):
             parent = del_el.getparent()
             if parent is not None:
                 parent.remove(del_el)
-        
+
         # 2. Unwrap <w:ins> elements (keep the inserted text)
         for ins_el in root.iter(f'{W}ins'):
             parent = ins_el.getparent()
@@ -246,7 +246,7 @@ def clean_docx(path: str, output: str | None = None) -> None:
                     parent.insert(idx, child)
                     idx += 1
                 parent.remove(ins_el)
-        
+
         # 3. Remove TC markup (insEnd, delEnd, etc.)
         for tag in ['insEnd', 'delEnd', 'moveFrom', 'moveTo',
                      'moveFromRangeStart', 'moveFromRangeEnd',
@@ -255,15 +255,15 @@ def clean_docx(path: str, output: str | None = None) -> None:
                 parent = el.getparent()
                 if parent is not None:
                     parent.remove(el)
-        
+
         xml_bytes = etree.tostring(root, xml_declaration=True,
                                    encoding='UTF-8', standalone=True)
-        
+
         with zipfile.ZipFile(tmp, 'w', zipfile.ZIP_DEFLATED) as zout:
             for item in zin.namelist():
                 if item == 'word/document.xml':
                     zout.writestr(item, xml_bytes)
                 else:
                     zout.writestr(item, zin.read(item))
-    
+
     shutil.move(tmp, out)

@@ -1007,7 +1007,9 @@ VISION_ANALYZE_SCHEMA = {
         "any time the user references an image (filepath in their message, "
         "URL in tool output, screenshot from the browser, etc.). For "
         "non-vision models, falls back to an auxiliary vision model that "
-        "returns a text description."
+        "returns a text description. This tool is for real image files only, "
+        "not PDFs. For local legal PDFs or scanned legal documents, call "
+        "lex_ocr first instead of vision_analyze."
     ),
     "parameters": {
         "type": "object",

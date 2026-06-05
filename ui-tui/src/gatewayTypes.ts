@@ -432,6 +432,7 @@ export interface SubagentEventPayload {
   output_tokens?: number
   parent_id?: null | string
   reasoning_tokens?: number
+  role?: string
   status?: SubagentStatus
   subagent_id?: string
   summary?: string
@@ -469,6 +470,34 @@ export interface DelegationPauseResponse {
 export interface SubagentInterruptResponse {
   found?: boolean
   subagent_id?: string
+}
+
+export interface SubagentRunRecord {
+  api_calls?: number
+  cost_usd?: number
+  duration_seconds?: number
+  ended_at?: number
+  error?: string
+  goal?: string
+  id: string
+  input_tokens?: number
+  model?: string
+  output_tokens?: number
+  parent_session_id?: null | string
+  parent_subagent_id?: null | string
+  reasoning_tokens?: number
+  role?: string
+  started_at?: number
+  status?: string
+  summary?: string
+  task_count?: number
+  task_index?: number
+  tool_count?: number
+  toolsets?: string[]
+}
+
+export interface DelegationRunsResponse {
+  runs?: SubagentRunRecord[]
 }
 
 // ── Spawn-tree snapshots ─────────────────────────────────────────────

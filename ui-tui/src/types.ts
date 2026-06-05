@@ -38,6 +38,7 @@ export interface SubagentProgress {
   outputTokens?: number
   parentId: null | string
   reasoningTokens?: number
+  role?: string
   startedAt?: number
   status: SubagentStatus
   summary?: string

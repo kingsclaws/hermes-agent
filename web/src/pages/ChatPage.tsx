@@ -32,6 +32,10 @@ import { createPortal } from "react-dom";
 import { useSearchParams } from "react-router-dom";
 
 import { ChatSidebar } from "@/components/ChatSidebar";
+import {
+  dispatchWorkflowPrompt,
+  NativeChatSurface,
+} from "@/components/NativeChatSurface";
 import { usePageHeader } from "@/contexts/usePageHeader";
 import { useI18n } from "@/i18n";
 import { api } from "@/lib/api";
@@ -125,6 +129,7 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
       : null,
   );
   const [copyState, setCopyState] = useState<"idle" | "copied">("idle");
+  const [chatMode, setChatMode] = useState<"native" | "terminal">("native");
   const copyResetRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Raw state for the mobile side-sheet + a derived value that force-
   // closes whenever the chat tab isn't active.  The *derived* value is
@@ -268,6 +273,28 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
     termRef.current?.focus();
   };
 
+  const handleRunWorkflowPrompt = useCallback((prompt: string) => {
+    if (chatMode === "native") {
+      dispatchWorkflowPrompt(prompt);
+      return;
+    }
+
+    const ws = wsRef.current;
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      setBanner("Chat is not connected. Reconnect or reload before running a workflow.");
+      return;
+    }
+
+    // Use bracketed paste so multiline workflow prompts land in the TUI
+    // composer as one paste operation, then submit with Return.
+    ws.send(`\x1b[200~${prompt}\x1b[201~`);
+    setTimeout(() => {
+      const s = wsRef.current;
+      if (s && s.readyState === WebSocket.OPEN) s.send("\r");
+    }, 80);
+    termRef.current?.focus();
+  }, [chatMode]);
+
   useEffect(() => {
     const host = hostRef.current;
     if (!host) return;
@@ -301,8 +328,7 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
       // is false; enabling it gives users a single-action selection
       // path on top of the modifier-based bypass above.
       rightClickSelectsWord: true,
-      // Browser-embedded chat runs the TUI in inline mode. Keep transcript
-      // history in xterm.js so the browser wheel can scroll it directly.
+      // Keep browser-side scrollback for dashboard ergonomics.
       scrollback: 5000,
       theme: TERMINAL_THEME,
     });
@@ -406,8 +432,10 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
     fitRef.current = fit;
     term.loadAddon(fit);
 
-    // Dashboard chat should scroll the browser-side transcript, not send
-    // mouse-wheel protocol bytes through the PTY.
+    // Wheel stays local to the browser xterm viewport. Forwarding synthetic
+    // Shift+Arrow/PageUp escape sequences into the PTY is brittle: when Ink
+    // or prompt_toolkit does not consume them, they are echoed as
+    // "^[[1;2A/B" garbage in the composer.
     term.attachCustomWheelEventHandler((ev) => {
       const delta = ev.deltaY;
       if (!delta) {
@@ -795,7 +823,10 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
               "border-t border-current/10",
             )}
           >
-            <ChatSidebar channel={channel} />
+            <ChatSidebar
+              channel={channel}
+              onRunWorkflowPrompt={handleRunWorkflowPrompt}
+            />
           </div>
         </div>
       </>,
@@ -817,42 +848,99 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
         <div
           className={cn(
             "relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-lg",
-            "p-2 sm:p-3",
+            chatMode === "terminal" && "p-2 sm:p-3",
           )}
           style={{
-            backgroundColor: TERMINAL_THEME.background,
-            boxShadow: "0 8px 32px rgba(0, 0, 0, 0.4)",
+            backgroundColor:
+              chatMode === "terminal" ? TERMINAL_THEME.background : undefined,
+            boxShadow: "0 8px 32px rgba(0, 0, 0, 0.25)",
           }}
         >
           <div
+            className={cn(
+              "mb-2 flex shrink-0 items-center justify-between gap-2 rounded border",
+              "px-2 py-1 text-[0.65rem] tracking-wide",
+              chatMode === "terminal"
+                ? "border-white/10 bg-white/[0.035]"
+                : "border-current/10 bg-background-base/70",
+            )}
+            style={{ color: chatMode === "terminal" ? TERMINAL_THEME.foreground : undefined }}
+          >
+            <span className="truncate opacity-75">
+              {chatMode === "native"
+                ? "Native Web Chat · structured legal workspace"
+                : "Terminal fallback · PTY/TUI compatibility mode"}
+            </span>
+            <span className="inline-flex shrink-0 gap-1">
+              <button
+                type="button"
+                onClick={() => setChatMode("native")}
+                className={cn(
+                  "rounded border px-2 py-0.5",
+                  chatMode === "native"
+                    ? "border-primary/50 bg-primary/10 text-primary"
+                    : "border-current/15 opacity-60 hover:opacity-100",
+                )}
+              >
+                Native
+              </button>
+              <button
+                type="button"
+                onClick={() => setChatMode("terminal")}
+                className={cn(
+                  "rounded border px-2 py-0.5",
+                  chatMode === "terminal"
+                    ? "border-primary/50 bg-primary/10 text-primary"
+                    : "border-current/15 opacity-60 hover:opacity-100",
+                )}
+              >
+                Terminal
+              </button>
+            </span>
+          </div>
+
+          <div
+            className={cn(
+              "min-h-0 min-w-0 flex-1",
+              chatMode === "native" ? "flex" : "hidden",
+            )}
+          >
+            <NativeChatSurface />
+          </div>
+
+          <div
             ref={hostRef}
-            className="hermes-chat-xterm-host min-h-0 min-w-0 flex-1"
+            className={cn(
+              "hermes-chat-xterm-host min-h-0 min-w-0 flex-1",
+              chatMode === "terminal" ? "block" : "hidden",
+            )}
           />
 
-          <Button
-            ghost
-            onClick={handleCopyLast}
-            title="Copy last assistant response as raw markdown"
-            aria-label="Copy last assistant response"
-            className={cn(
-              "absolute z-10",
-              "normal-case tracking-normal font-normal",
-              "rounded border border-current/30",
-              "bg-black/20 backdrop-blur-sm",
-              "opacity-70 hover:opacity-100 hover:border-current/60",
-              "transition-opacity duration-150",
-              "bottom-2 right-2 px-2 py-1 text-xs sm:bottom-3 sm:right-3 sm:px-2.5 sm:py-1.5",
-              "lg:bottom-4 lg:right-4",
-            )}
-            style={{ color: TERMINAL_THEME.foreground }}
-          >
-            <span className="inline-flex items-center gap-1.5">
-              <Copy className="h-3 w-3 shrink-0" />
-              <span className="hidden min-[400px]:inline tracking-wide">
-                {copyState === "copied" ? "copied" : "copy last response"}
+          {chatMode === "terminal" && (
+            <Button
+              ghost
+              onClick={handleCopyLast}
+              title="Copy last assistant response as raw markdown"
+              aria-label="Copy last assistant response"
+              className={cn(
+                "absolute z-10",
+                "rounded border border-current/30",
+                "bg-black/20 backdrop-blur-sm",
+                "opacity-60 hover:opacity-100 hover:border-current/60",
+                "transition-opacity duration-150 normal-case font-normal tracking-normal",
+                "bottom-2 right-2 px-2 py-1 text-[0.65rem] sm:bottom-3 sm:right-3 sm:px-2.5 sm:py-1.5 sm:text-xs",
+                "lg:bottom-4 lg:right-4",
+              )}
+              style={{ color: TERMINAL_THEME.foreground }}
+            >
+              <span className="inline-flex items-center gap-1.5">
+                <Copy className="h-3 w-3 shrink-0" />
+                <span className="hidden min-[400px]:inline tracking-wide">
+                  {copyState === "copied" ? "copied" : "copy last response"}
+                </span>
               </span>
-            </span>
-          </Button>
+            </Button>
+          )}
         </div>
 
         {!narrow && (
@@ -860,10 +948,13 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
             id="chat-side-panel"
             role="complementary"
             aria-label={modelToolsLabel}
-            className="flex min-h-0 shrink-0 flex-col overflow-hidden lg:h-full lg:w-80"
+            className="flex min-h-0 shrink-0 flex-col overflow-hidden lg:h-full lg:w-96"
           >
             <div className="min-h-0 flex-1 overflow-hidden">
-              <ChatSidebar channel={channel} />
+              <ChatSidebar
+                channel={channel}
+                onRunWorkflowPrompt={handleRunWorkflowPrompt}
+              />
             </div>
           </div>
         )}
