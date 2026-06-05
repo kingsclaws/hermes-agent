@@ -264,6 +264,23 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
     termRef.current?.focus();
   };
 
+  const handleRunWorkflowPrompt = useCallback((prompt: string) => {
+    const ws = wsRef.current;
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      setBanner("Chat is not connected. Reconnect or reload before running a workflow.");
+      return;
+    }
+
+    // Use bracketed paste so multiline workflow prompts land in the TUI
+    // composer as one paste operation, then submit with Return.
+    ws.send(`\x1b[200~${prompt}\x1b[201~`);
+    setTimeout(() => {
+      const s = wsRef.current;
+      if (s && s.readyState === WebSocket.OPEN) s.send("\r");
+    }, 80);
+    termRef.current?.focus();
+  }, []);
+
   useEffect(() => {
     const host = hostRef.current;
     if (!host) return;
@@ -788,7 +805,10 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
               "border-t border-current/10",
             )}
           >
-            <ChatSidebar channel={channel} />
+            <ChatSidebar
+              channel={channel}
+              onRunWorkflowPrompt={handleRunWorkflowPrompt}
+            />
           </div>
         </div>
       </>,
@@ -817,6 +837,21 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
             boxShadow: "0 8px 32px rgba(0, 0, 0, 0.4)",
           }}
         >
+          <div
+            className={cn(
+              "mb-2 flex shrink-0 items-center justify-between gap-2 rounded border border-white/10",
+              "bg-white/[0.035] px-2 py-1 text-[0.65rem] tracking-wide",
+            )}
+            style={{ color: TERMINAL_THEME.foreground }}
+          >
+            <span className="truncate opacity-75">
+              PTY Chat · native tools visible in the terminal stream
+            </span>
+            <span className="shrink-0 opacity-60">
+              Workflow actions are on the right
+            </span>
+          </div>
+
           <div
             ref={hostRef}
             className="hermes-chat-xterm-host min-h-0 min-w-0 flex-1"
@@ -852,10 +887,13 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
             id="chat-side-panel"
             role="complementary"
             aria-label={modelToolsLabel}
-            className="flex min-h-0 shrink-0 flex-col overflow-hidden lg:h-full lg:w-80"
+            className="flex min-h-0 shrink-0 flex-col overflow-hidden lg:h-full lg:w-96"
           >
             <div className="min-h-0 flex-1 overflow-hidden">
-              <ChatSidebar channel={channel} />
+              <ChatSidebar
+                channel={channel}
+                onRunWorkflowPrompt={handleRunWorkflowPrompt}
+              />
             </div>
           </div>
         )}

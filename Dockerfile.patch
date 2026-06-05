@@ -10,7 +10,7 @@ COPY . /tmp/patch_src/
 RUN set -eux; \
     cp -a /tmp/patch_src/vendor/lexitool/lexitool/. /opt/lexitool/lexitool/; \
     cp /tmp/patch_src/vendor/lexitool/pyproject.toml /opt/lexitool/; \
-    for d in tools hermes_cli agent tui_gateway; do \
+    for d in tools hermes_cli agent tui_gateway web; do \
       mkdir -p "/opt/lex-hermes/$d"; \
       cp -a "/tmp/patch_src/$d/." "/opt/lex-hermes/$d/"; \
     done; \
@@ -39,5 +39,6 @@ RUN set -eux; \
     rm -rf /tmp/patch_src; \
     pip install --no-cache-dir --no-deps /opt/lexitool; \
     python3 -c "import docx, lxml"; \
+    cd /opt/lex-hermes/web && npm run build; \
     python3 -m compileall -q -f /usr/local/lib/python3.11/site-packages/; \
     python3 -m compileall -q -f /opt/lex-hermes/
