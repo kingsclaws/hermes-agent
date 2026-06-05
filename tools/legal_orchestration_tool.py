@@ -208,6 +208,46 @@ def _load_project_context(project_root: Path) -> str:
     return "\n".join(pieces).strip()
 
 
+def _workflow_learning_context(workflow_type: str, learning_scope: str = "global") -> str:
+    try:
+        from hermes_state import SessionDB
+        from tools.lex_translation_review_tool import _format_learning_rules
+
+        rules = SessionDB().list_workflow_learning_rules(
+            workflow_type=workflow_type,
+            scope=learning_scope,
+            status="active",
+            limit=80,
+        )
+        return _format_learning_rules(rules)
+    except Exception:
+        return ""
+
+
+def _learn_from_review_findings(
+    *,
+    findings: List[Dict[str, Any]],
+    workflow_type: str,
+    learning_scope: str,
+    document_path: Optional[str],
+    enabled: bool,
+) -> Dict[str, Any]:
+    if not enabled:
+        return {"enabled": False, "candidates": [], "active_rules": [], "candidate_rules": []}
+    try:
+        from tools.lex_translation_review_tool import _learn_from_findings
+
+        return _learn_from_findings(
+            findings=findings,
+            workflow_type=workflow_type,
+            scope=learning_scope,
+            run_id=None,
+            document_path=document_path,
+        )
+    except Exception as exc:
+        return {"enabled": True, "error": str(exc), "candidates": []}
+
+
 def _resolve_path_like(value: Optional[str], *, project_root: Path) -> Optional[str]:
     raw = str(value or "").strip()
     if not raw:
@@ -555,8 +595,11 @@ def _build_review_subtasks(
     related_paths: List[str],
     term_sheet_path: Optional[str],
     review_types: List[str],
+    workflow_type: str,
+    learning_scope: str,
 ) -> List[Dict[str, Any]]:
     project_context = _load_project_context(project_root)
+    learning_context = _workflow_learning_context(workflow_type, learning_scope)
     tasks: List[Dict[str, Any]] = []
     for review_type in review_types:
         role_file = _ROLE_FILE_BY_TASK_TYPE[review_type]
@@ -574,6 +617,7 @@ def _build_review_subtasks(
             + "\n\n"
             + project_context
             + extra_context
+            + ("\n\n" + learning_context if learning_context else "")
             + "\n\n"
             + _review_contract(review_type, document_path or "")
         ).strip()
@@ -622,6 +666,7 @@ def _handle_legal_orchestrate(args: dict, **kwargs) -> str:
     enable_learning = bool(args.get("enable_learning", True))
     learning_scope = str(args.get("learning_scope") or "global").strip()
     workflow_type = str(args.get("workflow_type") or "").strip() or None
+    learning_workflow_type = workflow_type or "contract_revision"
 
     if task_type == "deliver":
         from tools.registry import registry as _registry
@@ -689,6 +734,8 @@ def _handle_legal_orchestrate(args: dict, **kwargs) -> str:
             related_paths=related_paths,
             term_sheet_path=term_sheet_path,
             review_types=review_types,
+            workflow_type=learning_workflow_type,
+            learning_scope=learning_scope,
         )
         xref_task_error = next(
             (
@@ -738,10 +785,19 @@ def _handle_legal_orchestrate(args: dict, **kwargs) -> str:
                 }
             )
         findings = _dedupe_findings(findings)
+        learning = _learn_from_review_findings(
+            findings=findings,
+            workflow_type=learning_workflow_type,
+            learning_scope=learning_scope,
+            document_path=document_path,
+            enabled=enable_learning,
+        )
         return _tool_ok(
             {
                 "document_path": document_path,
                 "findings": findings,
+                "learning": learning,
+                "learning_candidates": learning.get("candidates", []),
                 "project_dir": str(project_root),
                 "status": "completed",
                 "subtasks": subtasks,
@@ -799,6 +855,7 @@ def _handle_legal_orchestrate(args: dict, **kwargs) -> str:
         + "\n\n"
         + project_context
         + extra_context
+        + ("\n\n" + _workflow_learning_context(learning_workflow_type, learning_scope) if learning_workflow_type else "")
         + "\n\n"
         + contract
     ).strip()
@@ -829,10 +886,19 @@ def _handle_legal_orchestrate(args: dict, **kwargs) -> str:
         )
         if task_type == "review_xref":
             findings = _dedupe_findings(list((preflight or {}).get("findings") or []) + findings)
+        learning = _learn_from_review_findings(
+            findings=findings,
+            workflow_type=learning_workflow_type,
+            learning_scope=learning_scope,
+            document_path=document_path,
+            enabled=enable_learning,
+        )
         return _tool_ok(
             {
                 "document_path": document_path,
                 "findings": findings,
+                "learning": learning,
+                "learning_candidates": learning.get("candidates", []),
                 "project_dir": str(project_root),
                 "status": (structured or {}).get("status", "completed") if isinstance(structured, dict) else "completed",
                 "summary": (

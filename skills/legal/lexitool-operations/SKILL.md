@@ -104,11 +104,12 @@ For Chinese-English translation QA:
 
 For workflow learning:
 
-1. Leave `enable_learning=true` for translation QA unless Master asks to disable learning.
-2. Low-risk format and terminology findings may auto-merge into global learned rules.
-3. Substantive legal translation findings are candidates only; use `legal_workflow(action="approve_learning_rule", rule_id="...")` after human review.
-4. Use `legal_workflow(action="list_learning_rules", workflow_type="translation_quality_review")` to inspect learned rules.
-5. Use `legal_workflow(action="export_learning_sop", workflow_type="translation_quality_review")` to refresh the Markdown SOP export.
+1. Leave `enable_learning=true` for legal workflows unless Master asks to disable learning.
+2. Low-risk format, terminology, cross-reference, and schedule/table findings may auto-merge into global learned rules.
+3. Substantive legal drafting, TS-consistency, and translation-meaning findings are candidates only; use `legal_workflow(action="approve_learning_rule", rule_id="...")` after human review.
+4. Use `legal_workflow(action="list_learning_rules", workflow_type="contract_revision")` for drafting/revision rules.
+5. Use `legal_workflow(action="list_learning_rules", workflow_type="translation_quality_review")` for translation rules.
+6. Use `legal_workflow(action="export_learning_sop", workflow_type="...")` to refresh the Markdown SOP export.
 
 ## Pitfalls
 

@@ -31,11 +31,15 @@ def _default_contract_workflow_steps(
     *,
     document_path: Optional[str],
     term_sheet_path: Optional[str],
+    enable_learning: bool,
+    learning_scope: str,
     instructions: Optional[str],
 ) -> List[Dict[str, Any]]:
     common_input = {
         "document_path": document_path,
         "term_sheet_path": term_sheet_path,
+        "enable_learning": enable_learning,
+        "learning_scope": learning_scope,
         "instructions": instructions,
     }
     return [
@@ -281,6 +285,16 @@ def _collect_findings_from_workflow(workflow: Dict[str, Any]) -> List[Dict[str, 
     return findings
 
 
+def _infer_workflow_type(workflow: Dict[str, Any]) -> str:
+    name = str(workflow.get("name") or "").lower()
+    instructions = str(workflow.get("instructions") or "").lower()
+    step_types = " ".join(str(step.get("type") or "") for step in workflow.get("steps") or [])
+    haystack = " ".join([name, instructions, step_types])
+    if any(marker in haystack for marker in ("translation", "翻译", "bilingual", "lex_translation_review")):
+        return "translation_quality_review"
+    return "contract_revision"
+
+
 LEGAL_WORKFLOW_SCHEMA = {
     "name": "legal_workflow",
     "description": (
@@ -414,6 +428,8 @@ def _handle_legal_workflow(args: dict, **kwargs) -> str:
                 steps = _default_contract_workflow_steps(
                     document_path=document_path,
                     term_sheet_path=term_sheet_path,
+                    enable_learning=enable_learning,
+                    learning_scope=learning_scope,
                     instructions=instructions,
                 )
         run_id = db.create_legal_workflow(
@@ -472,11 +488,13 @@ def _handle_legal_workflow(args: dict, **kwargs) -> str:
         run_id = str(args.get("run_id") or "").strip()
         if not run_id:
             return tool_error("run_id is required for legal_workflow learn_from_run.")
-        workflow_type = str(args.get("workflow_type") or "translation_quality_review").strip()
+        workflow_type = str(args.get("workflow_type") or "").strip()
         learning_scope = str(args.get("learning_scope") or "global").strip()
         workflow = db.get_legal_workflow(run_id)
         if not workflow:
             return tool_error(f"legal workflow not found: {run_id}")
+        if not workflow_type:
+            workflow_type = _infer_workflow_type(workflow)
         findings = _collect_findings_from_workflow(workflow)
         from tools.lex_translation_review_tool import _learn_from_findings
 

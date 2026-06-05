@@ -476,18 +476,24 @@ LOW_RISK_AUTO_ISSUE_TYPES = {
     "defined_term",
     "party_name",
     "cross_reference",
+    "review_xref",
     "schedule_table",
     "style_format",
+    "review_format",
 }
 
 LEARNING_CATEGORY_BY_ISSUE_TYPE = {
     "defined_term": "terminology",
     "party_name": "terminology",
     "cross_reference": "reference_format",
+    "review_xref": "reference_format",
     "schedule_table": "reference_format",
     "style_format": "format",
+    "review_format": "format",
     "grammar_spelling": "candidate_language",
     "number_date_currency": "candidate_precision",
+    "review_content": "candidate_substantive",
+    "review_ts": "candidate_ts_consistency",
 }
 
 
@@ -591,10 +597,14 @@ def _learning_candidates_from_findings(findings: list[dict[str, Any]]) -> list[d
     candidates: list[dict[str, Any]] = []
     for item in findings:
         issue_type = str(item.get("issue_type") or "").strip()
+        if not issue_type:
+            issue_type = str(item.get("review_type") or "").strip()
         source = str(item.get("source_text") or "").strip()
         current = str(item.get("translation_text") or "").strip()
         suggestion = str(item.get("suggestion") or "").strip()
         finding = str(item.get("finding") or "").strip()
+        if not finding:
+            finding = str(item.get("title") or "").strip()
         if not suggestion and not finding:
             continue
 
