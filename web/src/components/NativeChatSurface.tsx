@@ -1,6 +1,7 @@
 import { Button } from "@nous-research/ui/ui/components/button";
 import { Card } from "@/components/ui/card";
 import { GatewayClient, type ConnectionState } from "@/lib/gatewayClient";
+import { executeSlash, parseSlash } from "@/lib/slashExec";
 import { cn } from "@/lib/utils";
 import { Send, Square } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -22,6 +23,29 @@ const WORKFLOW_PROMPT_EVENT = "lex-workflow-prompt";
 
 export function dispatchWorkflowPrompt(prompt: string) {
   window.dispatchEvent(new CustomEvent(WORKFLOW_PROMPT_EVENT, { detail: prompt }));
+}
+
+function textFromMessage(raw: unknown): string {
+  if (!raw || typeof raw !== "object") return "";
+  const content = (raw as { content?: unknown }).content;
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    return content
+      .map((part) =>
+        part && typeof part === "object" && "text" in part
+          ? String((part as { text?: unknown }).text ?? "")
+          : "",
+      )
+      .filter(Boolean)
+      .join("\n");
+  }
+  return "";
+}
+
+function roleFromMessage(raw: unknown): ChatMessage["role"] | null {
+  if (!raw || typeof raw !== "object") return null;
+  const role = (raw as { role?: unknown }).role;
+  return role === "user" || role === "assistant" ? role : null;
 }
 
 export function NativeChatSurface() {
@@ -135,6 +159,71 @@ export function NativeChatSurface() {
         setError("A turn is already running. Submit this after the current turn finishes.");
         return;
       }
+
+      if (trimmed.startsWith("/")) {
+        const { name, arg } = parseSlash(trimmed);
+        setError(null);
+        setInput("");
+        setMessages((prev) => [
+          ...prev,
+          { id: `slash-${Date.now()}`, role: "user", text: trimmed },
+        ]);
+
+        if (name === "resume" && arg) {
+          try {
+            const resumed = await gw.request<{
+              session_id: string;
+              resumed?: string;
+              messages?: unknown[];
+            }>("session.resume", { session_id: arg });
+            setSessionId(resumed.session_id);
+            setMessages([
+              {
+                id: `resume-${Date.now()}`,
+                role: "status",
+                text: `已恢复会话：${resumed.resumed ?? arg}`,
+              },
+              ...(resumed.messages ?? [])
+                .map((message, index) => {
+                  const role = roleFromMessage(message);
+                  const text = textFromMessage(message);
+                  return role && text
+                    ? { id: `history-${index}`, role, text }
+                    : null;
+                })
+                .filter((message): message is ChatMessage => message !== null),
+            ]);
+            return;
+          } catch (e) {
+            setMessages((prev) => [
+              ...prev,
+              {
+                id: `resume-error-${Date.now()}`,
+                role: "status",
+                text: `原生恢复失败，尝试 slash fallback：${
+                  e instanceof Error ? e.message : String(e)
+                }`,
+              },
+            ]);
+          }
+        }
+
+        await executeSlash({
+          command: trimmed,
+          sessionId,
+          gw,
+          callbacks: {
+            sys: (body) =>
+              setMessages((prev) => [
+                ...prev,
+                { id: `system-${Date.now()}`, role: "status", text: body },
+              ]),
+            send: (message) => submit(message),
+          },
+        });
+        return;
+      }
+
       setError(null);
       setMessages((prev) => [
         ...prev,
@@ -151,6 +240,19 @@ export function NativeChatSurface() {
     },
     [gw, running, sessionId],
   );
+
+  const interrupt = useCallback(async () => {
+    if (!sessionId || !running) return;
+    try {
+      await gw.request("session.interrupt", { session_id: sessionId }, 10_000);
+      setMessages((prev) => [
+        ...prev,
+        { id: `interrupt-${Date.now()}`, role: "status", text: "已请求停止当前任务。" },
+      ]);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  }, [gw, running, sessionId]);
 
   useEffect(() => {
     const handler = (ev: Event) => {
@@ -197,6 +299,8 @@ export function NativeChatSurface() {
               "max-w-[92%] whitespace-pre-wrap rounded-lg border px-3 py-2 text-sm leading-6",
               message.role === "user"
                 ? "ml-auto border-primary/30 bg-primary/10"
+                : message.role === "status"
+                  ? "mx-auto border-current/10 bg-muted/10 text-xs text-muted-foreground"
                 : "mr-auto border-current/10 bg-black/10",
             )}
           >
@@ -260,8 +364,9 @@ export function NativeChatSurface() {
           className="min-h-12 flex-1 resize-none rounded border border-current/15 bg-black/10 px-3 py-2 text-sm outline-none focus:border-primary/60"
         />
         <Button
-          type="submit"
-          disabled={!sessionId || running || !input.trim()}
+          type={running ? "button" : "submit"}
+          onClick={running ? interrupt : undefined}
+          disabled={!sessionId || (!running && !input.trim())}
           className="self-end px-3"
         >
           {running ? <Square className="h-4 w-4" /> : <Send className="h-4 w-4" />}

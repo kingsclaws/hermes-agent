@@ -12,10 +12,9 @@ import {
   PenLine,
   Play,
   ScrollText,
-  Trash2,
 } from "lucide-react";
-import type { ReactNode } from "react";
-import { useMemo, useState } from "react";
+import type { PointerEvent, ReactNode } from "react";
+import { useMemo, useRef, useState } from "react";
 
 interface LegalWorkflowPanelProps {
   cwd?: string;
@@ -38,18 +37,20 @@ type WorkflowAtom = {
   role: string;
   title: string;
   type: string;
+  x: number;
+  y: number;
 };
 
 const DEFAULT_WORKFLOW_ATOMS: WorkflowAtom[] = [
-  { id: "read-template", role: "reader", title: "通读合同模板", type: "lex_read" },
-  { id: "read-ts", role: "reader", title: "读取 TS/支持资料", type: "source_read" },
-  { id: "clause-map", role: "planner", title: "建立条款地图", type: "analysis" },
-  { id: "ts-matrix", role: "planner", title: "TS-合同矩阵", type: "analysis" },
-  { id: "revision-plan", role: "planner", title: "修订计划/人审确认", type: "approval_gate" },
-  { id: "execute", role: "drafter", title: "执行已确认修订", type: "lex_edit" },
-  { id: "xref", role: "xref", title: "交叉引用审计", type: "lex_ref" },
-  { id: "review", role: "reviewer", title: "格式/TS复核", type: "review" },
-  { id: "deliver", role: "coordinator", title: "交付检查", type: "delivery" },
+  { id: "read-template", role: "reader", title: "通读合同模板", type: "lex_read", x: 12, y: 18 },
+  { id: "read-ts", role: "reader", title: "读取 TS/支持资料", type: "source_read", x: 180, y: 18 },
+  { id: "clause-map", role: "planner", title: "建立条款地图", type: "analysis", x: 12, y: 100 },
+  { id: "ts-matrix", role: "planner", title: "TS-合同矩阵", type: "analysis", x: 180, y: 100 },
+  { id: "revision-plan", role: "planner", title: "修订计划/人审确认", type: "approval_gate", x: 12, y: 182, requires_approval: true },
+  { id: "execute", role: "drafter", title: "执行已确认修订", type: "lex_edit", x: 180, y: 182 },
+  { id: "xref", role: "xref", title: "交叉引用审计", type: "lex_ref", x: 12, y: 264 },
+  { id: "review", role: "reviewer", title: "格式/TS复核", type: "review", x: 180, y: 264 },
+  { id: "deliver", role: "coordinator", title: "交付检查", type: "delivery", x: 96, y: 346 },
 ];
 
 function q(value: string): string {
@@ -72,6 +73,13 @@ export function LegalWorkflowPanel({
   ]);
   const [workflowAtoms, setWorkflowAtoms] = useState<WorkflowAtom[]>(DEFAULT_WORKFLOW_ATOMS);
   const [selectedAtomIndex, setSelectedAtomIndex] = useState(0);
+  const [connectFrom, setConnectFrom] = useState<string | null>(null);
+  const [dragging, setDragging] = useState<{
+    index: number;
+    offsetX: number;
+    offsetY: number;
+  } | null>(null);
+  const canvasRef = useRef<HTMLDivElement | null>(null);
 
   const effectiveProjectDir = q(projectDir || cwd || "");
   const canRunProject = !!effectiveProjectDir && !disabled;
@@ -128,12 +136,47 @@ export function LegalWorkflowPanel({
         role: "coordinator",
         title: "新增 workflow 原子",
         type: "manual",
+        x: 24 + (prev.length % 2) * 156,
+        y: 24 + Math.floor(prev.length / 2) * 82,
       },
     ]);
     setSelectedAtomIndex(workflowAtoms.length);
   };
 
   const selectedAtom = workflowAtoms[selectedAtomIndex] ?? workflowAtoms[0];
+
+  const startDrag = (index: number, ev: PointerEvent<HTMLButtonElement>) => {
+    const rect = ev.currentTarget.getBoundingClientRect();
+    setSelectedAtomIndex(index);
+    setDragging({
+      index,
+      offsetX: ev.clientX - rect.left,
+      offsetY: ev.clientY - rect.top,
+    });
+    ev.currentTarget.setPointerCapture(ev.pointerId);
+  };
+
+  const dragNode = (ev: PointerEvent<HTMLDivElement>) => {
+    if (!dragging || !canvasRef.current) return;
+    const rect = canvasRef.current.getBoundingClientRect();
+    updateAtom(dragging.index, {
+      x: Math.max(0, Math.min(260, ev.clientX - rect.left - dragging.offsetX)),
+      y: Math.max(0, Math.min(390, ev.clientY - rect.top - dragging.offsetY)),
+    });
+  };
+
+  const finishDrag = () => setDragging(null);
+
+  const clickNode = (index: number) => {
+    const target = workflowAtoms[index];
+    if (connectFrom && connectFrom !== target.id) {
+      const deps = new Set(target.depends_on ?? []);
+      deps.add(connectFrom);
+      updateAtom(index, { depends_on: [...deps] });
+      setConnectFrom(null);
+    }
+    setSelectedAtomIndex(index);
+  };
 
   return (
     <Card className="overflow-hidden border-primary/20 bg-background-base/70 p-0">
@@ -183,57 +226,71 @@ export function LegalWorkflowPanel({
               增加
             </button>
           </div>
-          <div className="max-h-52 space-y-1 overflow-y-auto pr-1">
+          <div
+            ref={canvasRef}
+            onPointerMove={dragNode}
+            onPointerUp={finishDrag}
+            onPointerCancel={finishDrag}
+            className="relative h-[430px] overflow-hidden rounded border border-current/10 bg-[radial-gradient(circle_at_1px_1px,currentColor_1px,transparent_0)] bg-[length:18px_18px] text-muted-foreground/25"
+          >
+            <svg className="pointer-events-none absolute inset-0 h-full w-full">
+              <defs>
+                <marker
+                  id="workflow-arrow"
+                  markerHeight="6"
+                  markerWidth="6"
+                  orient="auto"
+                  refX="5"
+                  refY="3"
+                >
+                  <path d="M0,0 L0,6 L6,3 z" fill="currentColor" />
+                </marker>
+              </defs>
+              {workflowAtoms.flatMap((atom) =>
+                (atom.depends_on ?? []).map((sourceId) => {
+                  const source = workflowAtoms.find((candidate) => candidate.id === sourceId);
+                  if (!source) return null;
+                  return (
+                    <line
+                      key={`${sourceId}-${atom.id}`}
+                      x1={source.x + 62}
+                      y1={source.y + 28}
+                      x2={atom.x + 62}
+                      y2={atom.y + 28}
+                      stroke="currentColor"
+                      strokeWidth="1.5"
+                      markerEnd="url(#workflow-arrow)"
+                    />
+                  );
+                }),
+              )}
+            </svg>
             {workflowAtoms.map((atom, index) => (
-              <div
+              <button
+                type="button"
                 key={`${atom.id}-${index}`}
-                onClick={() => setSelectedAtomIndex(index)}
-                className="grid grid-cols-[auto_1fr_auto] items-start gap-1 rounded border border-current/10 bg-background-base/60 p-1"
+                onClick={() => clickNode(index)}
+                onPointerDown={(ev) => startDrag(index, ev)}
+                className={cn(
+                  "absolute z-10 w-[126px] rounded border p-1.5 text-left shadow-sm",
+                  "bg-background-base/95 text-foreground backdrop-blur-sm",
+                  selectedAtomIndex === index
+                    ? "border-primary/70 ring-1 ring-primary/30"
+                    : "border-current/15 hover:border-current/30",
+                  connectFrom === atom.id && "border-warning/70 ring-1 ring-warning/40",
+                )}
+                style={{ left: atom.x, top: atom.y }}
               >
-                <GripVertical className="mt-1 h-3.5 w-3.5 text-muted-foreground" />
-                <div className="min-w-0 space-y-1">
-                  <input
-                    value={atom.title}
-                    onChange={(e) => updateAtom(index, { title: e.target.value })}
-                    className="w-full rounded border border-current/10 bg-black/10 px-1.5 py-1 text-[0.7rem] outline-none focus:border-primary/60"
-                  />
-                  <div className="grid grid-cols-2 gap-1">
-                    <input
-                      value={atom.role}
-                      onChange={(e) => updateAtom(index, { role: e.target.value })}
-                      className="rounded border border-current/10 bg-black/10 px-1.5 py-1 text-[0.65rem] outline-none focus:border-primary/60"
-                    />
-                    <input
-                      value={atom.type}
-                      onChange={(e) => updateAtom(index, { type: e.target.value })}
-                      className="rounded border border-current/10 bg-black/10 px-1.5 py-1 text-[0.65rem] outline-none focus:border-primary/60"
-                    />
+                <div className="flex items-start gap-1">
+                  <GripVertical className="mt-0.5 h-3 w-3 shrink-0 text-muted-foreground" />
+                  <div className="min-w-0">
+                    <div className="truncate text-[0.7rem] font-medium">{atom.title}</div>
+                    <div className="truncate text-[0.6rem] text-muted-foreground">
+                      {atom.role} · {atom.type}
+                    </div>
                   </div>
                 </div>
-                <div className="flex flex-col gap-1">
-                  <button
-                    type="button"
-                    onClick={() => moveAtom(index, -1)}
-                    className="rounded border border-current/10 px-1 text-[0.6rem] text-muted-foreground hover:text-foreground"
-                  >
-                    ↑
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => moveAtom(index, 1)}
-                    className="rounded border border-current/10 px-1 text-[0.6rem] text-muted-foreground hover:text-foreground"
-                  >
-                    ↓
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => removeAtom(index)}
-                    className="rounded border border-current/10 px-1 py-0.5 text-muted-foreground hover:text-destructive"
-                  >
-                    <Trash2 className="h-3 w-3" />
-                  </button>
-                </div>
-              </div>
+              </button>
             ))}
           </div>
           {selectedAtom && (
@@ -265,6 +322,12 @@ ${JSON.stringify(selectedAtom, null, 2)}
                   运行选中
                 </button>
               </div>
+              <input
+                value={selectedAtom.title}
+                onChange={(e) => updateAtom(selectedAtomIndex, { title: e.target.value })}
+                className="w-full rounded border border-current/10 bg-black/10 px-1.5 py-1 text-[0.7rem] outline-none focus:border-primary/60"
+                placeholder="title"
+              />
               <div className="grid grid-cols-2 gap-1">
                 <input
                   value={selectedAtom.id}
@@ -284,6 +347,20 @@ ${JSON.stringify(selectedAtom, null, 2)}
                   }
                   className="rounded border border-current/10 bg-black/10 px-1.5 py-1 text-[0.65rem] outline-none focus:border-primary/60"
                   placeholder="depends_on"
+                />
+              </div>
+              <div className="grid grid-cols-2 gap-1">
+                <input
+                  value={selectedAtom.role}
+                  onChange={(e) => updateAtom(selectedAtomIndex, { role: e.target.value })}
+                  className="rounded border border-current/10 bg-black/10 px-1.5 py-1 text-[0.65rem] outline-none focus:border-primary/60"
+                  placeholder="role"
+                />
+                <input
+                  value={selectedAtom.type}
+                  onChange={(e) => updateAtom(selectedAtomIndex, { type: e.target.value })}
+                  className="rounded border border-current/10 bg-black/10 px-1.5 py-1 text-[0.65rem] outline-none focus:border-primary/60"
+                  placeholder="type"
                 />
               </div>
               <textarea
@@ -307,6 +384,41 @@ ${JSON.stringify(selectedAtom, null, 2)}
                 />
                 执行前需要人工确认
               </label>
+              <div className="flex flex-wrap gap-1">
+                <button
+                  type="button"
+                  onClick={() => setConnectFrom(selectedAtom.id)}
+                  className="rounded border border-current/15 px-2 py-0.5 text-[0.65rem] text-muted-foreground hover:text-foreground"
+                >
+                  从此节点连线
+                </button>
+                <button
+                  type="button"
+                  onClick={() => moveAtom(selectedAtomIndex, -1)}
+                  className="rounded border border-current/15 px-2 py-0.5 text-[0.65rem] text-muted-foreground hover:text-foreground"
+                >
+                  上移顺序
+                </button>
+                <button
+                  type="button"
+                  onClick={() => moveAtom(selectedAtomIndex, 1)}
+                  className="rounded border border-current/15 px-2 py-0.5 text-[0.65rem] text-muted-foreground hover:text-foreground"
+                >
+                  下移顺序
+                </button>
+                <button
+                  type="button"
+                  onClick={() => removeAtom(selectedAtomIndex)}
+                  className="rounded border border-destructive/30 px-2 py-0.5 text-[0.65rem] text-destructive hover:bg-destructive/10"
+                >
+                  删除
+                </button>
+              </div>
+              {connectFrom && (
+                <div className="text-[0.65rem] text-warning">
+                  连线中：点击目标节点，将 `{connectFrom}` 设为其依赖。
+                </div>
+              )}
             </div>
           )}
         </div>
