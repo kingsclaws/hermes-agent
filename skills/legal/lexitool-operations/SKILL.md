@@ -34,7 +34,7 @@ Always call native tools directly:
 ```text
 lex_ocr(file_path="/workingfile/project/营业执照.pdf", language="ch")
 lex_read(path="/workingfile/project/D01.docx", mode="structure")
-lex_translation_review(bilingual_path="/workingfile/project/bilingual.docx", instructions="Chinese controls; review clauses 9-16")
+lex_translation_review(bilingual_path="/workingfile/project/bilingual.docx", sop_path="/workingfile/project/翻译校对SOP.md", instructions="Chinese controls; review clauses 9-16")
 lex_edit(path="/workingfile/project/D01.docx", op="replace", target="§29", new_text="...", tc=true)
 lex_ref(path="/workingfile/project/D01.docx", op="xref_audit")
 ```
@@ -97,8 +97,10 @@ For Chinese-English translation QA:
 
 1. Use `legal_workflow(action="create_plan", workflow_type="translation_quality_review", ...)` when the user wants a visible workflow plan.
 2. Use `lex_translation_review` for execution. If the Chinese and English are in one DOCX, pass `bilingual_path`; if separate, pass `source_path` and `translation_path`.
-3. Require reviewers to report structured findings by paragraph, issue type, severity, source text, translation text, and suggested wording.
-4. Do not use `lex_edit` until findings are aggregated and the user approves the specific wording changes.
+3. Treat the built-in SOP as a general legal translation QA baseline, not as a project-specific rulebook.
+4. If the project has its own SOP, pass `sop_path`; if the user gives task-specific exceptions, pass `sop_overrides`; if the project has special terminology, pass `domain_terms`.
+5. Require reviewers to report structured findings by paragraph, issue type, severity, source text, translation text, and suggested wording.
+6. Do not use `lex_edit` until findings are aggregated and the user approves the specific wording changes.
 
 ## Pitfalls
 

@@ -131,6 +131,9 @@ def _default_translation_workflow_steps(
     source_path: Optional[str],
     translation_path: Optional[str],
     glossary_path: Optional[str],
+    sop_path: Optional[str],
+    sop_overrides: Optional[str],
+    domain_terms: Optional[Dict[str, Any]],
     instructions: Optional[str],
 ) -> List[Dict[str, Any]]:
     common_input = {
@@ -138,6 +141,9 @@ def _default_translation_workflow_steps(
         "source_path": source_path,
         "translation_path": translation_path,
         "glossary_path": glossary_path,
+        "sop_path": sop_path,
+        "sop_overrides": sop_overrides,
+        "domain_terms": domain_terms or {},
         "instructions": instructions,
         "source_language": "Chinese",
         "target_language": "English",
@@ -280,6 +286,18 @@ LEGAL_WORKFLOW_SCHEMA = {
             "source_path": {"type": "string"},
             "translation_path": {"type": "string"},
             "glossary_path": {"type": "string"},
+            "sop_path": {
+                "type": "string",
+                "description": "Optional project/task-specific translation QA SOP file.",
+            },
+            "sop_overrides": {
+                "type": "string",
+                "description": "Optional task-specific SOP additions, exceptions, or priority changes.",
+            },
+            "domain_terms": {
+                "type": "object",
+                "description": "Optional task-specific term map for translation QA.",
+            },
             "instructions": {"type": "string"},
             "status": {"type": "string"},
             "steps": {
@@ -323,6 +341,9 @@ def _handle_legal_workflow(args: dict, **kwargs) -> str:
         source_path = str(args.get("source_path") or "").strip() or None
         translation_path = str(args.get("translation_path") or "").strip() or None
         glossary_path = str(args.get("glossary_path") or "").strip() or None
+        sop_path = str(args.get("sop_path") or "").strip() or None
+        sop_overrides = str(args.get("sop_overrides") or "").strip() or None
+        domain_terms = args.get("domain_terms") if isinstance(args.get("domain_terms"), dict) else {}
         instructions = str(args.get("instructions") or "").strip() or None
         workflow_type = str(args.get("workflow_type") or "contract_revision").strip()
         default_name = "中英文翻译质量核对 workflow" if workflow_type == "translation_quality_review" else "法律文书修订 workflow"
@@ -335,6 +356,9 @@ def _handle_legal_workflow(args: dict, **kwargs) -> str:
                     source_path=source_path,
                     translation_path=translation_path,
                     glossary_path=glossary_path or term_sheet_path,
+                    sop_path=sop_path,
+                    sop_overrides=sop_overrides,
+                    domain_terms=domain_terms,
                     instructions=instructions,
                 )
             else:

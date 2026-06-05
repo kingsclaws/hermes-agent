@@ -37,6 +37,18 @@ LEX_TRANSLATION_REVIEW_SCHEMA = {
                 "type": "string",
                 "description": "Optional glossary, term sheet, or defined-term reference file.",
             },
+            "sop_path": {
+                "type": "string",
+                "description": "Optional project/task-specific translation QA SOP markdown/text file.",
+            },
+            "sop_overrides": {
+                "type": "string",
+                "description": "Optional task-specific SOP additions, exceptions, or priority changes.",
+            },
+            "domain_terms": {
+                "type": "object",
+                "description": "Optional task-specific term map, e.g. {'本合同': 'this Agreement'}.",
+            },
             "instructions": {
                 "type": "string",
                 "description": "User-specific review scope, clause range, language priority, or edit policy.",
@@ -64,6 +76,9 @@ def _handle_translation_review(args: dict, **kwargs) -> str:
         source_path=_clean(args.get("source_path")),
         translation_path=_clean(args.get("translation_path")),
         glossary_path=_clean(args.get("glossary_path")),
+        sop_path=_clean(args.get("sop_path")),
+        sop_overrides=_clean(args.get("sop_overrides")),
+        domain_terms=args.get("domain_terms") if isinstance(args.get("domain_terms"), dict) else None,
         instructions=_clean(args.get("instructions")),
         chunk_size=int(args.get("chunk_size") or 120),
         source_language=_clean(args.get("source_language")) or "Chinese",
@@ -78,6 +93,9 @@ def lex_translation_review(
     source_path: str | None = None,
     translation_path: str | None = None,
     glossary_path: str | None = None,
+    sop_path: str | None = None,
+    sop_overrides: str | None = None,
+    domain_terms: dict[str, Any] | None = None,
     instructions: str | None = None,
     chunk_size: int = 120,
     source_language: str = "Chinese",
@@ -120,6 +138,9 @@ def lex_translation_review(
             source_path=source_path,
             translation_path=translation_path,
             glossary_path=glossary_path,
+            sop_text=_load_sop(sop_path),
+            sop_overrides=sop_overrides,
+            domain_terms=domain_terms or {},
             instructions=instructions,
             source_language=source_language,
             target_language=target_language,
@@ -135,6 +156,9 @@ def lex_translation_review(
         source_path=source_path,
         translation_path=translation_path,
         glossary_path=glossary_path,
+        sop_path=sop_path,
+        sop_overrides=sop_overrides,
+        domain_terms=domain_terms or {},
         source_language=source_language,
         target_language=target_language,
     )
@@ -143,6 +167,19 @@ def lex_translation_review(
 def _clean(value: Any) -> str | None:
     text = str(value or "").strip()
     return text or None
+
+
+def _load_sop(path: str | None) -> str:
+    if not path:
+        return ""
+    try:
+        sop_path = Path(path).expanduser()
+        if not sop_path.is_file():
+            return f"[SOP file not found: {path}]"
+        text = sop_path.read_text(encoding="utf-8", errors="replace")
+    except Exception as exc:
+        return f"[Could not read SOP file {path}: {exc}]"
+    return text[:12000]
 
 
 def _parse_total_paragraphs(stats: str) -> int:
@@ -180,6 +217,9 @@ def _build_task(
     source_path: str | None,
     translation_path: str | None,
     glossary_path: str | None,
+    sop_text: str,
+    sop_overrides: str | None,
+    domain_terms: dict[str, Any],
     instructions: str | None,
     source_language: str,
     target_language: str,
@@ -203,6 +243,25 @@ def _build_task(
         if glossary_path
         else ""
     )
+    domain_terms_block = (
+        "\nTask-specific domain terms:\n"
+        + json.dumps(domain_terms, ensure_ascii=False, indent=2)
+        if domain_terms
+        else ""
+    )
+    sop_block = (
+        "\nProject/task-specific SOP excerpt. Apply it only as a supplement to the baseline rules; "
+        "do not assume project-specific examples are universal:\n"
+        f"{sop_text}"
+        if sop_text
+        else ""
+    )
+    override_block = (
+        "\nTask-specific SOP overrides/additions. These override the baseline where they conflict:\n"
+        f"{sop_overrides.strip()}"
+        if sop_overrides
+        else ""
+    )
     instruction_block = f"\nUser instructions: {instructions.strip()}" if instructions else ""
 
     goal = f"""
@@ -210,7 +269,18 @@ Bilingual legal translation QA task #{index}: paragraphs §{start}-§{end} ({lab
 
 {read_block}
 {glossary_block}
+{domain_terms_block}
+{sop_block}
+{override_block}
 {instruction_block}
+
+Baseline legal translation QA rules:
+1. Determine the controlling language from user instructions; if unspecified, treat the source language as controlling.
+2. Preserve legal effect over literal phrasing. Flag any shift in obligation, condition, discretion, timing, amount, remedy, liability, termination, consent, or notice mechanics.
+3. Check defined terms and party names for consistent translation, capitalization, formatting, and singular/plural usage.
+4. Check cross-references, clause/schedule/table labels, dates, numbers, currencies, percentages, URLs, and notice periods.
+5. Separate substantive translation issues from style/format issues. Do not bury a major omission under a formatting note.
+6. Produce pending-confirmation items when the correct legal wording requires user/client confirmation.
 
 Mandatory workflow:
 1. Build a brief {source_language} ↔ {target_language} alignment for the reviewed range.
@@ -229,7 +299,7 @@ Return ONLY valid JSON. No markdown fences. Use this schema exactly:
       "severity": "critical|major|minor|info",
       "paragraph": "§123",
       "clause": "clause heading if known",
-      "issue_type": "omission|addition|mistranslation|legal_effect|defined_term|number_date_currency|cross_reference|style_format|typo",
+      "issue_type": "major_omission|omission|addition|mistranslation|legal_effect|defined_term|party_name|number_date_currency|cross_reference|schedule_table|grammar_spelling|style_format|source_typo|pending_confirmation",
       "source_text": "controlling source wording",
       "translation_text": "current translation wording",
       "finding": "what is wrong",
@@ -256,6 +326,9 @@ def _aggregate_results(
     source_path: str | None,
     translation_path: str | None,
     glossary_path: str | None,
+    sop_path: str | None,
+    sop_overrides: str | None,
+    domain_terms: dict[str, Any],
     source_language: str,
     target_language: str,
 ) -> str:
@@ -296,6 +369,9 @@ def _aggregate_results(
             "source_path": source_path,
             "translation_path": translation_path,
             "glossary_path": glossary_path,
+            "sop_path": sop_path,
+            "sop_overrides": sop_overrides,
+            "domain_terms": domain_terms,
             "source_language": source_language,
             "target_language": target_language,
             "chunks": [

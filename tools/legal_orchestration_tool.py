@@ -124,6 +124,18 @@ LEGAL_ORCHESTRATE_SCHEMA = {
                 "type": "string",
                 "description": "Optional glossary, term sheet, or defined-term reference for translation QA.",
             },
+            "sop_path": {
+                "type": "string",
+                "description": "Optional project/task-specific translation QA SOP file.",
+            },
+            "sop_overrides": {
+                "type": "string",
+                "description": "Optional task-specific SOP additions, exceptions, or priority changes.",
+            },
+            "domain_terms": {
+                "type": "object",
+                "description": "Optional task-specific term map for translation QA.",
+            },
             "chunk_size": {
                 "type": "integer",
                 "description": "Paragraph chunk size for native translation QA. Default: 120.",
@@ -595,6 +607,9 @@ def _handle_legal_orchestrate(args: dict, **kwargs) -> str:
     source_path = str(args.get("source_path") or "").strip() or None
     translation_path = str(args.get("translation_path") or "").strip() or None
     glossary_path = str(args.get("glossary_path") or "").strip() or None
+    sop_path = str(args.get("sop_path") or "").strip() or None
+    sop_overrides = str(args.get("sop_overrides") or "").strip() or None
+    domain_terms = args.get("domain_terms") if isinstance(args.get("domain_terms"), dict) else {}
     workflow_type = str(args.get("workflow_type") or "").strip() or None
 
     if task_type == "deliver":
@@ -634,6 +649,9 @@ def _handle_legal_orchestrate(args: dict, **kwargs) -> str:
                 "source_path": source_path or "",
                 "translation_path": translation_path or "",
                 "glossary_path": glossary_path or term_sheet_path or "",
+                "sop_path": sop_path or "",
+                "sop_overrides": sop_overrides or "",
+                "domain_terms": domain_terms,
                 "instructions": instructions or "",
             },
             task_id=kwargs.get("task_id"),
@@ -728,6 +746,9 @@ def _handle_legal_orchestrate(args: dict, **kwargs) -> str:
                 "source_path": source_path or "",
                 "translation_path": translation_path or "",
                 "glossary_path": glossary_path or term_sheet_path or "",
+                "sop_path": sop_path or "",
+                "sop_overrides": sop_overrides or "",
+                "domain_terms": domain_terms,
                 "instructions": instructions or "",
                 "chunk_size": int(args.get("chunk_size") or 120),
                 "source_language": "Chinese",
