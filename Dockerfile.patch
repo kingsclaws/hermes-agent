@@ -10,6 +10,7 @@ COPY . /tmp/patch_src/
 RUN set -eux; \
     cp -a /tmp/patch_src/vendor/lexitool/lexitool/. /opt/lexitool/lexitool/; \
     cp /tmp/patch_src/vendor/lexitool/pyproject.toml /opt/lexitool/; \
+    rm -rf /opt/lex-hermes/web/src; \
     for d in tools hermes_cli agent tui_gateway web; do \
       mkdir -p "/opt/lex-hermes/$d"; \
       cp -a "/tmp/patch_src/$d/." "/opt/lex-hermes/$d/"; \
