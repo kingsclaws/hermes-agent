@@ -6,10 +6,13 @@ import {
   CheckSquare,
   FileSearch,
   GitBranch,
+  GripVertical,
+  Plus,
   PackageCheck,
   PenLine,
   Play,
   ScrollText,
+  Trash2,
 } from "lucide-react";
 import type { ReactNode } from "react";
 import { useMemo, useState } from "react";
@@ -26,6 +29,25 @@ const REVIEW_TYPES = [
   ["review_xref", "交叉引用"],
   ["review_ts", "TS一致性"],
 ] as const;
+
+type WorkflowAtom = {
+  id: string;
+  role: string;
+  title: string;
+  type: string;
+};
+
+const DEFAULT_WORKFLOW_ATOMS: WorkflowAtom[] = [
+  { id: "read-template", role: "reader", title: "通读合同模板", type: "lex_read" },
+  { id: "read-ts", role: "reader", title: "读取 TS/支持资料", type: "source_read" },
+  { id: "clause-map", role: "planner", title: "建立条款地图", type: "analysis" },
+  { id: "ts-matrix", role: "planner", title: "TS-合同矩阵", type: "analysis" },
+  { id: "revision-plan", role: "planner", title: "修订计划/人审确认", type: "approval_gate" },
+  { id: "execute", role: "drafter", title: "执行已确认修订", type: "lex_edit" },
+  { id: "xref", role: "xref", title: "交叉引用审计", type: "lex_ref" },
+  { id: "review", role: "reviewer", title: "格式/TS复核", type: "review" },
+  { id: "deliver", role: "coordinator", title: "交付检查", type: "delivery" },
+];
 
 function q(value: string): string {
   return value.trim();
@@ -45,6 +67,7 @@ export function LegalWorkflowPanel({
     "review_format",
     "review_xref",
   ]);
+  const [workflowAtoms, setWorkflowAtoms] = useState<WorkflowAtom[]>(DEFAULT_WORKFLOW_ATOMS);
 
   const effectiveProjectDir = q(projectDir || cwd || "");
   const canRunProject = !!effectiveProjectDir && !disabled;
@@ -53,6 +76,10 @@ export function LegalWorkflowPanel({
   const reviewTypeText = useMemo(
     () => reviewTypes.map((v) => `"${v}"`).join(", "),
     [reviewTypes],
+  );
+  const workflowAtomText = useMemo(
+    () => JSON.stringify(workflowAtoms, null, 2),
+    [workflowAtoms],
   );
 
   const run = (prompt: string) => {
@@ -66,6 +93,38 @@ export function LegalWorkflowPanel({
         ? prev.filter((v) => v !== type)
         : [...prev, type],
     );
+  };
+
+  const updateAtom = (index: number, patch: Partial<WorkflowAtom>) => {
+    setWorkflowAtoms((prev) =>
+      prev.map((atom, i) => (i === index ? { ...atom, ...patch } : atom)),
+    );
+  };
+
+  const moveAtom = (index: number, direction: -1 | 1) => {
+    setWorkflowAtoms((prev) => {
+      const next = [...prev];
+      const target = index + direction;
+      if (target < 0 || target >= next.length) return prev;
+      [next[index], next[target]] = [next[target], next[index]];
+      return next;
+    });
+  };
+
+  const removeAtom = (index: number) => {
+    setWorkflowAtoms((prev) => prev.filter((_, i) => i !== index));
+  };
+
+  const addAtom = () => {
+    setWorkflowAtoms((prev) => [
+      ...prev,
+      {
+        id: `custom-${prev.length + 1}`,
+        role: "coordinator",
+        title: "新增 workflow 原子",
+        type: "manual",
+      },
+    ]);
   };
 
   return (
@@ -101,6 +160,74 @@ export function LegalWorkflowPanel({
             )}
           />
         </label>
+
+        <div className="space-y-1 rounded border border-current/10 bg-black/5 p-2">
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-[0.65rem] uppercase tracking-wider text-muted-foreground">
+              workflow 原子
+            </span>
+            <button
+              type="button"
+              onClick={addAtom}
+              className="inline-flex items-center gap-1 rounded border border-current/15 px-1.5 py-0.5 text-[0.65rem] text-muted-foreground hover:text-foreground"
+            >
+              <Plus className="h-3 w-3" />
+              增加
+            </button>
+          </div>
+          <div className="max-h-52 space-y-1 overflow-y-auto pr-1">
+            {workflowAtoms.map((atom, index) => (
+              <div
+                key={`${atom.id}-${index}`}
+                className="grid grid-cols-[auto_1fr_auto] items-start gap-1 rounded border border-current/10 bg-background-base/60 p-1"
+              >
+                <GripVertical className="mt-1 h-3.5 w-3.5 text-muted-foreground" />
+                <div className="min-w-0 space-y-1">
+                  <input
+                    value={atom.title}
+                    onChange={(e) => updateAtom(index, { title: e.target.value })}
+                    className="w-full rounded border border-current/10 bg-black/10 px-1.5 py-1 text-[0.7rem] outline-none focus:border-primary/60"
+                  />
+                  <div className="grid grid-cols-2 gap-1">
+                    <input
+                      value={atom.role}
+                      onChange={(e) => updateAtom(index, { role: e.target.value })}
+                      className="rounded border border-current/10 bg-black/10 px-1.5 py-1 text-[0.65rem] outline-none focus:border-primary/60"
+                    />
+                    <input
+                      value={atom.type}
+                      onChange={(e) => updateAtom(index, { type: e.target.value })}
+                      className="rounded border border-current/10 bg-black/10 px-1.5 py-1 text-[0.65rem] outline-none focus:border-primary/60"
+                    />
+                  </div>
+                </div>
+                <div className="flex flex-col gap-1">
+                  <button
+                    type="button"
+                    onClick={() => moveAtom(index, -1)}
+                    className="rounded border border-current/10 px-1 text-[0.6rem] text-muted-foreground hover:text-foreground"
+                  >
+                    ↑
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => moveAtom(index, 1)}
+                    className="rounded border border-current/10 px-1 text-[0.6rem] text-muted-foreground hover:text-foreground"
+                  >
+                    ↓
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => removeAtom(index)}
+                    className="rounded border border-current/10 px-1 py-0.5 text-muted-foreground hover:text-destructive"
+                  >
+                    <Trash2 className="h-3 w-3" />
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
 
         <div className="grid grid-cols-2 gap-1.5">
           <WorkflowButton
@@ -186,15 +313,21 @@ export function LegalWorkflowPanel({
           <WorkflowButton
             disabled={!canRunDocument}
             icon={<PenLine />}
-            label="起草/修订"
+            label="创建计划"
             onClick={() =>
               run(`
-请执行法律文书起草/修订 workflow。
+请先创建法律文书 workflow 计划，不要直接修改文件。
 项目目录：${effectiveProjectDir || "使用当前 active project"}
 主文档：${q(documentPath)}
 TS/支持文件：${q(termSheetPath) || "无"}
 指令：${q(instructions) || "按项目上下文和用户要求处理。"}
-要求优先调用 legal_orchestrate(task_type="revise")；简单原子修改可用 lex_edit，但必须先 lex_read 定位并在修改后验证。
+要求：
+1. 调用 legal_orchestrate(task_type="plan") 或 legal_workflow(action="create_plan")。
+2. workflow 必须包含：通读模板、读取 TS、条款地图、TS-合同矩阵、修订计划、人审确认、执行修订、交叉引用、格式复核、交付检查。
+3. 在用户确认修订计划前，禁止调用 lex_edit 修改主文档。
+4. 创建后展示 workflow run_id 和每个 step_id，等待 Master 选择、修改或确认。
+5. UI 指定的 workflow 原子如下，优先按该顺序建计划：
+${workflowAtomText}
               `)
             }
           />

@@ -70,6 +70,9 @@ CONFIGURABLE_TOOLSETS = [
     ("session_search",  "🔎 Session Search",            "search past conversations"),
     ("clarify",         "❓ Clarifying Questions",      "clarify"),
     ("delegation",      "👥 Task Delegation",           "delegate_task"),
+    ("project_management", "⚖️  Legal Projects",        "project_create, select, status"),
+    ("legal_orchestration", "⚖️  Legal Orchestration",  "legal_orchestrate, workflow"),
+    ("lexitool",        "📄 Lex DOCX Tools",            "lex_read, lex_edit, lex_ocr, lex_ref"),
     ("cronjob",         "⏰ Cron Jobs",                 "create/list/update/pause/resume/run, with optional attached skills"),
     ("messaging",       "📨 Cross-Platform Messaging",  "send_message"),
     ("homeassistant",    "🏠 Home Assistant",           "smart home device control"),
@@ -93,6 +96,12 @@ CONFIGURABLE_TOOLSETS = [
 # which walks them through credential setup. The tool's check_fn means
 # the schema won't appear to the model even if enabled without credentials.
 _DEFAULT_OFF_TOOLSETS = {"moa", "homeassistant", "spotify", "discord", "discord_admin", "video", "video_gen", "x_search"}
+
+# Lex Hermes is a legal-document fork: these toolsets are part of the
+# baseline harness and must survive old user configs that only persisted a
+# narrow explicit platform_toolsets.cli list. Users can still suppress them
+# deliberately through agent.disabled_toolsets.
+_LEX_LEGAL_BASELINE_TOOLSETS = {"project_management", "legal_orchestration", "lexitool"}
 
 # Platform-scoped toolsets: only appear in the `hermes tools` checklist for
 # these platforms, and only resolve/save for these platforms.  A toolset
@@ -1278,6 +1287,12 @@ def _get_platform_tools(
             enabled_toolsets.update(enabled_mcp_servers)
     else:
         enabled_toolsets.update(explicit_mcp_servers)
+
+    # Lex Hermes baseline: legal/document tools are on by default even when an
+    # older config has an explicit allowlist such as ["terminal", "file"].
+    for baseline_ts in _LEX_LEGAL_BASELINE_TOOLSETS:
+        if _toolset_allowed_for_platform(baseline_ts, platform):
+            enabled_toolsets.add(baseline_ts)
 
     # Honor agent.disabled_toolsets from config.yaml — allows users to
     # globally suppress specific toolsets (e.g. "memory") across all

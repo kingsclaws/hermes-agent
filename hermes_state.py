@@ -299,6 +299,37 @@ CREATE TABLE IF NOT EXISTS subagent_events (
     created_at REAL NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS legal_workflow_runs (
+    id TEXT PRIMARY KEY,
+    project_id TEXT REFERENCES projects(id) ON DELETE SET NULL,
+    project_dir TEXT,
+    name TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'draft',
+    document_path TEXT,
+    term_sheet_path TEXT,
+    instructions TEXT,
+    created_by_session_id TEXT REFERENCES sessions(id) ON DELETE SET NULL,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS legal_workflow_steps (
+    id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL REFERENCES legal_workflow_runs(id) ON DELETE CASCADE,
+    step_index INTEGER NOT NULL,
+    title TEXT NOT NULL,
+    type TEXT NOT NULL,
+    role TEXT,
+    status TEXT NOT NULL DEFAULT 'pending',
+    depends_on TEXT,
+    input_json TEXT,
+    output_json TEXT,
+    agent_run_id TEXT REFERENCES subagent_runs(id) ON DELETE SET NULL,
+    requires_approval INTEGER NOT NULL DEFAULT 0,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_sessions_source ON sessions(source);
 CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_session_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_started ON sessions(started_at DESC);
@@ -315,6 +346,12 @@ CREATE INDEX IF NOT EXISTS idx_subagent_runs_status
     ON subagent_runs(status, started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_subagent_events_run
     ON subagent_events(run_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_legal_workflow_runs_project
+    ON legal_workflow_runs(project_id, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_legal_workflow_runs_session
+    ON legal_workflow_runs(created_by_session_id, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_legal_workflow_steps_run
+    ON legal_workflow_steps(run_id, step_index);
 """
 
 FTS_SQL = """
@@ -2693,6 +2730,223 @@ class SessionDB:
                 (project_id,),
             ).fetchall()
         return [dict(row) for row in rows]
+
+    # =========================================================================
+    # Legal workflows
+    # =========================================================================
+
+    def create_legal_workflow(
+        self,
+        *,
+        name: str,
+        project_id: Optional[str] = None,
+        project_dir: Optional[str] = None,
+        document_path: Optional[str] = None,
+        term_sheet_path: Optional[str] = None,
+        instructions: Optional[str] = None,
+        created_by_session_id: Optional[str] = None,
+        steps: Optional[List[Dict[str, Any]]] = None,
+        status: str = "draft",
+    ) -> str:
+        run_id = uuid.uuid4().hex
+        now = time.time()
+        steps = steps or []
+
+        def _do(conn):
+            conn.execute(
+                """
+                INSERT INTO legal_workflow_runs (
+                    id, project_id, project_dir, name, status, document_path,
+                    term_sheet_path, instructions, created_by_session_id,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    run_id,
+                    project_id,
+                    project_dir,
+                    name,
+                    status,
+                    document_path,
+                    term_sheet_path,
+                    instructions,
+                    created_by_session_id,
+                    now,
+                    now,
+                ),
+            )
+            for idx, step in enumerate(steps):
+                step_id = str(step.get("id") or uuid.uuid4().hex)
+                conn.execute(
+                    """
+                    INSERT INTO legal_workflow_steps (
+                        id, run_id, step_index, title, type, role, status,
+                        depends_on, input_json, output_json, agent_run_id,
+                        requires_approval, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        step_id,
+                        run_id,
+                        int(step.get("step_index", idx)),
+                        str(step.get("title") or step_id),
+                        str(step.get("type") or "manual"),
+                        step.get("role"),
+                        str(step.get("status") or "pending"),
+                        json.dumps(step.get("depends_on") or [], ensure_ascii=False),
+                        json.dumps(step.get("input") or {}, ensure_ascii=False),
+                        json.dumps(step.get("output") or {}, ensure_ascii=False),
+                        step.get("agent_run_id"),
+                        1 if step.get("requires_approval") else 0,
+                        now,
+                        now,
+                    ),
+                )
+
+        self._execute_write(_do)
+        return run_id
+
+    def get_legal_workflow(self, run_id: str) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            run = self._conn.execute(
+                "SELECT * FROM legal_workflow_runs WHERE id = ? LIMIT 1",
+                (run_id,),
+            ).fetchone()
+            if not run:
+                return None
+            rows = self._conn.execute(
+                """
+                SELECT * FROM legal_workflow_steps
+                WHERE run_id = ?
+                ORDER BY step_index ASC
+                """,
+                (run_id,),
+            ).fetchall()
+        payload = dict(run)
+        payload["steps"] = [self._decode_legal_workflow_step(dict(row)) for row in rows]
+        return payload
+
+    def list_legal_workflows(
+        self,
+        *,
+        project_id: Optional[str] = None,
+        project_dir: Optional[str] = None,
+        limit: int = 20,
+    ) -> List[Dict[str, Any]]:
+        limit = max(1, min(int(limit or 20), 100))
+        clauses = []
+        params: List[Any] = []
+        if project_id:
+            clauses.append("project_id = ?")
+            params.append(project_id)
+        if project_dir:
+            clauses.append("project_dir = ?")
+            params.append(project_dir)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        with self._lock:
+            rows = self._conn.execute(
+                f"""
+                SELECT * FROM legal_workflow_runs
+                {where}
+                ORDER BY updated_at DESC
+                LIMIT ?
+                """,
+                (*params, limit),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def update_legal_workflow(
+        self,
+        run_id: str,
+        **fields,
+    ) -> None:
+        allowed = {"name", "status", "document_path", "term_sheet_path", "instructions"}
+        updates: List[str] = []
+        values: List[Any] = []
+        for key, value in fields.items():
+            if key in allowed:
+                updates.append(f"{key} = ?")
+                values.append(value)
+        if not updates:
+            return
+        updates.append("updated_at = ?")
+        values.append(time.time())
+
+        def _do(conn):
+            conn.execute(
+                f"UPDATE legal_workflow_runs SET {', '.join(updates)} WHERE id = ?",
+                (*values, run_id),
+            )
+
+        self._execute_write(_do)
+
+    def update_legal_workflow_step(
+        self,
+        step_id: str,
+        **fields,
+    ) -> None:
+        allowed = {
+            "step_index",
+            "title",
+            "type",
+            "role",
+            "status",
+            "depends_on",
+            "input",
+            "output",
+            "agent_run_id",
+            "requires_approval",
+        }
+        updates: List[str] = []
+        values: List[Any] = []
+        for key, value in fields.items():
+            if key not in allowed:
+                continue
+            column = {
+                "input": "input_json",
+                "output": "output_json",
+            }.get(key, key)
+            if key in {"depends_on", "input", "output"}:
+                value = json.dumps(value or ([] if key == "depends_on" else {}), ensure_ascii=False)
+            if key == "requires_approval":
+                value = 1 if value else 0
+            updates.append(f"{column} = ?")
+            values.append(value)
+        if not updates:
+            return
+        updates.append("updated_at = ?")
+        values.append(time.time())
+
+        def _do(conn):
+            conn.execute(
+                f"UPDATE legal_workflow_steps SET {', '.join(updates)} WHERE id = ?",
+                (*values, step_id),
+            )
+
+        self._execute_write(_do)
+
+    @staticmethod
+    def _decode_legal_workflow_step(row: Dict[str, Any]) -> Dict[str, Any]:
+        for key, default in (
+            ("depends_on", []),
+            ("input_json", {}),
+            ("output_json", {}),
+        ):
+            raw = row.get(key)
+            try:
+                decoded = json.loads(raw) if raw else default
+            except Exception:
+                decoded = default
+            if key == "input_json":
+                row["input"] = decoded
+            elif key == "output_json":
+                row["output"] = decoded
+            else:
+                row[key] = decoded
+        row.pop("input_json", None)
+        row.pop("output_json", None)
+        row["requires_approval"] = bool(row.get("requires_approval"))
+        return row
 
     def create_client(self, name: str, path: str) -> str:
         client_id = uuid.uuid4().hex

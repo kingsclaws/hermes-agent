@@ -76,7 +76,7 @@ _HERMES_CORE_TOOLS = [
     # Code execution + delegation
     "execute_code", "delegate_task",
     # Legal workflow orchestration
-    "legal_orchestrate",
+    "legal_orchestrate", "legal_workflow",
     *_LEXITOOL_TOOLS,
     # Cronjob management
     "cronjob",
@@ -250,7 +250,7 @@ TOOLSETS = {
 
     "legal_orchestration": {
         "description": "Native legal workflow orchestration for drafting, review, revision, and delivery",
-        "tools": ["legal_orchestrate"],
+        "tools": ["legal_orchestrate", "legal_workflow"],
         "includes": []
     },
 

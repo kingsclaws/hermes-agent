@@ -6,6 +6,7 @@ import pytest
 
 from hermes_cli.tools_config import (
     _DEFAULT_OFF_TOOLSETS,
+    _LEX_LEGAL_BASELINE_TOOLSETS,
     _apply_toolset_change,
     _configure_provider,
     _reconfigure_provider,
@@ -76,6 +77,28 @@ def test_get_platform_tools_uses_default_when_platform_not_configured():
 
 def test_configurable_toolsets_include_messaging():
     assert any(ts_key == "messaging" for ts_key, _, _ in CONFIGURABLE_TOOLSETS)
+
+
+def test_configurable_toolsets_include_lex_legal_baseline():
+    keys = {ts_key for ts_key, _, _ in CONFIGURABLE_TOOLSETS}
+
+    assert _LEX_LEGAL_BASELINE_TOOLSETS.issubset(keys)
+
+
+def test_get_platform_tools_default_includes_lex_legal_baseline():
+    enabled = _get_platform_tools({}, "cli", include_default_mcp_servers=False)
+
+    assert _LEX_LEGAL_BASELINE_TOOLSETS.issubset(enabled)
+
+
+def test_get_platform_tools_old_explicit_config_keeps_lex_legal_baseline():
+    config = {"platform_toolsets": {"cli": ["terminal", "file"]}}
+
+    enabled = _get_platform_tools(config, "cli", include_default_mcp_servers=False)
+
+    assert "terminal" in enabled
+    assert "file" in enabled
+    assert _LEX_LEGAL_BASELINE_TOOLSETS.issubset(enabled)
 
 def test_get_platform_tools_default_telegram_includes_messaging():
     enabled = _get_platform_tools({}, "telegram")
@@ -166,7 +189,8 @@ def test_get_platform_tools_configurable_only_no_expansion():
 
     assert "terminal" in enabled
     assert "file" in enabled
-    # Web shouldn't sneak in via the new expansion path.
+    # Web shouldn't sneak in via the new expansion path. Lex legal baseline
+    # toolsets are intentionally force-enabled for this fork.
     assert "web" not in enabled
 
 
@@ -197,6 +221,7 @@ def test_get_platform_tools_preserves_explicit_empty_selection():
     # configurable side: nothing the user could have checked in the TUI
     # checklist should reappear here.
     configurable = {ts_key for ts_key, _, _ in CONFIGURABLE_TOOLSETS}
+    configurable -= _LEX_LEGAL_BASELINE_TOOLSETS
     assert enabled.isdisjoint(configurable)
 
 

@@ -70,6 +70,7 @@ LEGAL_ORCHESTRATE_SCHEMA = {
                 "type": "string",
                 "enum": [
                     "draft",
+                    "plan",
                     "revise",
                     "review",
                     "review_content",
@@ -575,6 +576,23 @@ def _handle_legal_orchestrate(args: dict, **kwargs) -> str:
             "lex_deliver",
             {"project_dir": str(project_root)},
             task_id=kwargs.get("task_id"),
+        )
+
+    if task_type == "plan":
+        from tools.registry import registry as _registry
+
+        return _registry.dispatch(
+            "legal_workflow",
+            {
+                "action": "create_plan",
+                "name": "法律文书修订 workflow",
+                "project_dir": str(project_root),
+                "document_path": document_path or "",
+                "term_sheet_path": term_sheet_path or "",
+                "instructions": instructions or "",
+            },
+            task_id=kwargs.get("task_id"),
+            parent_agent=parent_agent,
         )
 
     if task_type == "review":
