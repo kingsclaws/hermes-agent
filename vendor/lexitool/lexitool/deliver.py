@@ -143,12 +143,12 @@ def package(
             "type": "final",
         })
 
-    # Cross-document reference scan (if there are >= 2 docs)
+    # Cross-reference scan: internal refs for every document, plus cross-doc refs for multi-doc projects.
     cross_ref_result = None
-    if len(docx_files) >= 2:
+    if docx_files:
         try:
-            from lexitool.xref import cross_doc_scan
-            cross_ref_result = cross_doc_scan(docx_files)
+            from lexitool.xref import audit_documents
+            cross_ref_result = audit_documents(docx_files)
             # Write cross-reference report
             cr_text = _format_cross_ref_report(cross_ref_result, docx_files)
             (delivery_dir / "cross-reference-report.md").write_text(cr_text, encoding="utf-8")
@@ -191,31 +191,51 @@ def _format_cross_ref_report(result: dict, docx_files: List[str]) -> str:
     lines.append(f"| Total cross-references | {s.get('total', 0)} |")
     lines.append(f"| Valid references | {s.get('valid', 0)} |")
     lines.append(f"| Broken references | {s.get('broken', 0)} |")
+    lines.append(f"| Internal dead references | {s.get('internal_dead', 0)} |")
+    lines.append(f"| Cross-document broken refs | {s.get('cross_broken', 0)} |")
     lines.append(f"| Schedule/attachment refs | {s.get('schedules', 0)} |")
     lines.append("")
 
-    broken = result.get("broken_refs", [])
-    if broken:
-        lines.append("## Broken References")
+    internal_broken = []
+    for doc in result.get("documents", []) or []:
+        for ref in doc.get("dead_refs", []) or []:
+            internal_broken.append((doc, ref))
+
+    cross_result = result.get("cross_doc_scan") or {}
+    cross_broken = cross_result.get("broken_refs", []) if isinstance(cross_result, dict) else []
+
+    lines.append("## Broken References")
+    lines.append("")
+    if internal_broken:
+        lines.append("### Internal References")
         lines.append("")
-        for r in broken:
+        for doc, ref in internal_broken:
+            src_name = Path(doc.get("path", "")).stem
+            lines.append(f"- **{src_name}** §{ref.get('para')} → {ref.get('ref_text')}")
+            lines.append(f"  - Context: {ref.get('context', '')}")
+            lines.append("")
+    if cross_broken:
+        lines.append("### Cross-Document References")
+        lines.append("")
+        for r in cross_broken:
             src_name = Path(r["source"]).stem
             lines.append(f"- **{src_name}** → 《{r['target_doc']}》第{r['clause']}条")
             lines.append(f"  - Reason: {r['reason']}")
             lines.append("")
-    else:
-        lines.append("## Broken References")
-        lines.append("")
+    if not internal_broken and not cross_broken:
         lines.append("No broken cross-references found. All references validated successfully.")
         lines.append("")
 
-    valid = result.get("valid_refs", [])
+    valid = []
+    for doc in result.get("documents", []) or []:
+        for ref in doc.get("valid_refs", []) or []:
+            valid.append((doc, ref))
     if valid:
         lines.append("## Valid References")
         lines.append("")
-        for r in valid:
-            src_name = Path(r["source"]).stem
-            lines.append(f"- {src_name} → 《{r['target_doc']}》第{r['clause']}条 ✓")
+        for doc, ref in valid:
+            src_name = Path(doc.get("path", "")).stem
+            lines.append(f"- {src_name} §{ref.get('para')} → {ref.get('ref_text')} ✓")
 
     return "\n".join(lines) + "\n"
 

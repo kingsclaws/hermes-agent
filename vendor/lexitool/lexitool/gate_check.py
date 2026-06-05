@@ -232,23 +232,23 @@ def _check_gate_report(
 
 
 def _check_gate_5_cross_ref(project_dir: str, **_kw) -> dict:
-    """G5: Cross-references — run cross_doc_scan."""
+    """G5: Cross-references — run internal and cross-document audits."""
     docx_files = _find_docx_files(project_dir)
-    if len(docx_files) < 2:
+    if not docx_files:
         return {
             "gate": 5, "status": "pending",
-            "detail": "Need 2+ documents for cross-reference scan",
-            "remediation": "Add more documents or skip this gate for single-doc projects",
+            "detail": "No .docx files found for cross-reference scan",
+            "remediation": "Create or add at least one deliverable .docx document",
         }
 
     try:
-        from lexitool.xref import cross_doc_scan
-        result = cross_doc_scan(docx_files)
+        from lexitool.xref import audit_documents
+        result = audit_documents(docx_files)
     except Exception as e:
         return {
             "gate": 5, "status": "fail",
             "detail": f"Cross-reference scan failed: {e}",
-            "remediation": "Check document format and re-run cross_doc_scan",
+            "remediation": "Check document format and re-run cross-reference audit",
         }
 
     summary = result.get("summary", {})
@@ -259,12 +259,22 @@ def _check_gate_5_cross_ref(project_dir: str, **_kw) -> dict:
         return {
             "gate": 5, "status": "fail",
             "detail": f"{broken}/{total} broken cross-references",
-            "broken_refs": result.get("broken_refs", []),
+            "cross_ref_result": result,
             "remediation": "Fix all broken cross-references before delivery",
         }
     if total == 0:
-        return {"gate": 5, "status": "pass", "detail": "No cross-document references found"}
-    return {"gate": 5, "status": "pass", "detail": f"All {total} cross-references valid"}
+        return {
+            "gate": 5,
+            "status": "pass",
+            "detail": f"No cross-references found across {len(docx_files)} document(s)",
+            "cross_ref_result": result,
+        }
+    return {
+        "gate": 5,
+        "status": "pass",
+        "detail": f"All {total} cross-references valid across {len(docx_files)} document(s)",
+        "cross_ref_result": result,
+    }
 
 
 def _check_gate_7_final(project_dir: str = "", results: Optional[List[dict]] = None, **_kw) -> dict:

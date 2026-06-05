@@ -20,7 +20,7 @@ import tempfile
 import zipfile
 from copy import deepcopy
 from pathlib import Path
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Optional, Sequence, Set
 
 from lxml import etree
 
@@ -185,6 +185,11 @@ def _split_run(run_elem, char_pos: int):
 # ── Cross-reference detection pattern ─────────────────────────────────────────
 
 _XREF_PATTERN = re.compile(r'第(\d+(?:\.\d+)*)条(?:\(([^)]*)\))?')
+_STATIC_ARTICLE_REF_RE = re.compile(r'第(?P<clause>\d+(?:\.\d+)*)条')
+_NUMBERED_HEADING_RE = re.compile(
+    r'^\s*(?:第)?(?P<clause>\d+(?:\.\d+)*)(?:条)?(?:[\.．、\s]+|$)(?P<title>.*)$'
+)
+_FIELD_CODE_TAGS = {"fldChar", "instrText"}
 
 
 # ── Scan (dry run) ───────────────────────────────────────────────────────────
@@ -230,6 +235,244 @@ def scan_xrefs(doc_path: str) -> dict:
         "clause_count": len(clause_to_pidx),
         "headings_indexed": len(clause_to_pidx),
         "field_codes_present": fld_count,
+    }
+
+
+def _localname(el) -> str:
+    return etree.QName(el).localname
+
+
+def _paragraph_text(p) -> str:
+    return "".join((t.text or "") for t in p.findall(f".//{W}t"))
+
+
+def _paragraph_style(p) -> str:
+    pPr = p.find(f"{W}pPr")
+    if pPr is None:
+        return ""
+    ps = pPr.find(f"{W}pStyle")
+    if ps is None:
+        return ""
+    return ps.get(f"{W}val", "")
+
+
+def _is_heading_paragraph(p) -> bool:
+    style = _paragraph_style(p)
+    if style in _HEADING_STYLES or "AOHead" in style:
+        return True
+    text = _paragraph_text(p).strip()
+    return bool(_NUMBERED_HEADING_RE.match(text)) and not text.startswith("第")
+
+
+def _is_toc_paragraph(p) -> bool:
+    style = _paragraph_style(p).lower()
+    return style.startswith("toc") or style in {"msonormaltoc", "contents"}
+
+
+def _bookmark_names_in_para(p) -> List[str]:
+    names: List[str] = []
+    for bm in p.iter(f"{W}bookmarkStart"):
+        name = bm.get(f"{W}name")
+        if name:
+            names.append(name)
+    return names
+
+
+def _choose_ref_bookmark(names: Sequence[str]) -> Optional[str]:
+    for prefix in ("_Ref", "_Toc"):
+        for name in names:
+            if name.startswith(prefix):
+                return name
+    return names[0] if names else None
+
+
+def _build_heading_bookmark_index(paras: list) -> Dict[str, dict]:
+    """Return exact clause-number -> heading bookmark metadata."""
+    index: Dict[str, dict] = {}
+    for pi, p in enumerate(paras):
+        text = _paragraph_text(p).strip()
+        if not text:
+            continue
+        match = _NUMBERED_HEADING_RE.match(text)
+        if not match:
+            continue
+        clause = match.group("clause")
+        names = _bookmark_names_in_para(p)
+        bookmark = _choose_ref_bookmark(names)
+        if not bookmark:
+            continue
+        index.setdefault(
+            clause,
+            {
+                "bookmark": bookmark,
+                "heading_para": pi + 1,
+                "heading_text": text,
+                "title": (match.group("title") or "").strip(),
+            },
+        )
+    return index
+
+
+def _make_fld_char(fld_char_type: str) -> etree._Element:
+    r = etree.Element(f"{W}r")
+    fld_char = etree.SubElement(r, f"{W}fldChar")
+    fld_char.set(f"{W}fldCharType", fld_char_type)
+    return r
+
+
+def _make_instr_text(instruction: str) -> etree._Element:
+    r = etree.Element(f"{W}r")
+    instr = etree.SubElement(r, f"{W}instrText")
+    instr.set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
+    instr.text = instruction
+    return r
+
+
+def _make_field_display(text: str) -> etree._Element:
+    r = etree.Element(f"{W}r")
+    t = etree.SubElement(r, f"{W}t")
+    t.text = text
+    return r
+
+
+def _field_elements(bookmark: str, display_text: str) -> List[etree._Element]:
+    return [
+        _make_fld_char("begin"),
+        _make_instr_text(f" REF {bookmark} "),
+        _make_fld_char("separate"),
+        _make_field_display(display_text),
+        _make_fld_char("end"),
+    ]
+
+
+def _rewrite_run_text_with_fields(p, run_el, replacements: List[tuple[str, str, int, int]]) -> List[dict]:
+    """Replace text spans inside one run with REF field elements."""
+    t_el = run_el.find(f"{W}t")
+    if t_el is None or t_el.text is None:
+        return []
+    text = t_el.text
+    run_idx = list(p).index(run_el)
+    p.remove(run_el)
+
+    changed: List[dict] = []
+    insert_pos = run_idx
+    pos = 0
+    for clause, bookmark, start, end in replacements:
+        if start > pos:
+            new_run = deepcopy(run_el)
+            new_t = new_run.find(f"{W}t")
+            new_t.text = text[pos:start]
+            p.insert(insert_pos, new_run)
+            insert_pos += 1
+        for el in _field_elements(bookmark, clause):
+            p.insert(insert_pos, el)
+            insert_pos += 1
+        changed.append({"clause": clause, "bookmark": bookmark})
+        pos = end
+    if pos < len(text):
+        new_run = deepcopy(run_el)
+        new_t = new_run.find(f"{W}t")
+        new_t.text = text[pos:]
+        p.insert(insert_pos, new_run)
+    return changed
+
+
+def _plain_text_runs_outside_fields(p) -> List[tuple]:
+    runs = []
+    in_field = False
+    for child in p:
+        if child.tag != f"{W}r":
+            continue
+        fld_char = child.find(f"{W}fldChar")
+        if fld_char is not None:
+            fld_type = fld_char.get(f"{W}fldCharType", "")
+            if fld_type == "begin":
+                in_field = True
+            elif fld_type == "end":
+                in_field = False
+            continue
+        if in_field or child.find(f"{W}instrText") is not None:
+            continue
+        t_el = child.find(f"{W}t")
+        if t_el is not None and t_el.text:
+            runs.append((child, t_el.text))
+    return runs
+
+
+def convert_static_refs(
+    doc_path: str,
+    clauses: Optional[Sequence[str]] = None,
+    dry_run: bool = True,
+    skip_toc: bool = True,
+) -> dict:
+    """Convert hardcoded ``第X条`` references to real REF fields.
+
+    The conversion is deliberately exact: ``X`` must exist as a numbered
+    heading with an existing bookmark. Existing Word fields and hyperlinks are
+    skipped, so a ``[ref]`` marker in lex_read output is not treated as broken.
+    """
+    doc_xml, other, order = _read_docx(doc_path)
+    root = etree.fromstring(doc_xml)
+    body = root.find(f"{W}body")
+    if body is None:
+        return {"ok": False, "reason": "no document body"}
+    paras = [c for c in body if c.tag == f"{W}p"]
+    heading_index = _build_heading_bookmark_index(paras)
+    allowed = {str(c) for c in clauses or [] if str(c).strip()}
+
+    converted: List[dict] = []
+    unresolved: List[dict] = []
+    skipped: List[dict] = []
+
+    for pi, p in enumerate(paras, start=1):
+        if skip_toc and _is_toc_paragraph(p):
+            continue
+        if _is_heading_paragraph(p):
+            continue
+
+        for run_el, text in list(_plain_text_runs_outside_fields(p)):
+            replacements = []
+            for match in _STATIC_ARTICLE_REF_RE.finditer(text):
+                clause = match.group("clause")
+                if allowed and clause not in allowed:
+                    continue
+                target = heading_index.get(clause)
+                detail = {
+                    "para": pi,
+                    "clause": clause,
+                    "match": match.group(0),
+                    "context": text[max(0, match.start() - 30):match.end() + 50],
+                }
+                if not target:
+                    unresolved.append({**detail, "reason": "target heading bookmark not found"})
+                    continue
+                replacements.append((clause, target["bookmark"], match.start("clause"), match.end("clause")))
+                converted.append({
+                    **detail,
+                    "bookmark": target["bookmark"],
+                    "target_para": target["heading_para"],
+                    "target_heading": target["heading_text"],
+                })
+            if replacements and not dry_run:
+                _rewrite_run_text_with_fields(p, run_el, replacements)
+
+    if not dry_run and converted:
+        doc_xml_out = etree.tostring(root, xml_declaration=True, encoding="UTF-8", standalone="yes")
+        _write_docx(doc_path, doc_xml_out, other, order)
+        try:
+            from .fields import update_fields
+            update_fields(doc_path)
+        except Exception:
+            pass
+
+    return {
+        "ok": not unresolved,
+        "converted": len(converted),
+        "dry_run": dry_run,
+        "heading_bookmarks": len(heading_index),
+        "details": converted,
+        "unresolved": unresolved,
+        "skipped": skipped,
     }
 
 
@@ -844,4 +1087,50 @@ def xref_audit(doc_path: str) -> dict:
             f"{len(dead_refs)} dead, "
             f"{len(unreferenced)} clauses unreferenced"
         ),
+    }
+
+
+def audit_documents(docs: List[str]) -> dict:
+    """Run internal and cross-document reference audits for deliver/gates."""
+    doc_results = []
+    internal_total = 0
+    internal_dead = 0
+
+    for path in docs:
+        try:
+            result = xref_audit(path)
+        except Exception as exc:
+            result = {
+                "ok": False,
+                "error": str(exc),
+                "total_references": 0,
+                "dead_refs": [],
+                "valid_refs": [],
+            }
+        internal_total += int(result.get("total_references") or 0)
+        internal_dead += len(result.get("dead_refs") or [])
+        doc_results.append({"path": path, **result})
+
+    cross_result = cross_doc_scan(docs) if len(docs) >= 2 else None
+    cross_summary = cross_result.get("summary", {}) if isinstance(cross_result, dict) else {}
+    cross_total = int(cross_summary.get("total") or 0)
+    cross_broken = int(cross_summary.get("broken") or 0)
+    total = internal_total + cross_total
+    broken = internal_dead + cross_broken
+
+    return {
+        "ok": broken == 0 and all(bool(r.get("ok", True)) for r in doc_results),
+        "docs_scanned": len(docs),
+        "documents": doc_results,
+        "cross_doc_scan": cross_result,
+        "summary": {
+            "total": total,
+            "broken": broken,
+            "valid": max(total - broken, 0),
+            "internal_total": internal_total,
+            "internal_dead": internal_dead,
+            "cross_total": cross_total,
+            "cross_broken": cross_broken,
+            "schedules": int(cross_summary.get("schedules") or 0),
+        },
     }
