@@ -172,6 +172,60 @@ def _resolve_project(name_or_id: str):
     return db.get_project(name_or_id)
 
 
+def resolve_selected_project(parent_agent=None, session_id: str | None = None):
+    """Return the currently selected project dict when one can be inferred.
+
+    This is intentionally read-only and best-effort. It lets orchestration tools
+    resolve project context without depending on CLI-only state.
+    """
+    from hermes_state import SessionDB
+
+    db = SessionDB()
+
+    if _active_project_name:
+        project = db.get_project(_active_project_name)
+        if project:
+            return project
+
+    for attr in ("_selected_project_id", "selected_project_id"):
+        value = getattr(parent_agent, attr, None) if parent_agent is not None else None
+        if value:
+            project = db.get_project(str(value))
+            if project:
+                return project
+
+    for attr in ("_selected_project_cwd", "selected_project_cwd"):
+        value = getattr(parent_agent, attr, None) if parent_agent is not None else None
+        if value:
+            project = db.get_project_by_path(str(value))
+            if project:
+                return project
+
+    if session_id:
+        try:
+            session = db.get_session(session_id)
+        except Exception:
+            session = None
+        if session:
+            project_id = session.get("project_id")
+            if project_id:
+                project = db.get_project(project_id)
+                if project:
+                    return project
+            project_cwd = session.get("project_cwd")
+            if project_cwd:
+                project = db.get_project_by_path(project_cwd)
+                if project:
+                    return project
+
+    if _active_project_path:
+        project = db.get_project_by_path(_active_project_path)
+        if project:
+            return project
+
+    return None
+
+
 def _resolve_project_path(name_or_id: str, given_path: str | None) -> str:
     """Resolve an absolute path for a new project."""
     if given_path and Path(given_path).is_absolute():

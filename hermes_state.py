@@ -33,7 +33,7 @@ T = TypeVar("T")
 
 DEFAULT_DB_PATH = get_hermes_home() / "state.db"
 
-SCHEMA_VERSION = 15
+SCHEMA_VERSION = 16
 
 # ---------------------------------------------------------------------------
 # WAL-compatibility fallback
@@ -302,6 +302,45 @@ CREATE TABLE IF NOT EXISTS projects (
 
 CREATE INDEX IF NOT EXISTS idx_projects_name ON projects(name);
 CREATE INDEX IF NOT EXISTS idx_projects_status ON projects(status);
+
+CREATE TABLE IF NOT EXISTS legal_workflow_runs (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    project_id TEXT,
+    project_dir TEXT,
+    document_path TEXT,
+    term_sheet_path TEXT,
+    instructions TEXT,
+    status TEXT NOT NULL DEFAULT 'planned',
+    created_by_session_id TEXT,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL,
+    FOREIGN KEY (project_id) REFERENCES projects(id),
+    FOREIGN KEY (created_by_session_id) REFERENCES sessions(id)
+);
+
+CREATE TABLE IF NOT EXISTS legal_workflow_steps (
+    id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL,
+    step_key TEXT NOT NULL,
+    step_index INTEGER NOT NULL DEFAULT 0,
+    title TEXT NOT NULL,
+    type TEXT NOT NULL DEFAULT 'manual',
+    role TEXT DEFAULT 'coordinator',
+    status TEXT NOT NULL DEFAULT 'pending',
+    depends_on TEXT,
+    input TEXT,
+    result TEXT,
+    requires_approval INTEGER DEFAULT 0,
+    started_at REAL,
+    ended_at REAL,
+    updated_at REAL NOT NULL,
+    FOREIGN KEY (run_id) REFERENCES legal_workflow_runs(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_legal_workflow_runs_project ON legal_workflow_runs(project_id, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_legal_workflow_runs_dir ON legal_workflow_runs(project_dir, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_legal_workflow_steps_run ON legal_workflow_steps(run_id, step_index);
 
 CREATE TABLE IF NOT EXISTS clients (
     id TEXT PRIMARY KEY,
@@ -2826,6 +2865,195 @@ class SessionDB:
             ).fetchall()
         return [dict(r) for r in rows]
 
+    # ── Legal workflow management ──
+
+    def create_legal_workflow(
+        self,
+        *,
+        name: str,
+        project_id: str = None,
+        project_dir: str = None,
+        document_path: str = None,
+        term_sheet_path: str = None,
+        instructions: str = None,
+        created_by_session_id: str = None,
+        steps: list = None,
+    ) -> str:
+        """Create a legal workflow run and its ordered steps."""
+        import uuid as _uuid
+
+        run_id = f"lwf_{_uuid.uuid4().hex[:12]}"
+        now = time.time()
+        normalized_steps = steps or []
+
+        def _do(conn):
+            conn.execute(
+                """INSERT INTO legal_workflow_runs
+                   (id, name, project_id, project_dir, document_path, term_sheet_path,
+                    instructions, status, created_by_session_id, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, 'planned', ?, ?, ?)""",
+                (
+                    run_id,
+                    name,
+                    project_id,
+                    project_dir,
+                    document_path,
+                    term_sheet_path,
+                    instructions,
+                    created_by_session_id,
+                    now,
+                    now,
+                ),
+            )
+            for index, step in enumerate(normalized_steps):
+                step_id = f"lws_{_uuid.uuid4().hex[:12]}"
+                step_key = str(step.get("id") or f"step-{index + 1}")
+                conn.execute(
+                    """INSERT INTO legal_workflow_steps
+                       (id, run_id, step_key, step_index, title, type, role, status,
+                        depends_on, input, result, requires_approval, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, NULL, ?, ?)""",
+                    (
+                        step_id,
+                        run_id,
+                        step_key,
+                        int(step.get("step_index", index)),
+                        str(step.get("title") or step_key),
+                        str(step.get("type") or "manual"),
+                        str(step.get("role") or "coordinator"),
+                        json.dumps(step.get("depends_on") or [], ensure_ascii=False),
+                        json.dumps(step.get("input") or {}, ensure_ascii=False),
+                        1 if step.get("requires_approval") else 0,
+                        now,
+                    ),
+                )
+
+        self._execute_write(_do)
+        return run_id
+
+    def _legal_workflow_steps(self, run_id: str) -> list:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM legal_workflow_steps WHERE run_id = ? ORDER BY step_index ASC",
+                (run_id,),
+            ).fetchall()
+        steps = []
+        for row in rows:
+            item = dict(row)
+            item["depends_on"] = self._json_load(item.get("depends_on"), [])
+            item["input"] = self._json_load(item.get("input"), {})
+            item["result"] = self._json_load(item.get("result"), None)
+            item["requires_approval"] = bool(item.get("requires_approval"))
+            steps.append(item)
+        return steps
+
+    @staticmethod
+    def _json_load(value: str, default):
+        if value is None or value == "":
+            return default
+        try:
+            return json.loads(value)
+        except Exception:
+            return default
+
+    def get_legal_workflow(self, run_id: str):
+        """Return a legal workflow run with ordered steps."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM legal_workflow_runs WHERE id = ?",
+                (run_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        workflow = dict(row)
+        workflow["steps"] = self._legal_workflow_steps(run_id)
+        return workflow
+
+    def list_legal_workflows(
+        self,
+        *,
+        project_id: str = None,
+        project_dir: str = None,
+        limit: int = 20,
+    ) -> list:
+        """List recent legal workflow runs, optionally scoped to a project."""
+        clauses = []
+        values = []
+        if project_id:
+            clauses.append("project_id = ?")
+            values.append(project_id)
+        if project_dir:
+            clauses.append("project_dir = ?")
+            values.append(project_dir)
+        where = "WHERE " + " AND ".join(clauses) if clauses else ""
+        values.append(max(1, int(limit or 20)))
+        with self._lock:
+            rows = self._conn.execute(
+                f"SELECT * FROM legal_workflow_runs {where} ORDER BY updated_at DESC LIMIT ?",
+                values,
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def update_legal_workflow(self, run_id: str, **fields) -> bool:
+        """Update legal workflow run metadata."""
+        allowed = {"name", "status", "document_path", "term_sheet_path", "instructions"}
+        updates = {key: value for key, value in fields.items() if key in allowed}
+        if not updates:
+            return False
+        updates["updated_at"] = time.time()
+        set_clause = ", ".join(f"{key} = ?" for key in updates)
+        values = list(updates.values()) + [run_id]
+
+        def _do(conn):
+            cursor = conn.execute(
+                f"UPDATE legal_workflow_runs SET {set_clause} WHERE id = ?",
+                values,
+            )
+            return cursor.rowcount > 0
+
+        return self._execute_write(_do)
+
+    def update_legal_workflow_step(self, step_id: str, **fields) -> bool:
+        """Update a legal workflow step."""
+        allowed = {
+            "title",
+            "type",
+            "role",
+            "status",
+            "depends_on",
+            "input",
+            "result",
+            "requires_approval",
+            "started_at",
+            "ended_at",
+        }
+        updates = {key: value for key, value in fields.items() if key in allowed}
+        if not updates:
+            return False
+        for key in ("depends_on", "input", "result"):
+            if key in updates:
+                updates[key] = json.dumps(updates[key], ensure_ascii=False)
+        if "requires_approval" in updates:
+            updates["requires_approval"] = 1 if updates["requires_approval"] else 0
+        updates["updated_at"] = time.time()
+        set_clause = ", ".join(f"{key} = ?" for key in updates)
+        values = list(updates.values()) + [step_id]
+
+        def _do(conn):
+            cursor = conn.execute(
+                f"UPDATE legal_workflow_steps SET {set_clause} WHERE id = ?",
+                values,
+            )
+            if cursor.rowcount:
+                conn.execute(
+                    "UPDATE legal_workflow_runs SET updated_at = ? "
+                    "WHERE id = (SELECT run_id FROM legal_workflow_steps WHERE id = ?)",
+                    (time.time(), step_id),
+                )
+            return cursor.rowcount > 0
+
+        return self._execute_write(_do)
+
     # ── Client management ──
 
     def create_client(self, name: str, path: str, notes: str = "") -> str:
@@ -3559,4 +3787,3 @@ class SessionDB:
                 (error[:500], session_id),
             )
         self._execute_write(_do)
-

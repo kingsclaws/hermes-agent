@@ -23,7 +23,7 @@ Use this skill when working with legal `.docx` documents, local PDFs, scanned le
 
 The session should expose native Lex Hermes tools:
 
-`lex_ocr`, `lex_project_init`, `lex_read`, `lex_stats`, `lex_edit`, `lex_ref`, `lex_diff`, `lex_deliver`, `lex_gate_check`, `legal_orchestrate`.
+`lex_ocr`, `lex_project_init`, `lex_read`, `lex_stats`, `lex_edit`, `lex_ref`, `lex_diff`, `lex_deliver`, `lex_gate_check`, `lex_translation_review`, `legal_orchestrate`, `legal_workflow`.
 
 If these tools are missing, state that the native Lex toolset is unavailable in this session. Do not silently fall back to `terminal` or `execute_code`.
 
@@ -34,6 +34,7 @@ Always call native tools directly:
 ```text
 lex_ocr(file_path="/workingfile/project/营业执照.pdf", language="ch")
 lex_read(path="/workingfile/project/D01.docx", mode="structure")
+lex_translation_review(bilingual_path="/workingfile/project/bilingual.docx", instructions="Chinese controls; review clauses 9-16")
 lex_edit(path="/workingfile/project/D01.docx", op="replace", target="§29", new_text="...", tc=true)
 lex_ref(path="/workingfile/project/D01.docx", op="xref_audit")
 ```
@@ -60,7 +61,11 @@ Never run native Lex tools as terminal commands or direct Python imports.
 
 `lex_gate_check`: Pre-delivery quality gates.
 
+`lex_translation_review`: Native bilingual legal translation QA. Use this before generic proofread for Chinese-English translation checks.
+
 `legal_orchestrate`: Multi-agent legal workflow orchestration for complex tasks.
+
+`legal_workflow`: Create visible workflow plans, including `translation_quality_review` for node-based review orchestration.
 
 ## Procedure
 
@@ -87,6 +92,13 @@ For complex legal workflows:
 1. Use `legal_orchestrate` when work involves multiple documents, multiple issue types, or edit-plus-review.
 2. Use specialized reviewers for content, format, xref, TS consistency, and translation.
 3. Keep orchestration visible: state what was delegated, to whom, and what output is expected.
+
+For Chinese-English translation QA:
+
+1. Use `legal_workflow(action="create_plan", workflow_type="translation_quality_review", ...)` when the user wants a visible workflow plan.
+2. Use `lex_translation_review` for execution. If the Chinese and English are in one DOCX, pass `bilingual_path`; if separate, pass `source_path` and `translation_path`.
+3. Require reviewers to report structured findings by paragraph, issue type, severity, source text, translation text, and suggested wording.
+4. Do not use `lex_edit` until findings are aggregated and the user approves the specific wording changes.
 
 ## Pitfalls
 

@@ -86,6 +86,11 @@ LEGAL_ORCHESTRATE_SCHEMA = {
                 "type": "string",
                 "description": "Optional explicit project root. Defaults to the active selected project or TERMINAL_CWD.",
             },
+            "workflow_type": {
+                "type": "string",
+                "enum": ["contract_revision", "translation_quality_review"],
+                "description": "Workflow template to create when task_type=plan.",
+            },
             "document_path": {
                 "type": "string",
                 "description": "Primary legal document path for drafting/review/revision.",
@@ -102,6 +107,26 @@ LEGAL_ORCHESTRATE_SCHEMA = {
             "term_sheet_path": {
                 "type": "string",
                 "description": "Optional term sheet path for TS-consistency review.",
+            },
+            "bilingual_path": {
+                "type": "string",
+                "description": "Single bilingual DOCX for translation QA. Defaults to document_path for review_translation.",
+            },
+            "source_path": {
+                "type": "string",
+                "description": "Source-language DOCX for separate-file translation QA.",
+            },
+            "translation_path": {
+                "type": "string",
+                "description": "Translated DOCX for separate-file translation QA.",
+            },
+            "glossary_path": {
+                "type": "string",
+                "description": "Optional glossary, term sheet, or defined-term reference for translation QA.",
+            },
+            "chunk_size": {
+                "type": "integer",
+                "description": "Paragraph chunk size for native translation QA. Default: 120.",
             },
             "review_types": {
                 "type": "array",
@@ -566,6 +591,11 @@ def _handle_legal_orchestrate(args: dict, **kwargs) -> str:
     instructions = str(args.get("instructions") or "").strip() or None
     related_paths = [str(p).strip() for p in (args.get("related_paths") or []) if str(p).strip()]
     term_sheet_path = str(args.get("term_sheet_path") or "").strip() or None
+    bilingual_path = str(args.get("bilingual_path") or "").strip() or None
+    source_path = str(args.get("source_path") or "").strip() or None
+    translation_path = str(args.get("translation_path") or "").strip() or None
+    glossary_path = str(args.get("glossary_path") or "").strip() or None
+    workflow_type = str(args.get("workflow_type") or "").strip() or None
 
     if task_type == "deliver":
         from tools.registry import registry as _registry
@@ -581,14 +611,29 @@ def _handle_legal_orchestrate(args: dict, **kwargs) -> str:
     if task_type == "plan":
         from tools.registry import registry as _registry
 
+        if not workflow_type:
+            plan_text = " ".join(
+                text for text in (instructions, document_path, bilingual_path, source_path, translation_path) if text
+            ).lower()
+            workflow_type = (
+                "translation_quality_review"
+                if any(marker in plan_text for marker in ("translation", "翻译", "中英文", "bilingual"))
+                else "contract_revision"
+            )
+
         return _registry.dispatch(
             "legal_workflow",
             {
                 "action": "create_plan",
-                "name": "法律文书修订 workflow",
+                "name": "中英文翻译质量核对 workflow" if workflow_type == "translation_quality_review" else "法律文书修订 workflow",
+                "workflow_type": workflow_type,
                 "project_dir": str(project_root),
                 "document_path": document_path or "",
                 "term_sheet_path": term_sheet_path or "",
+                "bilingual_path": bilingual_path or document_path or "",
+                "source_path": source_path or "",
+                "translation_path": translation_path or "",
+                "glossary_path": glossary_path or term_sheet_path or "",
                 "instructions": instructions or "",
             },
             task_id=kwargs.get("task_id"),
@@ -671,6 +716,25 @@ def _handle_legal_orchestrate(args: dict, **kwargs) -> str:
                 "subtasks": subtasks,
                 "task_type": task_type,
             }
+        )
+
+    if task_type == "review_translation":
+        from tools.registry import registry as _registry
+
+        return _registry.dispatch(
+            "lex_translation_review",
+            {
+                "bilingual_path": bilingual_path or document_path or "",
+                "source_path": source_path or "",
+                "translation_path": translation_path or "",
+                "glossary_path": glossary_path or term_sheet_path or "",
+                "instructions": instructions or "",
+                "chunk_size": int(args.get("chunk_size") or 120),
+                "source_language": "Chinese",
+                "target_language": "English",
+            },
+            task_id=kwargs.get("task_id"),
+            parent_agent=parent_agent,
         )
 
     if task_type not in _ROLE_FILE_BY_TASK_TYPE:

@@ -125,6 +125,97 @@ def _default_contract_workflow_steps(
     ]
 
 
+def _default_translation_workflow_steps(
+    *,
+    bilingual_path: Optional[str],
+    source_path: Optional[str],
+    translation_path: Optional[str],
+    glossary_path: Optional[str],
+    instructions: Optional[str],
+) -> List[Dict[str, Any]]:
+    common_input = {
+        "bilingual_path": bilingual_path,
+        "source_path": source_path,
+        "translation_path": translation_path,
+        "glossary_path": glossary_path,
+        "instructions": instructions,
+        "source_language": "Chinese",
+        "target_language": "English",
+    }
+    return [
+        {
+            "id": "read-and-map-bilingual-text",
+            "title": "读取文件并建立中英对照地图",
+            "type": "lex_read",
+            "role": "translation_coordinator",
+            "input": {**common_input, "mode": "structure_then_targeted_ranges"},
+        },
+        {
+            "id": "extract-defined-terms",
+            "title": "抽取定义词、主体名称和术语表",
+            "type": "analysis",
+            "role": "translation_coordinator",
+            "depends_on": ["read-and-map-bilingual-text"],
+            "input": common_input,
+        },
+        {
+            "id": "parallel-translation-review",
+            "title": "分段中英文翻译质量核对",
+            "type": "lex_translation_review",
+            "role": "lex-reviewer-translation",
+            "depends_on": ["extract-defined-terms"],
+            "input": {**common_input, "chunk_size": 120},
+        },
+        {
+            "id": "legal-effect-review",
+            "title": "法律效果偏差复核",
+            "type": "review",
+            "role": "senior_legal_reviewer",
+            "depends_on": ["parallel-translation-review"],
+            "input": {
+                **common_input,
+                "focus": "obligations, conditions, discretion, negation, amounts, dates, notice periods",
+            },
+        },
+        {
+            "id": "aggregate-findings",
+            "title": "汇总问题清单并去重分级",
+            "type": "analysis",
+            "role": "translation_coordinator",
+            "depends_on": ["parallel-translation-review", "legal-effect-review"],
+            "input": common_input,
+        },
+        {
+            "id": "approval-before-edits",
+            "title": "修改前人工确认",
+            "type": "approval_gate",
+            "role": "translation_coordinator",
+            "depends_on": ["aggregate-findings"],
+            "requires_approval": True,
+            "input": {
+                **common_input,
+                "output_contract": "issue list only; no lex_edit before approval",
+            },
+        },
+        {
+            "id": "apply-approved-translation-fixes",
+            "title": "执行已确认的翻译修订",
+            "type": "lex_edit",
+            "role": "drafter",
+            "depends_on": ["approval-before-edits"],
+            "input": common_input,
+        },
+        {
+            "id": "final-translation-gate",
+            "title": "最终翻译质量门禁",
+            "type": "lex_gate_check",
+            "role": "coordinator",
+            "depends_on": ["apply-approved-translation-fixes"],
+            "input": {**common_input, "gate": "translation"},
+        },
+    ]
+
+
 def _normalize_custom_steps(raw_steps: Any) -> List[Dict[str, Any]]:
     if not isinstance(raw_steps, list):
         return []
@@ -177,9 +268,18 @@ LEGAL_WORKFLOW_SCHEMA = {
             "run_id": {"type": "string"},
             "step_id": {"type": "string"},
             "name": {"type": "string"},
+            "workflow_type": {
+                "type": "string",
+                "enum": ["contract_revision", "translation_quality_review"],
+                "description": "Default workflow template to create when custom steps are not supplied.",
+            },
             "project_dir": {"type": "string"},
             "document_path": {"type": "string"},
             "term_sheet_path": {"type": "string"},
+            "bilingual_path": {"type": "string"},
+            "source_path": {"type": "string"},
+            "translation_path": {"type": "string"},
+            "glossary_path": {"type": "string"},
             "instructions": {"type": "string"},
             "status": {"type": "string"},
             "steps": {
@@ -219,15 +319,30 @@ def _handle_legal_workflow(args: dict, **kwargs) -> str:
         project = _resolve_project(args, parent_agent=parent_agent)
         document_path = str(args.get("document_path") or "").strip() or None
         term_sheet_path = str(args.get("term_sheet_path") or "").strip() or None
+        bilingual_path = str(args.get("bilingual_path") or "").strip() or None
+        source_path = str(args.get("source_path") or "").strip() or None
+        translation_path = str(args.get("translation_path") or "").strip() or None
+        glossary_path = str(args.get("glossary_path") or "").strip() or None
         instructions = str(args.get("instructions") or "").strip() or None
-        name = str(args.get("name") or "").strip() or "法律文书修订 workflow"
+        workflow_type = str(args.get("workflow_type") or "contract_revision").strip()
+        default_name = "中英文翻译质量核对 workflow" if workflow_type == "translation_quality_review" else "法律文书修订 workflow"
+        name = str(args.get("name") or "").strip() or default_name
         steps = _normalize_custom_steps(args.get("steps"))
         if not steps:
-            steps = _default_contract_workflow_steps(
-                document_path=document_path,
-                term_sheet_path=term_sheet_path,
-                instructions=instructions,
-            )
+            if workflow_type == "translation_quality_review":
+                steps = _default_translation_workflow_steps(
+                    bilingual_path=bilingual_path or document_path,
+                    source_path=source_path,
+                    translation_path=translation_path,
+                    glossary_path=glossary_path or term_sheet_path,
+                    instructions=instructions,
+                )
+            else:
+                steps = _default_contract_workflow_steps(
+                    document_path=document_path,
+                    term_sheet_path=term_sheet_path,
+                    instructions=instructions,
+                )
         run_id = db.create_legal_workflow(
             name=name,
             project_id=project["project_id"],
