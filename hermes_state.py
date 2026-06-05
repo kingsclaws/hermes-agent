@@ -33,7 +33,7 @@ T = TypeVar("T")
 
 DEFAULT_DB_PATH = get_hermes_home() / "state.db"
 
-SCHEMA_VERSION = 16
+SCHEMA_VERSION = 17
 
 # ---------------------------------------------------------------------------
 # WAL-compatibility fallback
@@ -341,6 +341,48 @@ CREATE TABLE IF NOT EXISTS legal_workflow_steps (
 CREATE INDEX IF NOT EXISTS idx_legal_workflow_runs_project ON legal_workflow_runs(project_id, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_legal_workflow_runs_dir ON legal_workflow_runs(project_dir, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_legal_workflow_steps_run ON legal_workflow_steps(run_id, step_index);
+
+CREATE TABLE IF NOT EXISTS workflow_learning_rules (
+    id TEXT PRIMARY KEY,
+    workflow_type TEXT NOT NULL,
+    scope TEXT NOT NULL DEFAULT 'global',
+    category TEXT NOT NULL,
+    rule_key TEXT NOT NULL,
+    title TEXT NOT NULL,
+    rule_text TEXT NOT NULL,
+    source_issue_type TEXT,
+    source_run_id TEXT,
+    source_document_path TEXT,
+    status TEXT NOT NULL DEFAULT 'candidate',
+    confidence REAL DEFAULT 0,
+    hit_count INTEGER DEFAULT 1,
+    auto_merged INTEGER DEFAULT 0,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL,
+    last_used_at REAL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_workflow_learning_rule_key
+ON workflow_learning_rules(workflow_type, scope, rule_key);
+
+CREATE INDEX IF NOT EXISTS idx_workflow_learning_rules_lookup
+ON workflow_learning_rules(workflow_type, scope, status, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS workflow_learning_events (
+    id TEXT PRIMARY KEY,
+    workflow_type TEXT NOT NULL,
+    scope TEXT NOT NULL DEFAULT 'global',
+    run_id TEXT,
+    document_path TEXT,
+    summary TEXT,
+    candidate_count INTEGER DEFAULT 0,
+    active_count INTEGER DEFAULT 0,
+    payload TEXT,
+    created_at REAL NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_workflow_learning_events_lookup
+ON workflow_learning_events(workflow_type, scope, created_at DESC);
 
 CREATE TABLE IF NOT EXISTS clients (
     id TEXT PRIMARY KEY,
@@ -3053,6 +3095,189 @@ class SessionDB:
             return cursor.rowcount > 0
 
         return self._execute_write(_do)
+
+    # ── Workflow learning ──
+
+    def upsert_workflow_learning_rule(
+        self,
+        *,
+        workflow_type: str,
+        scope: str = "global",
+        category: str,
+        rule_key: str,
+        title: str,
+        rule_text: str,
+        source_issue_type: str = None,
+        source_run_id: str = None,
+        source_document_path: str = None,
+        status: str = "candidate",
+        confidence: float = 0,
+        auto_merged: bool = False,
+    ) -> dict:
+        """Insert or reinforce a workflow learning rule."""
+        import uuid as _uuid
+
+        rule_id = f"wlr_{_uuid.uuid4().hex[:12]}"
+        now = time.time()
+
+        def _do(conn):
+            existing = conn.execute(
+                "SELECT * FROM workflow_learning_rules "
+                "WHERE workflow_type = ? AND scope = ? AND rule_key = ?",
+                (workflow_type, scope, rule_key),
+            ).fetchone()
+            if existing:
+                existing_status = existing["status"] if isinstance(existing, sqlite3.Row) else existing[10]
+                next_status = "active" if existing_status == "active" or status == "active" else existing_status
+                conn.execute(
+                    """UPDATE workflow_learning_rules
+                       SET title = ?, rule_text = ?, source_issue_type = ?,
+                           source_run_id = COALESCE(?, source_run_id),
+                           source_document_path = COALESCE(?, source_document_path),
+                           status = ?, confidence = MAX(confidence, ?),
+                           hit_count = hit_count + 1,
+                           auto_merged = CASE WHEN ? THEN 1 ELSE auto_merged END,
+                           updated_at = ?, last_used_at = ?
+                       WHERE workflow_type = ? AND scope = ? AND rule_key = ?""",
+                    (
+                        title,
+                        rule_text,
+                        source_issue_type,
+                        source_run_id,
+                        source_document_path,
+                        next_status,
+                        confidence,
+                        1 if auto_merged else 0,
+                        now,
+                        now,
+                        workflow_type,
+                        scope,
+                        rule_key,
+                    ),
+                )
+                row = conn.execute(
+                    "SELECT * FROM workflow_learning_rules "
+                    "WHERE workflow_type = ? AND scope = ? AND rule_key = ?",
+                    (workflow_type, scope, rule_key),
+                ).fetchone()
+                return dict(row)
+
+            conn.execute(
+                """INSERT INTO workflow_learning_rules
+                   (id, workflow_type, scope, category, rule_key, title, rule_text,
+                    source_issue_type, source_run_id, source_document_path, status,
+                    confidence, hit_count, auto_merged, created_at, updated_at, last_used_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)""",
+                (
+                    rule_id,
+                    workflow_type,
+                    scope,
+                    category,
+                    rule_key,
+                    title,
+                    rule_text,
+                    source_issue_type,
+                    source_run_id,
+                    source_document_path,
+                    status,
+                    confidence,
+                    1 if auto_merged else 0,
+                    now,
+                    now,
+                    now,
+                ),
+            )
+            row = conn.execute(
+                "SELECT * FROM workflow_learning_rules WHERE id = ?",
+                (rule_id,),
+            ).fetchone()
+            return dict(row)
+
+        return self._execute_write(_do)
+
+    def list_workflow_learning_rules(
+        self,
+        *,
+        workflow_type: str = None,
+        scope: str = "global",
+        status: str = None,
+        limit: int = 100,
+    ) -> list:
+        """List workflow learning rules."""
+        clauses = []
+        values = []
+        if workflow_type:
+            clauses.append("workflow_type = ?")
+            values.append(workflow_type)
+        if scope:
+            clauses.append("scope = ?")
+            values.append(scope)
+        if status:
+            clauses.append("status = ?")
+            values.append(status)
+        where = "WHERE " + " AND ".join(clauses) if clauses else ""
+        values.append(max(1, int(limit or 100)))
+        with self._lock:
+            rows = self._conn.execute(
+                f"SELECT * FROM workflow_learning_rules {where} "
+                "ORDER BY status = 'active' DESC, hit_count DESC, updated_at DESC LIMIT ?",
+                values,
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def update_workflow_learning_rule_status(self, rule_id: str, status: str) -> bool:
+        """Set a workflow learning rule status."""
+        now = time.time()
+
+        def _do(conn):
+            cursor = conn.execute(
+                "UPDATE workflow_learning_rules SET status = ?, updated_at = ? WHERE id = ?",
+                (status, now, rule_id),
+            )
+            return cursor.rowcount > 0
+
+        return self._execute_write(_do)
+
+    def create_workflow_learning_event(
+        self,
+        *,
+        workflow_type: str,
+        scope: str = "global",
+        run_id: str = None,
+        document_path: str = None,
+        summary: str = "",
+        candidate_count: int = 0,
+        active_count: int = 0,
+        payload: dict = None,
+    ) -> str:
+        """Record one workflow learning extraction event."""
+        import uuid as _uuid
+
+        event_id = f"wle_{_uuid.uuid4().hex[:12]}"
+        now = time.time()
+
+        def _do(conn):
+            conn.execute(
+                """INSERT INTO workflow_learning_events
+                   (id, workflow_type, scope, run_id, document_path, summary,
+                    candidate_count, active_count, payload, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    event_id,
+                    workflow_type,
+                    scope,
+                    run_id,
+                    document_path,
+                    summary,
+                    int(candidate_count or 0),
+                    int(active_count or 0),
+                    json.dumps(payload or {}, ensure_ascii=False),
+                    now,
+                ),
+            )
+
+        self._execute_write(_do)
+        return event_id
 
     # ── Client management ──
 

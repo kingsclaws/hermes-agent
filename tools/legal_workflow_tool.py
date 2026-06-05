@@ -134,6 +134,8 @@ def _default_translation_workflow_steps(
     sop_path: Optional[str],
     sop_overrides: Optional[str],
     domain_terms: Optional[Dict[str, Any]],
+    enable_learning: bool,
+    learning_scope: str,
     instructions: Optional[str],
 ) -> List[Dict[str, Any]]:
     common_input = {
@@ -144,6 +146,8 @@ def _default_translation_workflow_steps(
         "sop_path": sop_path,
         "sop_overrides": sop_overrides,
         "domain_terms": domain_terms or {},
+        "enable_learning": enable_learning,
+        "learning_scope": learning_scope,
         "instructions": instructions,
         "source_language": "Chinese",
         "target_language": "English",
@@ -257,6 +261,26 @@ def _normalize_custom_steps(raw_steps: Any) -> List[Dict[str, Any]]:
     return normalized
 
 
+def _collect_findings_from_workflow(workflow: Dict[str, Any]) -> List[Dict[str, Any]]:
+    findings: List[Dict[str, Any]] = []
+    for step in workflow.get("steps") or []:
+        result = step.get("result")
+        if isinstance(result, str):
+            try:
+                result = json.loads(result)
+            except Exception:
+                result = None
+        if not isinstance(result, dict):
+            continue
+        raw = result.get("findings")
+        if isinstance(raw, list):
+            findings.extend(item for item in raw if isinstance(item, dict))
+        learning = result.get("learning")
+        if isinstance(learning, dict) and isinstance(learning.get("findings"), list):
+            findings.extend(item for item in learning["findings"] if isinstance(item, dict))
+    return findings
+
+
 LEGAL_WORKFLOW_SCHEMA = {
     "name": "legal_workflow",
     "description": (
@@ -269,15 +293,32 @@ LEGAL_WORKFLOW_SCHEMA = {
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["create_plan", "get", "list", "update_run", "update_step"],
+                "enum": [
+                    "create_plan",
+                    "get",
+                    "list",
+                    "update_run",
+                    "update_step",
+                    "learn_from_run",
+                    "list_learning_rules",
+                    "approve_learning_rule",
+                    "reject_learning_rule",
+                    "export_learning_sop",
+                ],
             },
             "run_id": {"type": "string"},
             "step_id": {"type": "string"},
+            "rule_id": {"type": "string"},
             "name": {"type": "string"},
             "workflow_type": {
                 "type": "string",
                 "enum": ["contract_revision", "translation_quality_review"],
                 "description": "Default workflow template to create when custom steps are not supplied.",
+            },
+            "learning_scope": {
+                "type": "string",
+                "enum": ["global"],
+                "description": "Learning rule scope. Default: global.",
             },
             "project_dir": {"type": "string"},
             "document_path": {"type": "string"},
@@ -297,6 +338,10 @@ LEGAL_WORKFLOW_SCHEMA = {
             "domain_terms": {
                 "type": "object",
                 "description": "Optional task-specific term map for translation QA.",
+            },
+            "enable_learning": {
+                "type": "boolean",
+                "description": "Whether workflow learning is enabled for translation QA. Default: true.",
             },
             "instructions": {"type": "string"},
             "status": {"type": "string"},
@@ -344,6 +389,8 @@ def _handle_legal_workflow(args: dict, **kwargs) -> str:
         sop_path = str(args.get("sop_path") or "").strip() or None
         sop_overrides = str(args.get("sop_overrides") or "").strip() or None
         domain_terms = args.get("domain_terms") if isinstance(args.get("domain_terms"), dict) else {}
+        enable_learning = bool(args.get("enable_learning", True))
+        learning_scope = str(args.get("learning_scope") or "global").strip()
         instructions = str(args.get("instructions") or "").strip() or None
         workflow_type = str(args.get("workflow_type") or "contract_revision").strip()
         default_name = "中英文翻译质量核对 workflow" if workflow_type == "translation_quality_review" else "法律文书修订 workflow"
@@ -359,6 +406,8 @@ def _handle_legal_workflow(args: dict, **kwargs) -> str:
                     sop_path=sop_path,
                     sop_overrides=sop_overrides,
                     domain_terms=domain_terms,
+                    enable_learning=enable_learning,
+                    learning_scope=learning_scope,
                     instructions=instructions,
                 )
             else:
@@ -418,6 +467,57 @@ def _handle_legal_workflow(args: dict, **kwargs) -> str:
             return tool_error("step must be an object.")
         db.update_legal_workflow_step(step_id, **step)
         return _ok({"status": "updated", "step_id": step_id})
+
+    if action == "learn_from_run":
+        run_id = str(args.get("run_id") or "").strip()
+        if not run_id:
+            return tool_error("run_id is required for legal_workflow learn_from_run.")
+        workflow_type = str(args.get("workflow_type") or "translation_quality_review").strip()
+        learning_scope = str(args.get("learning_scope") or "global").strip()
+        workflow = db.get_legal_workflow(run_id)
+        if not workflow:
+            return tool_error(f"legal workflow not found: {run_id}")
+        findings = _collect_findings_from_workflow(workflow)
+        from tools.lex_translation_review_tool import _learn_from_findings
+
+        learning = _learn_from_findings(
+            findings=findings,
+            workflow_type=workflow_type,
+            scope=learning_scope,
+            run_id=run_id,
+            document_path=workflow.get("document_path"),
+        )
+        return _ok({"status": "learned", "learning": learning, "finding_count": len(findings)})
+
+    if action == "list_learning_rules":
+        workflow_type = str(args.get("workflow_type") or "translation_quality_review").strip()
+        learning_scope = str(args.get("learning_scope") or "global").strip()
+        status = str(args.get("status") or "").strip() or None
+        rules = db.list_workflow_learning_rules(
+            workflow_type=workflow_type,
+            scope=learning_scope,
+            status=status,
+            limit=int(args.get("limit") or 100),
+        )
+        return _ok({"status": "ok", "rules": rules})
+
+    if action in {"approve_learning_rule", "reject_learning_rule"}:
+        rule_id = str(args.get("rule_id") or "").strip()
+        if not rule_id:
+            return tool_error(f"rule_id is required for legal_workflow {action}.")
+        next_status = "active" if action == "approve_learning_rule" else "rejected"
+        updated = db.update_workflow_learning_rule_status(rule_id, next_status)
+        if not updated:
+            return tool_error(f"workflow learning rule not found: {rule_id}")
+        return _ok({"status": "updated", "rule_id": rule_id, "rule_status": next_status})
+
+    if action == "export_learning_sop":
+        workflow_type = str(args.get("workflow_type") or "translation_quality_review").strip()
+        learning_scope = str(args.get("learning_scope") or "global").strip()
+        from tools.lex_translation_review_tool import _export_learning_sop
+
+        path = _export_learning_sop(workflow_type=workflow_type, scope=learning_scope, db=db)
+        return _ok({"status": "exported" if path else "error", "path": path})
 
     return tool_error(f"unknown legal_workflow action: {action}")
 

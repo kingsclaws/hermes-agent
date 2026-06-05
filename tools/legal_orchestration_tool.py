@@ -140,6 +140,15 @@ LEGAL_ORCHESTRATE_SCHEMA = {
                 "type": "integer",
                 "description": "Paragraph chunk size for native translation QA. Default: 120.",
             },
+            "enable_learning": {
+                "type": "boolean",
+                "description": "Whether translation QA should extract reusable workflow learning rules. Default: true.",
+            },
+            "learning_scope": {
+                "type": "string",
+                "enum": ["global"],
+                "description": "Learning rule scope. Default: global.",
+            },
             "review_types": {
                 "type": "array",
                 "items": {
@@ -610,6 +619,8 @@ def _handle_legal_orchestrate(args: dict, **kwargs) -> str:
     sop_path = str(args.get("sop_path") or "").strip() or None
     sop_overrides = str(args.get("sop_overrides") or "").strip() or None
     domain_terms = args.get("domain_terms") if isinstance(args.get("domain_terms"), dict) else {}
+    enable_learning = bool(args.get("enable_learning", True))
+    learning_scope = str(args.get("learning_scope") or "global").strip()
     workflow_type = str(args.get("workflow_type") or "").strip() or None
 
     if task_type == "deliver":
@@ -652,6 +663,8 @@ def _handle_legal_orchestrate(args: dict, **kwargs) -> str:
                 "sop_path": sop_path or "",
                 "sop_overrides": sop_overrides or "",
                 "domain_terms": domain_terms,
+                "enable_learning": enable_learning,
+                "learning_scope": learning_scope,
                 "instructions": instructions or "",
             },
             task_id=kwargs.get("task_id"),
@@ -753,6 +766,8 @@ def _handle_legal_orchestrate(args: dict, **kwargs) -> str:
                 "chunk_size": int(args.get("chunk_size") or 120),
                 "source_language": "Chinese",
                 "target_language": "English",
+                "enable_learning": enable_learning,
+                "learning_scope": learning_scope,
             },
             task_id=kwargs.get("task_id"),
             parent_agent=parent_agent,
