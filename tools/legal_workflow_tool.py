@@ -139,6 +139,86 @@ def _default_contract_workflow_steps(
     ]
 
 
+def _default_document_drafting_workflow_steps(
+    *,
+    document_path: Optional[str],
+    term_sheet_path: Optional[str],
+    chunk_size: int,
+    enable_learning: bool,
+    learning_scope: str,
+    instructions: Optional[str],
+) -> List[Dict[str, Any]]:
+    common_input = {
+        "document_path": document_path,
+        "term_sheet_path": term_sheet_path,
+        "chunk_size": max(int(chunk_size or 12), 1),
+        "enable_learning": enable_learning,
+        "learning_scope": learning_scope,
+        "instructions": instructions,
+    }
+    return [
+        {
+            "id": "read-template-structure",
+            "title": "通读模板结构和段落统计",
+            "type": "lex_read",
+            "role": "coordinator",
+            "input": {**common_input, "mode": "structure_and_stats"},
+        },
+        {
+            "id": "read-project-sources",
+            "title": "读取 TS 和项目基础资料",
+            "type": "source_read",
+            "role": "coordinator",
+            "depends_on": ["read-template-structure"],
+            "input": common_input,
+        },
+        {
+            "id": "build-paragraph-production-map",
+            "title": "建立逐段制作地图",
+            "type": "analysis",
+            "role": "coordinator",
+            "depends_on": ["read-template-structure", "read-project-sources"],
+            "input": {
+                **common_input,
+                "output_contract": "paragraph chunks with required source checks; every paragraph assigned exactly once",
+            },
+        },
+        {
+            "id": "iterative-drafting",
+            "title": "逐段制作并逐段读回核对",
+            "type": "legal_orchestrate",
+            "role": "drafter",
+            "depends_on": ["build-paragraph-production-map"],
+            "input": {
+                **common_input,
+                "task_type": "draft_iterative",
+                "output_contract": "for each chunk: lex_read before, lex_edit if needed, lex_read after, verification log",
+            },
+        },
+        {
+            "id": "targeted-proofread-after-drafting",
+            "title": "制作后逐段校对",
+            "type": "lex_proofread",
+            "role": "proofread_reviewer_pool",
+            "depends_on": ["iterative-drafting"],
+            "input": {
+                **common_input,
+                "path": document_path,
+                "review_types": ["content", "format", "xref"],
+                "target": "full_document_after_drafting",
+            },
+        },
+        {
+            "id": "final-gate-before-delivery",
+            "title": "交付前门禁",
+            "type": "lex_gate_check",
+            "role": "coordinator",
+            "depends_on": ["targeted-proofread-after-drafting"],
+            "input": {**common_input, "gate": "drafting_delivery"},
+        },
+    ]
+
+
 def _default_translation_workflow_steps(
     *,
     bilingual_path: Optional[str],
@@ -410,6 +490,8 @@ def _infer_workflow_type(workflow: Dict[str, Any]) -> str:
         return "translation_quality_review"
     if any(marker in haystack for marker in ("proofread", "校对", "审校", "lex_proofread")):
         return "proofread_review"
+    if any(marker in haystack for marker in ("document_drafting", "逐段制作", "draft_iterative", "iterative-drafting")):
+        return "document_drafting"
     return "contract_revision"
 
 
@@ -444,7 +526,7 @@ LEGAL_WORKFLOW_SCHEMA = {
             "name": {"type": "string"},
             "workflow_type": {
                 "type": "string",
-                "enum": ["contract_revision", "translation_quality_review", "proofread_review"],
+                "enum": ["contract_revision", "document_drafting", "translation_quality_review", "proofread_review"],
                 "description": "Default workflow template to create when custom steps are not supplied.",
             },
             "learning_scope": {
@@ -556,6 +638,7 @@ def _handle_legal_workflow(args: dict, **kwargs) -> str:
         workflow_type = str(args.get("workflow_type") or "contract_revision").strip()
         default_name_by_type = {
             "contract_revision": "法律文书修订 workflow",
+            "document_drafting": "法律文书逐段制作 workflow",
             "proofread_review": "法律文书逐段校对 workflow",
             "translation_quality_review": "中英文翻译质量核对 workflow",
         }
@@ -572,6 +655,15 @@ def _handle_legal_workflow(args: dict, **kwargs) -> str:
                     sop_path=sop_path,
                     sop_overrides=sop_overrides,
                     domain_terms=domain_terms,
+                    enable_learning=enable_learning,
+                    learning_scope=learning_scope,
+                    instructions=instructions,
+                )
+            elif workflow_type == "document_drafting":
+                steps = _default_document_drafting_workflow_steps(
+                    document_path=document_path,
+                    term_sheet_path=term_sheet_path,
+                    chunk_size=chunk_size,
                     enable_learning=enable_learning,
                     learning_scope=learning_scope,
                     instructions=instructions,

@@ -544,6 +544,25 @@ ${workflowAtomText}
           />
           <WorkflowButton
             disabled={!canRunDocument}
+            icon={<ScrollText />}
+            label="逐段制作"
+            onClick={() =>
+              run(`
+请执行法律文书逐段制作 workflow，禁止一次性粗略替换。
+项目目录：${effectiveProjectDir || "使用当前 active project"}
+主文档：${q(documentPath)}
+TS/支持文件：${q(termSheetPath) || "无"}
+指令：${q(instructions) || "按项目上下文、TS和模板逐段制作。"}
+要求：
+1. 先调用 legal_workflow(action="create_plan", workflow_type="document_drafting", chunk_size=12) 创建逐段制作计划。
+2. 执行时必须调用 legal_orchestrate(task_type="draft_iterative", chunk_size=12)，不要自由调用一连串 lex_edit。
+3. draft_iterative 必须按段落 chunk 顺序执行：lex_read 目标范围 → 判断是否需改 → lex_edit → lex_read 读回 → verification_report。
+4. 每个 chunk 未读回核对前不得进入下一 chunk；任一 chunk 失败即停止并报告。
+              `)
+            }
+          />
+          <WorkflowButton
+            disabled={!canRunDocument}
             icon={<CheckSquare />}
             label="多维审阅"
             onClick={() =>

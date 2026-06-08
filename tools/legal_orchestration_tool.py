@@ -70,6 +70,7 @@ LEGAL_ORCHESTRATE_SCHEMA = {
                 "type": "string",
                 "enum": [
                     "draft",
+                    "draft_iterative",
                     "plan",
                     "revise",
                     "review",
@@ -89,7 +90,7 @@ LEGAL_ORCHESTRATE_SCHEMA = {
             },
             "workflow_type": {
                 "type": "string",
-                "enum": ["contract_revision", "translation_quality_review", "proofread_review"],
+                "enum": ["contract_revision", "document_drafting", "translation_quality_review", "proofread_review"],
                 "description": "Workflow template to create when task_type=plan.",
             },
             "document_path": {
@@ -326,6 +327,38 @@ def _draft_contract(document_path: Optional[str]) -> str:
     )
 
 
+def _iterative_draft_contract(document_path: Optional[str], start_para: int, end_para: int) -> str:
+    target = document_path or ""
+    return (
+        "\n## Mandatory Iterative Drafting Protocol\n"
+        f"You are assigned ONLY paragraphs §{start_para}-§{end_para}. "
+        "Do not edit paragraphs outside this range.\n"
+        "You must work in this order:\n"
+        "1. Read ONLY your assigned range with lex_read(paras=[...]).\n"
+        "2. Compare that range against the term sheet, project context, and user instructions.\n"
+        "3. For each paragraph/table cell that needs changes, use native lex_edit/lex_table_list only.\n"
+        "4. After edits, read back the same paragraph range with lex_read.\n"
+        "5. Verify that no placeholder, bracket option, wrong party, amount/date, or unexplained template note remains in the range.\n"
+        "6. If no edit is needed, explicitly say so and explain why.\n"
+        "Do not use terminal/python/docx/lxml workarounds.\n\n"
+        "## Output Contract\n"
+        "Return ONLY valid JSON. No markdown fences. Use this schema exactly:\n"
+        "{\n"
+        '  "status": "completed|failed",\n'
+        f'  "paragraph_range": "§{start_para}-§{end_para}",\n'
+        '  "summary": "short summary",\n'
+        '  "modified_files": ["absolute/or-relative-path"],\n'
+        '  "modified_locations": ["§N or table references"],\n'
+        '  "unchanged_locations": ["§N references reviewed but not changed"],\n'
+        '  "verification_passed": true,\n'
+        '  "verification_report": ["readback and checks performed"],\n'
+        '  "remaining_issues": [],\n'
+        '  "primary_document": "' + target.replace('"', '\\"') + '"\n'
+        "}\n"
+        "If verification_passed is false or remaining_issues is non-empty, status must be failed."
+    )
+
+
 def _extract_json_payload(text: str) -> Optional[Dict[str, Any]]:
     if not text or not isinstance(text, str):
         return None
@@ -558,6 +591,139 @@ def _make_goal(
     return "\n".join(pieces)
 
 
+def _paragraph_count(document_path: str) -> int:
+    from lexitool.markup import lex_read
+
+    stats = lex_read(document_path, mode="stats")
+    match = re.search(r"Paragraphs:\s*(\d+)", stats or "")
+    if not match:
+        raise ValueError(f"Could not determine paragraph count from lex_stats for {document_path}")
+    return int(match.group(1))
+
+
+def _read_para_range(document_path: str, start_para: int, end_para: int) -> str:
+    from lexitool.markup import lex_read
+
+    return lex_read(
+        document_path,
+        paras=list(range(start_para, end_para + 1)),
+        mode="full",
+        show_tc=True,
+        show_format=True,
+    )
+
+
+def _run_iterative_drafting(
+    *,
+    parent_agent,
+    project_root: Path,
+    document_path: str,
+    instructions: Optional[str],
+    related_paths: List[str],
+    term_sheet_path: Optional[str],
+    chunk_size: int,
+    learning_workflow_type: str,
+    learning_scope: str,
+) -> Dict[str, Any]:
+    if not document_path:
+        return {"error": "draft_iterative requires document_path."}
+
+    paragraph_count = _paragraph_count(document_path)
+    effective_chunk = max(1, min(int(chunk_size or 12), 40))
+    project_context = _load_project_context(project_root)
+    learning_context = _workflow_learning_context(learning_workflow_type, learning_scope)
+    role_file = _ROLE_FILE_BY_TASK_TYPE["draft"]
+    base_context = (
+        _role_prompt(project_root, role_file)
+        + "\n\n"
+        + project_context
+        + ("\n\n" + learning_context if learning_context else "")
+    ).strip()
+
+    chunks: List[Dict[str, int]] = []
+    start = 1
+    while start <= paragraph_count:
+        end = min(start + effective_chunk - 1, paragraph_count)
+        chunks.append({"start": start, "end": end})
+        start = end + 1
+
+    chunk_results: List[Dict[str, Any]] = []
+    for index, chunk in enumerate(chunks):
+        start_para = chunk["start"]
+        end_para = chunk["end"]
+        pre_read = _read_para_range(document_path, start_para, end_para)
+        context = (
+            base_context
+            + "\n\n## Assigned Range Pre-Read\n"
+            + pre_read
+            + "\n\n"
+            + _iterative_draft_contract(document_path, start_para, end_para)
+        ).strip()
+        goal = _make_goal(
+            "draft_iterative",
+            document_path=document_path,
+            instructions=(
+                (instructions or "按项目上下文、TS和法律文书制作要求处理。")
+                + f"\nProcess only paragraphs §{start_para}-§{end_para}. "
+                "Use read-edit-readback verification before returning."
+            ),
+            related_paths=related_paths,
+            term_sheet_path=term_sheet_path,
+        )
+        delegated = _dispatch_single_child(
+            parent_agent=parent_agent,
+            task_type="draft_iterative",
+            goal=goal,
+            context=context,
+            toolsets=_TOOLSETS_BY_TASK_TYPE["draft"],
+        )
+        post_read = _read_para_range(document_path, start_para, end_para)
+        structured = delegated.get("structured") if isinstance(delegated, dict) else None
+        status = (
+            str((structured or {}).get("status") or "").lower()
+            if isinstance(structured, dict)
+            else ""
+        )
+        verification_passed = bool((structured or {}).get("verification_passed")) if isinstance(structured, dict) else False
+        chunk_result = {
+            "chunk_index": index,
+            "paragraph_range": f"§{start_para}-§{end_para}",
+            "status": status or ("error" if delegated.get("error") or structured is None else "completed"),
+            "delegate_error": delegated.get("error"),
+            "structured": structured,
+            "summary": delegated.get("summary"),
+            "verification_passed": verification_passed,
+            "parent_readback": post_read[:12000],
+        }
+        chunk_results.append(chunk_result)
+        if delegated.get("error") or structured is None or status == "failed" or not verification_passed:
+            return {
+                "status": "failed",
+                "error": "Iterative drafting stopped because a chunk failed structured verification.",
+                "failed_chunk": chunk_result,
+                "chunks_completed": len(chunk_results),
+                "paragraph_count": paragraph_count,
+                "document_path": document_path,
+                "project_dir": str(project_root),
+                "task_type": "draft_iterative",
+            }
+
+    return {
+        "status": "completed",
+        "document_path": document_path,
+        "project_dir": str(project_root),
+        "task_type": "draft_iterative",
+        "paragraph_count": paragraph_count,
+        "chunk_size": effective_chunk,
+        "chunks": chunk_results,
+        "verification_passed": all(bool(c.get("verification_passed")) for c in chunk_results if c.get("structured") is not None),
+        "verification_report": [
+            f"{c['paragraph_range']}: parent readback captured after child completion"
+            for c in chunk_results
+        ],
+    }
+
+
 def _dispatch_single_child(
     *,
     parent_agent,
@@ -668,6 +834,8 @@ def _handle_legal_orchestrate(args: dict, **kwargs) -> str:
     learning_scope = str(args.get("learning_scope") or "global").strip()
     workflow_type = str(args.get("workflow_type") or "").strip() or None
     learning_workflow_type = workflow_type or ("proofread_review" if task_type == "proofread" else "contract_revision")
+    if task_type == "draft_iterative" and not workflow_type:
+        learning_workflow_type = "document_drafting"
 
     if task_type == "deliver":
         from tools.registry import registry as _registry
@@ -691,10 +859,13 @@ def _handle_legal_orchestrate(args: dict, **kwargs) -> str:
                 workflow_type = "translation_quality_review"
             elif any(marker in plan_text for marker in ("proofread", "校对", "审校", "审阅", "review")):
                 workflow_type = "proofread_review"
+            elif any(marker in plan_text for marker in ("逐段制作", "一页一页", "draft", "制作", "起草")):
+                workflow_type = "document_drafting"
             else:
                 workflow_type = "contract_revision"
         plan_name_by_type = {
             "contract_revision": "法律文书修订 workflow",
+            "document_drafting": "法律文书逐段制作 workflow",
             "proofread_review": "法律文书逐段校对 workflow",
             "translation_quality_review": "中英文翻译质量核对 workflow",
         }
@@ -862,6 +1033,24 @@ def _handle_legal_orchestrate(args: dict, **kwargs) -> str:
             task_id=kwargs.get("task_id"),
             parent_agent=parent_agent,
         )
+
+    if task_type == "draft_iterative":
+        if not document_path:
+            return tool_error("draft_iterative requires document_path.")
+        result = _run_iterative_drafting(
+            parent_agent=parent_agent,
+            project_root=project_root,
+            document_path=document_path,
+            instructions=instructions,
+            related_paths=related_paths,
+            term_sheet_path=term_sheet_path,
+            chunk_size=int(args.get("chunk_size") or 12),
+            learning_workflow_type=learning_workflow_type or "document_drafting",
+            learning_scope=learning_scope,
+        )
+        if result.get("error"):
+            return tool_error(str(result["error"]), data=result)
+        return _tool_ok(result)
 
     if task_type not in _ROLE_FILE_BY_TASK_TYPE:
         return tool_error(f"Unknown task_type: {task_type}")
