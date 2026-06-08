@@ -587,8 +587,11 @@ def _find_cell_by_text(table: etree._Element, text: str) -> etree._Element | Non
 def _get_cell_text(tc: etree._Element) -> str:
 	"""Get the plain text content of a w:tc element."""
 	parts = []
-	for t in tc.iter(f"{W}t"):
-		parts.append(t.text or "")
+	for el in tc.iter():
+		if el.tag == f"{W}t":
+			parts.append(el.text or "")
+		elif el.tag == f"{W}tab":
+			parts.append("\t")
 	return "".join(parts)
 
 
@@ -606,6 +609,151 @@ def _set_cell_text(tc: etree._Element, new_text: str, bold: bool = False,
 def _get_cell_paragraphs(tc: etree._Element) -> list[etree._Element]:
 	"""Get all w:p elements inside a w:tc."""
 	return tc.findall(f"{W}p")
+
+
+def list_tables(docx_path: str, *, preview_rows: int = 3,
+                max_cell_chars: int = 80) -> dict:
+	"""List body-level tables with stable body order and short content previews."""
+	preview_rows = max(int(preview_rows), 0)
+	max_cell_chars = max(int(max_cell_chars), 1)
+	doc_xml, _other = _read_docx(docx_path)
+	root = etree.fromstring(doc_xml)
+	body = root.find(f"{W}body")
+	if body is None:
+		return {"path": docx_path, "tables": []}
+
+	tables = []
+	body_para_count = 0
+	table_index = 0
+	for child in body:
+		if child.tag == f"{W}p":
+			body_para_count += 1
+			continue
+		if child.tag != f"{W}tbl":
+			continue
+
+		rows = [el for el in child if el.tag == f"{W}tr"]
+		row_previews = []
+		max_cols = 0
+		for row in rows[:preview_rows]:
+			cells = [tc for tc in row if tc.tag == f"{W}tc"]
+			max_cols = max(max_cols, len(cells))
+			row_texts = []
+			for cell in cells:
+				text = _get_cell_text(cell).strip()
+				if len(text) > max_cell_chars:
+					text = text[:max_cell_chars].rstrip() + "..."
+				row_texts.append(text)
+			row_previews.append(row_texts)
+		for row in rows[preview_rows:]:
+			max_cols = max(max_cols, len([tc for tc in row if tc.tag == f"{W}tc"]))
+
+		flat_preview = " | ".join(
+			cell for row in row_previews for cell in row if cell
+		)
+		tables.append({
+			"table_index": table_index,
+			"after_para": body_para_count,
+			"rows": len(rows),
+			"cols": max_cols,
+			"preview_rows": row_previews,
+			"preview": flat_preview[:500],
+		})
+		table_index += 1
+
+	return {"path": docx_path, "tables": tables}
+
+
+def set_table_cells_by_position(docx_path: str, table_index: int,
+                                cells: list[dict], *,
+                                tc: bool = False,
+                                author: str = "agent",
+                                font: str = "宋体", font_size: float = 11.0,
+                                output: str | None = None) -> EditResult:
+	"""Set table cells by zero-indexed row/column coordinates in one write pass."""
+	if not cells:
+		return EditResult(ok=False, message="No cells provided", path=docx_path)
+
+	doc_xml, other = _read_docx(docx_path)
+	root = etree.fromstring(doc_xml)
+	table = _find_table(root, table_index)
+	if table is None:
+		return EditResult(ok=False, message=f"Table {table_index} not found", path=docx_path)
+
+	rows = [el for el in table if el.tag == f"{W}tr"]
+	sz = float(font_size) * 2
+	changed = 0
+	errors = []
+	targets = []
+
+	for item in cells:
+		try:
+			row_idx = int(item["row"])
+			col_idx = int(item["col"])
+		except (KeyError, TypeError, ValueError):
+			errors.append(f"Invalid cell coordinate: {item!r}")
+			continue
+
+		if row_idx < 0 or row_idx >= len(rows):
+			errors.append(f"Row {row_idx} out of range")
+			continue
+		row_cells = [tc_el for tc_el in rows[row_idx] if tc_el.tag == f"{W}tc"]
+		if col_idx < 0 or col_idx >= len(row_cells):
+			errors.append(f"Cell ({row_idx},{col_idx}) out of range")
+			continue
+
+		tc_el = row_cells[col_idx]
+		old_text = item.get("old_text")
+		current_text = _get_cell_text(tc_el)
+		if old_text is not None and old_text not in current_text:
+			errors.append(f"Cell ({row_idx},{col_idx}) does not contain expected old_text")
+			continue
+
+		new_text = str(item.get("text", ""))
+		cell_bold = bool(item.get("bold", False))
+		targets.append((tc_el, current_text, new_text, cell_bold))
+
+	if errors:
+		return EditResult(ok=False,
+		                  message="Validation failed; no cells changed: " + "; ".join(errors[:5]),
+		                  path=docx_path)
+
+	for tc_el, current_text, new_text, cell_bold in targets:
+		if tc and current_text:
+			tid = _next_tc_id(root)
+			from datetime import datetime
+			dt = datetime.now().strftime("%Y-%m-%dT%H:%M:%SZ")
+
+			for p in _get_cell_paragraphs(tc_el):
+				del_el = etree.Element(f"{W}del")
+				del_el.set(f"{W}id", str(tid)); tid += 1
+				del_el.set(f"{W}author", author); del_el.set(f"{W}date", dt)
+				pPr = p.find(f"{W}pPr")
+				children = [c for c in p if c is not pPr]
+				for child in reversed(children):
+					p.remove(child)
+					del_el.append(child)
+				if pPr is not None:
+					pPr.addnext(del_el)
+				else:
+					p.insert(0, del_el)
+
+			new_p = etree.SubElement(tc_el, f"{W}p")
+			ins = etree.SubElement(new_p, f"{W}ins")
+			ins.set(f"{W}id", str(tid))
+			ins.set(f"{W}author", author); ins.set(f"{W}date", dt)
+			ins.append(_make_run(new_text, bold=cell_bold, font=font, sz=sz))
+		else:
+			_set_cell_text(tc_el, new_text, bold=cell_bold, font=font, sz=sz)
+		changed += 1
+
+	if changed:
+		_write_docx(docx_path, etree.tostring(root, xml_declaration=True,
+		                                      encoding="UTF-8", standalone=True),
+		            other, output=output)
+
+	message = f"Set {changed}/{len(cells)} cells in table {table_index}"
+	return EditResult(ok=True, tc_mode=tc, message=message, path=output or docx_path)
 
 
 # ── Table cell text editing ───────────────────────────────────────────────────

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import sys
 from pathlib import Path
 
@@ -145,6 +146,46 @@ def _handle_stats(args: dict, **kwargs) -> str:
     return tool_result(result)
 
 
+LEX_TABLE_LIST_SCHEMA = {
+    "name": "lex_table_list",
+    "description": (
+        "List all body-level tables in a .docx with stable table_index, "
+        "location, dimensions, and content preview. Use before table edits "
+        "instead of guessing table_index after document changes."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "path": {
+                "type": "string",
+                "description": "Path to the .docx file.",
+            },
+            "preview_rows": {
+                "type": "integer",
+                "description": "Number of leading rows to preview per table. Default: 3.",
+            },
+            "max_cell_chars": {
+                "type": "integer",
+                "description": "Maximum characters per preview cell. Default: 80.",
+            },
+        },
+        "required": ["path"],
+    },
+}
+
+
+def _handle_table_list(args: dict, **kwargs) -> str:
+    from lexitool.edit_ops import list_tables
+
+    path = _resolve_path(args["path"])
+    result = list_tables(
+        path,
+        preview_rows=int(args.get("preview_rows", 3)),
+        max_cell_chars=int(args.get("max_cell_chars", 80)),
+    )
+    return tool_result(result)
+
+
 # ── 3. lex_edit ───────────────────────────────────────────────────────────────
 
 LEX_EDIT_SCHEMA = {
@@ -162,6 +203,7 @@ LEX_EDIT_SCHEMA = {
         "## Table-level ops (require 'table_index')\n"
         "- replace_table_cell: find cell by old_text, replace with new_text\n"
         "- replace_table_cells: batch {old, new} across table cells\n"
+        "- set_table_cells: batch set cells by stable row/column coordinates\n"
         "- insert_table_rows: copy template_row, fill cell text from rows_data\n\n"
         "## Block-level ops\n"
         "- insert_paragraphs: insert paras with optional page breaks after after_para\n\n"
@@ -185,12 +227,14 @@ LEX_EDIT_SCHEMA = {
                 "enum": [
                     "replace", "insert", "delete", "set_format",
                     "replace_table_cell", "replace_table_cells",
+                    "set_table_cells",
                     "insert_table_rows", "insert_paragraphs",
                     "create_table", "replace_header_footer",
                 ],
                 "description": (
                     "Operation type. Paragraph-level: replace, insert, delete, set_format. "
                     "Table-level: replace_table_cell (single cell), replace_table_cells (batch), "
+                    "set_table_cells (batch by row/col coordinates), "
                     "insert_table_rows (copy template row with cell text), "
                     "create_table (insert a new table with headers and data rows). "
                     "Block-level: insert_paragraphs (insert multiple paras after anchor). "
@@ -228,7 +272,11 @@ LEX_EDIT_SCHEMA = {
             },
             "old_text": {
                 "type": "string",
-                "description": "Text to find. For replace_table_cell and replace_header_footer.",
+                "description": (
+                    "Text to find. For paragraph replace this performs an in-paragraph "
+                    "partial replacement; also used by replace_table_cell and "
+                    "replace_header_footer."
+                ),
             },
             "kind": {
                 "type": "string",
@@ -256,6 +304,24 @@ LEX_EDIT_SCHEMA = {
                     "required": ["old", "new"],
                 },
                 "description": "List of {old, new, bold?} for batch cell replacement. For replace_table_cells.",
+            },
+            "cells": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "row": {"type": "integer"},
+                        "col": {"type": "integer"},
+                        "text": {"type": "string"},
+                        "old_text": {"type": "string"},
+                        "bold": {"type": "boolean"},
+                    },
+                    "required": ["row", "col", "text"],
+                },
+                "description": (
+                    "List of {row, col, text, old_text?, bold?} for stable table "
+                    "cell edits by zero-indexed row/column. For set_table_cells."
+                ),
             },
             "template_row": {
                 "type": "integer",
@@ -310,7 +376,7 @@ def _handle_edit(args: dict, **kwargs) -> str:
     from lexitool.edit_ops import (
         _read_docx, _write_docx,
         replace_table_cell_text, replace_table_cell_text_all,
-        insert_table_rows, insert_paragraph_block,
+        set_table_cells_by_position, insert_table_rows, insert_paragraph_block,
     )
 
     path = _resolve_path(args["path"])
@@ -347,7 +413,7 @@ def _handle_edit(args: dict, **kwargs) -> str:
         except Exception as e:
             return tool_error(str(e))
 
-    if op in ("replace_table_cell", "replace_table_cells",
+    if op in ("replace_table_cell", "replace_table_cells", "set_table_cells",
               "insert_table_rows", "insert_paragraphs",
               "create_table"):
         try:
@@ -371,6 +437,18 @@ def _handle_edit(args: dict, **kwargs) -> str:
                     return tool_error("'replacements' is required for replace_table_cells")
                 res = replace_table_cell_text_all(
                     path, table_index, replacements,
+                    tc=tc, author=author,
+                    font_size=font_size,
+                    output=path,
+                )
+
+            elif op == "set_table_cells":
+                table_index = args.get("table_index", 0)
+                cells = args.get("cells", [])
+                if not cells:
+                    return tool_error("'cells' is required for set_table_cells")
+                res = set_table_cells_by_position(
+                    path, table_index, cells,
                     tc=tc, author=author,
                     font_size=font_size,
                     output=path,
@@ -471,12 +549,25 @@ def _handle_edit(args: dict, **kwargs) -> str:
                     t_el.text = None
 
         elif op == "replace":
-            if target.char_start is not None:
+            requested_old_text = args.get("old_text")
+            if isinstance(requested_old_text, str) and requested_old_text:
+                old_text = requested_old_text
+            elif target.char_start is not None:
                 old_text = _get_para_text(para_el)[target.char_start:target.char_end]
             else:
                 old_text = _get_para_text(para_el)
             if tc:
                 tc_result = tc_replace_first_in_para(para_el, old_text, new_text, tc_id, author)
+                if not tc_result.get("ok"):
+                    para_text = _get_para_text(para_el)
+                    located = _locate_normalized_text(para_text, old_text)
+                    if located is not None:
+                        start, end = located
+                        actual_old = para_text[start:end]
+                        if actual_old and actual_old != old_text:
+                            tc_result = tc_replace_first_in_para(
+                                para_el, actual_old, new_text, tc_id, author
+                            )
                 # Fallback: if text not found in the body-level paragraph,
                 # search ALL paragraphs including table cells.
                 if not tc_result.get("ok") and _all_idx is not None:
@@ -589,14 +680,65 @@ def _direct_replace(para_el, old_text: str, new_text: str) -> dict:
         return {"ok": False, "reason": "no text runs in paragraph"}
 
     full_text = "".join(t.text or "" for t in t_elements)
-    if old_text not in full_text:
+    match_text = _resolve_replace_match(full_text, old_text)
+    if match_text is None:
         return {"ok": False, "reason": "text not found"}
 
-    new_full = full_text.replace(old_text, new_text, 1)
+    new_full = full_text.replace(match_text, new_text, 1)
     t_elements[0].text = new_full
     for t in t_elements[1:]:
         t.text = ""
-    return {"ok": True}
+    return {"ok": True, "matched_text": match_text}
+
+
+def _normalize_match_text(text: str) -> str:
+    """Normalize only for fallback matching; never changes document output."""
+    return re.sub(r"\s+", "", text or "")
+
+
+def _locate_normalized_text(haystack: str, needle: str) -> tuple[int, int] | None:
+    """Locate needle in haystack while ignoring whitespace differences."""
+    normalized_haystack = []
+    index_map = []
+    for idx, char in enumerate(haystack or ""):
+        if char.isspace():
+            continue
+        normalized_haystack.append(char)
+        index_map.append(idx)
+
+    normalized_needle = _normalize_match_text(needle)
+    if not normalized_needle or not normalized_haystack:
+        return None
+
+    pos = "".join(normalized_haystack).find(normalized_needle)
+    if pos < 0:
+        return None
+    start = index_map[pos]
+    end = index_map[pos + len(normalized_needle) - 1] + 1
+    return start, end
+
+
+def _resolve_replace_match(full_text: str, old_text: str) -> str | None:
+    if old_text in full_text:
+        return old_text
+
+    candidates = []
+    stripped = (old_text or "").strip()
+    if stripped and stripped != old_text:
+        candidates.append(stripped)
+    no_tabs = (old_text or "").replace("\t", "")
+    if no_tabs and no_tabs != old_text:
+        candidates.append(no_tabs)
+
+    for candidate in candidates:
+        if candidate in full_text:
+            return candidate
+
+    located = _locate_normalized_text(full_text, old_text)
+    if located is None:
+        return None
+    start, end = located
+    return full_text[start:end]
 
 
 def _search_and_replace_nearby(
@@ -2495,6 +2637,7 @@ _TOOLS = [
     # Read
     ("lex_read",     "lexitool", LEX_READ_SCHEMA,     _handle_read),
     ("lex_stats",    "lexitool", LEX_STATS_SCHEMA,    _handle_stats),
+    ("lex_table_list", "lexitool", LEX_TABLE_LIST_SCHEMA, _handle_table_list),
     # Write
     ("lex_edit",     "lexitool", LEX_EDIT_SCHEMA,     _handle_edit),
     ("lex_tc",       "lexitool", LEX_TC_SCHEMA,       _handle_tc),
