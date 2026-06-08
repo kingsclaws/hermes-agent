@@ -13,6 +13,7 @@ import {
   Play,
   ScanText,
   ScrollText,
+  Users,
 } from "lucide-react";
 import type { PointerEvent, ReactNode } from "react";
 import { useMemo, useRef, useState } from "react";
@@ -505,6 +506,20 @@ ${JSON.stringify(selectedAtom, null, 2)}
         </label>
 
         <div className="grid grid-cols-2 gap-1.5">
+          <WorkflowButton
+            disabled={disabled}
+            icon={<Users />}
+            label="角色Profile"
+            onClick={() =>
+              run(`
+请初始化 lex 法律多 profile worker 池。
+要求：
+1. 调用 legal_profiles(action="bootstrap", prefix="lex")。
+2. 初始化后调用 legal_profiles(action="list", prefix="lex") 展示 coordinator、drafter、content/format/xref/translation reviewers。
+3. 后续 workflow 分发任务时优先使用这些真实 Hermes profiles，而不是只在 prompt 里模拟角色。
+              `)
+            }
+          />
           <WorkflowButton
             disabled={!canRunDocument}
             icon={<PenLine />}

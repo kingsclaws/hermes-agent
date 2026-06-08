@@ -845,15 +845,18 @@ def lex_read(
     mode: str = "full",
     show_tc: bool = True,
     show_format: bool = True,
+    include_headers_footers: bool = True,
 ) -> str:
     """Read document content with inline format markup.
 
     Args:
         path: Path to .docx file.
         paras: Specific paragraphs (1-indexed), None = all.
-        mode: "full" (all content), "structure" (headings only), "stats" (counts).
+        mode: "full" (all content), "structure" (headings only), "stats" (counts),
+            "headers_footers" (only section header/footer mapping).
         show_tc: Include [ins]/[del] markup around tracked changes.
         show_format: Include format tags around styled text.
+        include_headers_footers: Append header/footer text to full reads.
 
     Returns:
         Annotated text with §-prefixed paragraph markers.
@@ -862,7 +865,61 @@ def lex_read(
         return _export_structure(path)
     if mode == "stats":
         return _export_stats(path)
-    return export_paragraphs(path, paras, show_tc, show_format)
+    if mode in {"headers_footers", "headers-footers", "hf"}:
+        return _export_headers_footers(path)
+    body = export_paragraphs(path, paras, show_tc, show_format)
+    if include_headers_footers:
+        hf = _export_headers_footers(path)
+        if hf.strip() and hf.strip() != "(no headers or footers found)":
+            return body.rstrip() + "\n\n" + hf
+    return body
+
+
+def _export_headers_footers(path: str) -> str:
+    """Export Word section header/footer text without assigning body paragraph ids."""
+    try:
+        from .header_footer_ops import audit_all
+    except Exception:
+        return "(headers/footers unavailable: header_footer_ops import failed)"
+
+    try:
+        audit = audit_all(path)
+    except Exception as exc:
+        return f"(headers/footers unavailable: {exc})"
+
+    sections = audit.get("sections") or []
+    parts = audit.get("parts") or {}
+    lines: list[str] = []
+
+    if sections:
+        lines.append("[headers-footers]")
+        seen: set[tuple[str, str, str]] = set()
+        for sec in sections:
+            idx = sec.get("section_idx", "?")
+            for kind, key in (("header", "headers"), ("footer", "footers")):
+                for item in sec.get(key) or []:
+                    text = " ".join(str(item.get("text") or "").split())
+                    if not text:
+                        continue
+                    ref_type = str(item.get("type") or "default")
+                    part = str(item.get("part_path") or item.get("part") or "")
+                    marker = (kind, ref_type, part)
+                    if marker in seen:
+                        continue
+                    seen.add(marker)
+                    textbox = " textbox" if item.get("has_textbox") else ""
+                    lines.append(f"§HF{idx} [{kind}:{ref_type}{textbox}] {text}")
+
+    if not lines and parts:
+        lines.append("[headers-footers]")
+        for part, info in sorted(parts.items()):
+            text = " ".join(str(info.get("text") or "").split())
+            if not text:
+                continue
+            textbox = " textbox" if info.get("has_textbox") else ""
+            lines.append(f"§HF [{info.get('kind', 'part')}:{part}{textbox}] {text}")
+
+    return "\n".join(lines) if lines else "(no headers or footers found)"
 
 
 def _export_structure(path: str) -> str:

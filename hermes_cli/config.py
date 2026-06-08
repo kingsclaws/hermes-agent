@@ -1451,6 +1451,23 @@ DEFAULT_CONFIG = {
     # always goes to ~/.hermes/skills/.
     "skills": {
         "external_dirs": [],   # e.g. ["~/.agents/skills", "/shared/team-skills"]
+        # Which bundled skills are seeded into profiles by default.
+        # "lex" keeps the default profile focused on legal/document work;
+        # "full" restores the upstream Hermes broad skill library.
+        "bundled_profile": "lex",
+        "bundled_allowlist": [
+            "hermes-agent",
+            "plan",
+            "kanban-orchestrator",
+            "kanban-worker",
+            "lexitool-operations",
+            "legal-project-workflow",
+            "ocr-and-documents",
+            "nano-pdf",
+            "powerpoint",
+            "github-code-review",
+            "codebase-inspection",
+        ],
         # Substitute ${HERMES_SKILL_DIR} and ${HERMES_SESSION_ID} in SKILL.md
         # content with the absolute skill directory and the active session id
         # before the agent sees it.  Lets skill authors reference bundled

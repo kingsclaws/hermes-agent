@@ -40,6 +40,44 @@ HERMES_HOME = get_hermes_home()
 SKILLS_DIR = HERMES_HOME / "skills"
 MANIFEST_FILE = SKILLS_DIR / ".bundled_manifest"
 
+_LEX_BUNDLED_SKILL_ALLOWLIST = frozenset({
+    "hermes-agent",
+    "plan",
+    "kanban-orchestrator",
+    "kanban-worker",
+    "lexitool-operations",
+    "legal-project-workflow",
+    "ocr-and-documents",
+    "nano-pdf",
+    "powerpoint",
+    "github-code-review",
+    "codebase-inspection",
+})
+
+
+def _bundled_skill_policy() -> tuple[str, set[str]]:
+    """Return the active bundled-skill sync policy.
+
+    The lex fork defaults to a focused legal/document skill set. Operators can
+    restore upstream behavior with HERMES_BUNDLED_SKILLS_PROFILE=full or
+    skills.bundled_profile: full.
+    """
+    profile = os.getenv("HERMES_BUNDLED_SKILLS_PROFILE", "").strip().lower()
+    allowlist: set[str] = set()
+    if not profile:
+        try:
+            from hermes_cli.config import cfg_get
+
+            profile = str(cfg_get("skills.bundled_profile", "lex") or "lex").strip().lower()
+            raw_allowlist = cfg_get("skills.bundled_allowlist", None)
+            if isinstance(raw_allowlist, list):
+                allowlist = {str(item).strip() for item in raw_allowlist if str(item).strip()}
+        except Exception:
+            profile = "lex"
+    if not allowlist:
+        allowlist = set(_LEX_BUNDLED_SKILL_ALLOWLIST)
+    return profile or "lex", allowlist
+
 
 def _get_bundled_dir() -> Path:
     """Locate the bundled skills/ directory.
@@ -146,14 +184,45 @@ def _discover_bundled_skills(bundled_dir: Path) -> List[Tuple[str, Path]]:
     if not bundled_dir.exists():
         return skills
 
+    profile, allowlist = _bundled_skill_policy()
     for skill_md in bundled_dir.rglob("SKILL.md"):
         if is_excluded_skill_path(skill_md):
             continue
         skill_dir = skill_md.parent
         skill_name = _read_skill_name(skill_md, skill_dir.name)
+        if profile not in {"full", "all", "upstream"} and skill_name not in allowlist:
+            continue
         skills.append((skill_name, skill_dir))
 
     return skills
+
+
+def _find_installed_skill_dir(skill_name: str) -> Path | None:
+    if not SKILLS_DIR.exists():
+        return None
+    for skill_md in sorted(SKILLS_DIR.rglob("SKILL.md")):
+        if is_excluded_skill_path(skill_md):
+            continue
+        skill_dir = skill_md.parent
+        if _read_skill_name(skill_md, skill_dir.name) == skill_name:
+            return skill_dir
+    return None
+
+
+def _archive_pruned_skill(skill_dir: Path, skill_name: str) -> bool:
+    try:
+        rel = skill_dir.relative_to(SKILLS_DIR)
+    except ValueError:
+        return False
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    target = SKILLS_DIR / ".pruned" / timestamp / rel
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(skill_dir), str(target))
+        return True
+    except Exception as exc:
+        logger.debug("Failed to archive pruned skill %s from %s: %s", skill_name, skill_dir, exc)
+        return False
 
 
 def _compute_relative_dest(skill_dir: Path, bundled_dir: Path) -> Path:
@@ -425,6 +494,7 @@ def sync_skills(quiet: bool = False) -> dict:
                         user_modified (list), cleaned (list), total_bundled (int)
     """
     bundled_dir = _get_bundled_dir()
+    policy_profile, _policy_allowlist = _bundled_skill_policy()
     if not bundled_dir.exists():
         return {
             "copied": [], "updated": [], "skipped": 0,
@@ -535,7 +605,14 @@ def sync_skills(quiet: bool = False) -> dict:
 
     # Clean stale manifest entries (skills removed from bundled dir)
     cleaned = sorted(set(manifest.keys()) - bundled_names)
+    pruned = []
     for name in cleaned:
+        if policy_profile not in {"full", "all", "upstream"}:
+            dest = _find_installed_skill_dir(name)
+            origin_hash = manifest.get(name, "")
+            if dest is not None and origin_hash and _dir_hash(dest) == origin_hash:
+                if _archive_pruned_skill(dest, name):
+                    pruned.append(name)
         del manifest[name]
 
     # Also copy DESCRIPTION.md files for categories (if not already present)
@@ -558,6 +635,7 @@ def sync_skills(quiet: bool = False) -> dict:
         "skipped": skipped,
         "user_modified": user_modified,
         "cleaned": cleaned,
+        "pruned": pruned,
         "total_bundled": len(bundled_skills),
         "optional_provenance_backfilled": optional_provenance_backfilled,
     }

@@ -80,8 +80,8 @@ LEX_READ_SCHEMA = {
             },
             "mode": {
                 "type": "string",
-                "enum": ["full", "structure", "stats"],
-                "description": "full=all content with markup, structure=headings only, stats=counts only. Default: full.",
+                "enum": ["full", "structure", "stats", "headers_footers"],
+                "description": "full=all content with markup, structure=headings only, stats=counts only, headers_footers=only Word section header/footer text. Default: full.",
             },
             "show_tc": {
                 "type": "boolean",
@@ -90,6 +90,10 @@ LEX_READ_SCHEMA = {
             "show_format": {
                 "type": "boolean",
                 "description": "Include format tags. Set false for plain text. Default: true.",
+            },
+            "include_headers_footers": {
+                "type": "boolean",
+                "description": "Append Word section header/footer text to full reads. Default: true.",
             },
         },
         "required": ["path"],
@@ -106,6 +110,7 @@ def _handle_read(args: dict, **kwargs) -> str:
         mode=args.get("mode", "full"),
         show_tc=args.get("show_tc", True),
         show_format=args.get("show_format", True),
+        include_headers_footers=args.get("include_headers_footers", True),
     )
     return tool_result(result)
 
