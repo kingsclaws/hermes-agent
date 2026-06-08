@@ -566,11 +566,11 @@ class S6ServiceManager:
           1. Sources HERMES_HOME (and any extra env) via with-contenv —
              so e.g. ``-e HERMES_HOME=/data/hermes`` is honored at run
              time, not Python-substituted at registration time (OQ8-C).
-          2. Resets ``HOME`` to ``/opt/data`` before the privilege drop
-             so with-contenv's root HOME does not leak into the
-             unprivileged gateway process.
+          2. Uses ``HERMES_RUN_AS_ROOT`` to decide whether to keep root
+             privileges or reset ``HOME`` to ``/opt/data`` before dropping
+             to the unprivileged gateway process.
           3. Activates the bundled venv.
-          4. Drops to the hermes user and exec's
+          4. Runs as root or drops to the hermes user and exec's
              ``hermes -p <profile> gateway run`` (or just ``hermes
              gateway run`` for the default profile — see below).
 
@@ -600,7 +600,19 @@ class S6ServiceManager:
             "#!/command/with-contenv sh",
             "# shellcheck shell=sh",
             "set -e",
-            "export HOME=/opt/data",
+            "_truthy() {",
+            "    case \"${1:-}\" in",
+            "        1|true|TRUE|True|yes|YES|Yes|on|ON|On) return 0 ;;",
+            "        *) return 1 ;;",
+            "    esac",
+            "}",
+            "if _truthy \"${HERMES_RUN_AS_ROOT:-}\"; then",
+            "    export HOME=\"${HOME:-/root}\"",
+            "    runner=\"\"",
+            "else",
+            "    export HOME=/opt/data",
+            "    runner=\"s6-setuidgid hermes\"",
+            "fi",
             "cd /opt/data",
             ". /opt/hermes/.venv/bin/activate",
         ]
@@ -615,10 +627,10 @@ class S6ServiceManager:
         # guard.
         lines.append("export HERMES_S6_SUPERVISED_CHILD=1")
         if profile == "default":
-            lines.append("exec s6-setuidgid hermes hermes gateway run")
+            lines.append("exec $runner hermes gateway run")
         else:
             lines.append(
-                f"exec s6-setuidgid hermes hermes -p {shlex.quote(profile)} gateway run"
+                f"exec $runner hermes -p {shlex.quote(profile)} gateway run"
             )
         return "\n".join(lines) + "\n"
 
@@ -670,9 +682,18 @@ class S6ServiceManager:
         return (
             f"#!/command/with-contenv sh\n"
             f"# shellcheck shell=sh\n"
+            f"_truthy() {{\n"
+            f"    case \"${{1:-}}\" in\n"
+            f"        1|true|TRUE|True|yes|YES|Yes|on|ON|On) return 0 ;;\n"
+            f"        *) return 1 ;;\n"
+            f"    esac\n"
+            f"}}\n"
             f': "${{HERMES_HOME:=/opt/data}}"\n'
             f'log_dir="$HERMES_HOME/logs/gateways/{prof}"\n'
             f'mkdir -p "$log_dir"\n'
+            f'if _truthy "${{HERMES_RUN_AS_ROOT:-}}"; then\n'
+            f'    exec s6-log 1 n10 s1000000 T "$log_dir"\n'
+            f'fi\n'
             f'chown -R hermes:hermes "$log_dir" 2>/dev/null || true\n'
             f'exec s6-setuidgid hermes s6-log 1 n10 s1000000 T "$log_dir"\n'
         )

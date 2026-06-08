@@ -33,10 +33,10 @@
 # (/opt/hermes/.venv/bin/hermes), so the second hop cannot re-enter this
 # shim regardless of PATH state. No sentinel env var needed.
 #
-# Opt-out: set HERMES_DOCKER_EXEC_AS_ROOT=1 (1/true/yes, case-insensitive)
-# to keep running as root. Reserved for diagnostic sessions where the
-# operator deliberately wants root semantics — e.g. inspecting root-only
-# state via the hermes CLI. Default is to drop.
+# Opt-out: set HERMES_DOCKER_EXEC_AS_ROOT=1 or HERMES_RUN_AS_ROOT=1
+# (1/true/yes, case-insensitive) to keep running as root. Lex/document
+# workspace images use this by default so bind-mounted legal files remain
+# accessible to tools.
 
 set -e
 
@@ -55,12 +55,17 @@ if [ "$(id -u)" != "0" ]; then
     exec "$REAL" "$@"
 fi
 
+_truthy() {
+    case "${1:-}" in
+        1|true|TRUE|True|yes|YES|Yes|on|ON|On) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 # Root, with opt-out set? Honor it.
-case "${HERMES_DOCKER_EXEC_AS_ROOT:-}" in
-    1|true|TRUE|True|yes|YES|Yes)
-        exec "$REAL" "$@"
-        ;;
-esac
+if _truthy "${HERMES_DOCKER_EXEC_AS_ROOT:-}" || _truthy "${HERMES_RUN_AS_ROOT:-}"; then
+    exec "$REAL" "$@"
+fi
 
 # Root, no opt-out. Drop to the hermes user.
 #

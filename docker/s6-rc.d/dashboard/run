@@ -19,9 +19,22 @@ case "${HERMES_DASHBOARD:-}" in
         ;;
 esac
 
-# with-contenv repopulates HOME from /init as /root. Reset it before
-# dropping privileges so HOME-anchored state lands under /opt/data.
-export HOME=/opt/data
+_truthy() {
+    case "${1:-}" in
+        1|true|TRUE|True|yes|YES|Yes|on|ON|On) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+if _truthy "${HERMES_RUN_AS_ROOT:-}"; then
+    export HOME="${HOME:-/root}"
+    runner=""
+else
+    # with-contenv repopulates HOME from /init as /root. Reset it before
+    # dropping privileges so HOME-anchored state lands under /opt/data.
+    export HOME=/opt/data
+    runner="s6-setuidgid hermes"
+fi
 
 cd /opt/data
 # shellcheck disable=SC1091
@@ -47,6 +60,6 @@ case "${HERMES_DASHBOARD_INSECURE:-}" in
     1|true|TRUE|True|yes|YES|Yes) insecure="--insecure" ;;
 esac
 
-# shellcheck disable=SC2086  # word-splitting of $insecure is intentional
-exec s6-setuidgid hermes hermes dashboard \
+# shellcheck disable=SC2086  # word-splitting of $runner and $insecure is intentional
+exec $runner hermes dashboard \
     --host "$dash_host" --port "$dash_port" --no-open $insecure

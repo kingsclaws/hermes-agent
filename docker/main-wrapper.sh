@@ -16,28 +16,45 @@
 #   first arg is an executable    → exec it directly (sleep, bash, sh, …)
 #   first arg is anything else    → exec `hermes <args>` (subcommand passthrough)
 #
-# We drop to the hermes user via `s6-setuidgid` so the supervised
-# workload runs unprivileged (UID 10000 by default).
+# By default this image runs Hermes as root for document-workspace containers
+# that mount user-managed legal files. Set HERMES_RUN_AS_ROOT=0 to restore the
+# upstream unprivileged hermes user behavior.
 set -e
 
-# HOME comes through with-contenv as /root (the /init context). Override
-# to the hermes user's home before dropping privileges so libraries that
-# resolve paths via $HOME (e.g. discord lockfile under XDG_STATE_HOME)
-# don't try to write to /root.
-export HOME=/opt/data
+_truthy() {
+    case "${1:-}" in
+        1|true|TRUE|True|yes|YES|Yes|on|ON|On) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+if _truthy "${HERMES_RUN_AS_ROOT:-}"; then
+    export HOME="${HOME:-/root}"
+    runner=""
+else
+    # HOME comes through with-contenv as /root (the /init context). Override
+    # to the hermes user's home before dropping privileges so libraries that
+    # resolve paths via $HOME (e.g. discord lockfile under XDG_STATE_HOME)
+    # don't try to write to /root.
+    export HOME=/opt/data
+    runner="s6-setuidgid hermes"
+fi
 
 cd /opt/data
 # shellcheck disable=SC1091
 . /opt/hermes/.venv/bin/activate
 
 if [ $# -eq 0 ]; then
-    exec s6-setuidgid hermes hermes
+    # shellcheck disable=SC2086
+    exec $runner hermes
 fi
 
 if command -v "$1" >/dev/null 2>&1; then
     # Bare executable — pass through directly.
-    exec s6-setuidgid hermes "$@"
+    # shellcheck disable=SC2086
+    exec $runner "$@"
 fi
 
 # Hermes subcommand pass-through.
-exec s6-setuidgid hermes hermes "$@"
+# shellcheck disable=SC2086
+exec $runner hermes "$@"
