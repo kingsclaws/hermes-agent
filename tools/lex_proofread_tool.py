@@ -68,6 +68,14 @@ LEX_PROOFREAD_SCHEMA = {
                 "enum": ["content", "format", "ts", "xref", "translation", "all"],
                 "description": "Type of review. Default: content.",
             },
+            "review_types": {
+                "type": "array",
+                "items": {
+                    "type": "string",
+                    "enum": ["content", "format", "ts", "xref", "translation"],
+                },
+                "description": "Multiple review types to run. Overrides review_type when provided.",
+            },
             "chunk_size": {
                 "type": "integer",
                 "description": "Max paragraphs per chunk. Default: 300.",
@@ -87,6 +95,7 @@ def _handle_proofread(args: dict, **kwargs) -> str:
     return lex_proofread(
         path=args["path"],
         review_type=args.get("review_type", "content"),
+        review_types=args.get("review_types"),
         chunk_size=args.get("chunk_size", 300),
         parent_agent=parent_agent,
     )
@@ -97,6 +106,7 @@ def _handle_proofread(args: dict, **kwargs) -> str:
 def lex_proofread(
     path: str,
     review_type: str = "content",
+    review_types: list[str] | None = None,
     chunk_size: int = 300,
     parent_agent: Any = None,
 ) -> str:
@@ -124,12 +134,22 @@ def lex_proofread(
         return tool_error("Could not determine document structure for chunking")
 
     # 4. Resolve profiles
-    if review_type == "all":
+    requested_types = [str(v).strip() for v in (review_types or []) if str(v).strip()]
+    if requested_types:
+        profiles = []
+        for item in requested_types:
+            profiles.extend(REVIEW_TYPE_PROFILES.get(item, []))
+        if not profiles:
+            profiles = REVIEW_TYPE_PROFILES["content"]
+        review_label = ",".join(requested_types)
+    elif review_type == "all":
         profiles = []
         for plist in REVIEW_TYPE_PROFILES.values():
             profiles.extend(plist)
+        review_label = "all"
     else:
         profiles = REVIEW_TYPE_PROFILES.get(review_type, ["lex-reviewer-content"])
+        review_label = review_type
 
     # 5. Build batch tasks
     tasks: list[dict[str, Any]] = []
@@ -157,7 +177,7 @@ def lex_proofread(
     result_json = delegate_task(tasks=tasks, parent_agent=parent_agent)
 
     # 7. Aggregate
-    return _aggregate_results(result_json, chunks, profiles, path, review_type)
+    return _aggregate_results(result_json, chunks, profiles, path, review_label)
 
 
 # ── Chunk computation ──────────────────────────────────────────────────────── #

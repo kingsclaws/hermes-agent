@@ -78,6 +78,7 @@ LEGAL_ORCHESTRATE_SCHEMA = {
                     "review_ts",
                     "review_xref",
                     "review_translation",
+                    "proofread",
                     "deliver",
                 ],
                 "description": "Native legal workflow step to run.",
@@ -88,7 +89,7 @@ LEGAL_ORCHESTRATE_SCHEMA = {
             },
             "workflow_type": {
                 "type": "string",
-                "enum": ["contract_revision", "translation_quality_review"],
+                "enum": ["contract_revision", "translation_quality_review", "proofread_review"],
                 "description": "Workflow template to create when task_type=plan.",
             },
             "document_path": {
@@ -138,7 +139,7 @@ LEGAL_ORCHESTRATE_SCHEMA = {
             },
             "chunk_size": {
                 "type": "integer",
-                "description": "Paragraph chunk size for native translation QA. Default: 120.",
+                "description": "Paragraph chunk size for native translation QA or proofread review.",
             },
             "enable_learning": {
                 "type": "boolean",
@@ -666,7 +667,7 @@ def _handle_legal_orchestrate(args: dict, **kwargs) -> str:
     enable_learning = bool(args.get("enable_learning", True))
     learning_scope = str(args.get("learning_scope") or "global").strip()
     workflow_type = str(args.get("workflow_type") or "").strip() or None
-    learning_workflow_type = workflow_type or "contract_revision"
+    learning_workflow_type = workflow_type or ("proofread_review" if task_type == "proofread" else "contract_revision")
 
     if task_type == "deliver":
         from tools.registry import registry as _registry
@@ -686,17 +687,23 @@ def _handle_legal_orchestrate(args: dict, **kwargs) -> str:
             plan_text = " ".join(
                 text for text in (instructions, document_path, bilingual_path, source_path, translation_path) if text
             ).lower()
-            workflow_type = (
-                "translation_quality_review"
-                if any(marker in plan_text for marker in ("translation", "翻译", "中英文", "bilingual"))
-                else "contract_revision"
-            )
+            if any(marker in plan_text for marker in ("translation", "翻译", "中英文", "bilingual")):
+                workflow_type = "translation_quality_review"
+            elif any(marker in plan_text for marker in ("proofread", "校对", "审校", "审阅", "review")):
+                workflow_type = "proofread_review"
+            else:
+                workflow_type = "contract_revision"
+        plan_name_by_type = {
+            "contract_revision": "法律文书修订 workflow",
+            "proofread_review": "法律文书逐段校对 workflow",
+            "translation_quality_review": "中英文翻译质量核对 workflow",
+        }
 
         return _registry.dispatch(
             "legal_workflow",
             {
                 "action": "create_plan",
-                "name": "中英文翻译质量核对 workflow" if workflow_type == "translation_quality_review" else "法律文书修订 workflow",
+                "name": plan_name_by_type.get(workflow_type, "法律文书 workflow"),
                 "workflow_type": workflow_type,
                 "project_dir": str(project_root),
                 "document_path": document_path or "",
@@ -710,7 +717,34 @@ def _handle_legal_orchestrate(args: dict, **kwargs) -> str:
                 "domain_terms": domain_terms,
                 "enable_learning": enable_learning,
                 "learning_scope": learning_scope,
+                "review_types": [
+                    str(item).strip().replace("review_", "")
+                    for item in (args.get("review_types") or [])
+                    if str(item).strip()
+                ],
+                "chunk_size": int(args.get("chunk_size") or (180 if workflow_type == "proofread_review" else 120)),
                 "instructions": instructions or "",
+            },
+            task_id=kwargs.get("task_id"),
+            parent_agent=parent_agent,
+        )
+
+    if task_type == "proofread":
+        from tools.registry import registry as _registry
+
+        if not document_path:
+            return tool_error("proofread requires document_path.")
+        review_types = [
+            str(item).strip().replace("review_", "")
+            for item in (args.get("review_types") or [])
+            if str(item).strip()
+        ] or ["content", "format", "xref"]
+        return _registry.dispatch(
+            "lex_proofread",
+            {
+                "path": document_path or "",
+                "review_types": review_types,
+                "chunk_size": int(args.get("chunk_size") or 180),
             },
             task_id=kwargs.get("task_id"),
             parent_agent=parent_agent,

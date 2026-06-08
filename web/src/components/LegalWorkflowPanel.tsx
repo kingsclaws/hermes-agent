@@ -11,6 +11,7 @@ import {
   PackageCheck,
   PenLine,
   Play,
+  ScanText,
   ScrollText,
 } from "lucide-react";
 import type { PointerEvent, ReactNode } from "react";
@@ -539,6 +540,26 @@ TS：${q(termSheetPath) || "无"}
 审阅类型：[${reviewTypeText}]
 额外要求：${q(instructions) || "输出结构化 findings，包含严重程度、位置、问题、修改建议。"}
 请调用 legal_orchestrate(task_type="review", review_types=[${reviewTypeText}])。
+              `)
+            }
+          />
+          <WorkflowButton
+            disabled={!canRunDocument}
+            icon={<ScanText />}
+            label="逐段校对"
+            onClick={() =>
+              run(`
+请创建并执行法律文书逐段校对 workflow，不要直接全篇粗略审阅。
+项目目录：${effectiveProjectDir || "使用当前 active project"}
+主文档：${q(documentPath)}
+TS/支持文件：${q(termSheetPath) || "无"}
+校对类型：[${reviewTypeText}]
+额外要求：${q(instructions) || "逐段输出结构化 findings，包含严重程度、位置、问题、修改建议。"}
+要求：
+1. 先调用 legal_workflow(action="create_plan", workflow_type="proofread_review", review_types=[${reviewTypeText}], chunk_size=180)。
+2. 计划必须包含：读取全文结构、建立段落分块、分段并行校对、汇总去重、人审确认、执行确认修改、修改段落复核、最终门禁。
+3. 未经确认前不得调用 lex_edit。
+4. 如只执行校对不改文档，可调用 legal_orchestrate(task_type="proofread", review_types=[${reviewTypeText}], chunk_size=180)。
               `)
             }
           />

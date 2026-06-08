@@ -27,6 +27,16 @@ def _resolve_project(args: dict, parent_agent=None) -> Dict[str, Optional[str]]:
     return {"project_id": project_id, "project_dir": project_dir}
 
 
+def _existing_session_id(db: SessionDB, parent_agent=None) -> Optional[str]:
+    session_id = str(getattr(parent_agent, "session_id", "") or "").strip()
+    if not session_id:
+        return None
+    try:
+        return session_id if db.get_session(session_id) else None
+    except Exception:
+        return None
+
+
 def _default_contract_workflow_steps(
     *,
     document_path: Optional[str],
@@ -230,6 +240,112 @@ def _default_translation_workflow_steps(
     ]
 
 
+def _default_proofread_workflow_steps(
+    *,
+    document_path: Optional[str],
+    term_sheet_path: Optional[str],
+    review_types: List[str],
+    chunk_size: int,
+    enable_learning: bool,
+    learning_scope: str,
+    instructions: Optional[str],
+) -> List[Dict[str, Any]]:
+    normalized_review_types = review_types or ["content", "format", "xref"]
+    common_input = {
+        "document_path": document_path,
+        "term_sheet_path": term_sheet_path,
+        "review_types": normalized_review_types,
+        "chunk_size": max(int(chunk_size or 180), 50),
+        "enable_learning": enable_learning,
+        "learning_scope": learning_scope,
+        "instructions": instructions,
+    }
+    return [
+        {
+            "id": "read-document-map",
+            "title": "读取全文结构和段落统计",
+            "type": "lex_read",
+            "role": "proofread_coordinator",
+            "input": {**common_input, "mode": "structure_and_stats"},
+        },
+        {
+            "id": "build-paragraph-chunks",
+            "title": "按标题和段落建立校对分块",
+            "type": "analysis",
+            "role": "proofread_coordinator",
+            "depends_on": ["read-document-map"],
+            "input": {
+                **common_input,
+                "output_contract": "chunk map with paragraph ranges; every paragraph assigned exactly once",
+            },
+        },
+        {
+            "id": "parallel-proofread-review",
+            "title": "分段并行校对审阅",
+            "type": "lex_proofread",
+            "role": "proofread_reviewer_pool",
+            "depends_on": ["build-paragraph-chunks"],
+            "input": {
+                **common_input,
+                "path": document_path,
+                "review_types": normalized_review_types,
+            },
+        },
+        {
+            "id": "normalize-findings",
+            "title": "按段落汇总、去重和分级问题",
+            "type": "analysis",
+            "role": "proofread_coordinator",
+            "depends_on": ["parallel-proofread-review"],
+            "input": {
+                **common_input,
+                "output_contract": "structured findings grouped by paragraph range, severity, issue type, and proposed fix",
+            },
+        },
+        {
+            "id": "approval-before-proofread-edits",
+            "title": "修改前人工确认",
+            "type": "approval_gate",
+            "role": "proofread_coordinator",
+            "depends_on": ["normalize-findings"],
+            "requires_approval": True,
+            "input": {
+                **common_input,
+                "output_contract": "issue list only; no lex_edit before approval",
+            },
+        },
+        {
+            "id": "apply-approved-proofread-fixes",
+            "title": "执行已确认的校对修订",
+            "type": "lex_edit",
+            "role": "drafter",
+            "depends_on": ["approval-before-proofread-edits"],
+            "input": common_input,
+        },
+        {
+            "id": "targeted-recheck-edited-paragraphs",
+            "title": "复核已修改段落",
+            "type": "lex_proofread",
+            "role": "proofread_reviewer_pool",
+            "depends_on": ["apply-approved-proofread-fixes"],
+            "input": {
+                **common_input,
+                "path": document_path,
+                "review_types": normalized_review_types,
+                "target": "edited_paragraphs_only",
+            },
+        },
+        {
+            "id": "final-proofread-gate",
+            "title": "最终校对交付门禁",
+            "type": "lex_gate_check",
+            "role": "coordinator",
+            "depends_on": ["targeted-recheck-edited-paragraphs"],
+            "input": {**common_input, "gate": "proofread"},
+        },
+    ]
+
+
 def _normalize_custom_steps(raw_steps: Any) -> List[Dict[str, Any]]:
     if not isinstance(raw_steps, list):
         return []
@@ -292,6 +408,8 @@ def _infer_workflow_type(workflow: Dict[str, Any]) -> str:
     haystack = " ".join([name, instructions, step_types])
     if any(marker in haystack for marker in ("translation", "翻译", "bilingual", "lex_translation_review")):
         return "translation_quality_review"
+    if any(marker in haystack for marker in ("proofread", "校对", "审校", "lex_proofread")):
+        return "proofread_review"
     return "contract_revision"
 
 
@@ -326,7 +444,7 @@ LEGAL_WORKFLOW_SCHEMA = {
             "name": {"type": "string"},
             "workflow_type": {
                 "type": "string",
-                "enum": ["contract_revision", "translation_quality_review"],
+                "enum": ["contract_revision", "translation_quality_review", "proofread_review"],
                 "description": "Default workflow template to create when custom steps are not supplied.",
             },
             "learning_scope": {
@@ -355,7 +473,30 @@ LEGAL_WORKFLOW_SCHEMA = {
             },
             "enable_learning": {
                 "type": "boolean",
-                "description": "Whether workflow learning is enabled for translation QA. Default: true.",
+                "description": "Whether workflow learning is enabled. Default: true.",
+            },
+            "review_types": {
+                "type": "array",
+                "items": {
+                    "type": "string",
+                    "enum": [
+                        "content",
+                        "format",
+                        "ts",
+                        "xref",
+                        "translation",
+                        "review_content",
+                        "review_format",
+                        "review_ts",
+                        "review_xref",
+                        "review_translation",
+                    ],
+                },
+                "description": "Proofread review lanes to run. Default: content, format, xref.",
+            },
+            "chunk_size": {
+                "type": "integer",
+                "description": "Max paragraphs per proofread chunk. Default: 180.",
             },
             "instructions": {"type": "string"},
             "status": {"type": "string"},
@@ -405,9 +546,20 @@ def _handle_legal_workflow(args: dict, **kwargs) -> str:
         domain_terms = args.get("domain_terms") if isinstance(args.get("domain_terms"), dict) else {}
         enable_learning = bool(args.get("enable_learning", True))
         learning_scope = str(args.get("learning_scope") or "global").strip()
+        review_types = [
+            str(v).strip().replace("review_", "")
+            for v in (args.get("review_types") or [])
+            if str(v).strip()
+        ]
+        chunk_size = int(args.get("chunk_size") or 180)
         instructions = str(args.get("instructions") or "").strip() or None
         workflow_type = str(args.get("workflow_type") or "contract_revision").strip()
-        default_name = "中英文翻译质量核对 workflow" if workflow_type == "translation_quality_review" else "法律文书修订 workflow"
+        default_name_by_type = {
+            "contract_revision": "法律文书修订 workflow",
+            "proofread_review": "法律文书逐段校对 workflow",
+            "translation_quality_review": "中英文翻译质量核对 workflow",
+        }
+        default_name = default_name_by_type.get(workflow_type, "法律文书 workflow")
         name = str(args.get("name") or "").strip() or default_name
         steps = _normalize_custom_steps(args.get("steps"))
         if not steps:
@@ -420,6 +572,16 @@ def _handle_legal_workflow(args: dict, **kwargs) -> str:
                     sop_path=sop_path,
                     sop_overrides=sop_overrides,
                     domain_terms=domain_terms,
+                    enable_learning=enable_learning,
+                    learning_scope=learning_scope,
+                    instructions=instructions,
+                )
+            elif workflow_type == "proofread_review":
+                steps = _default_proofread_workflow_steps(
+                    document_path=document_path,
+                    term_sheet_path=term_sheet_path,
+                    review_types=review_types,
+                    chunk_size=chunk_size,
                     enable_learning=enable_learning,
                     learning_scope=learning_scope,
                     instructions=instructions,
@@ -439,7 +601,7 @@ def _handle_legal_workflow(args: dict, **kwargs) -> str:
             document_path=document_path,
             term_sheet_path=term_sheet_path,
             instructions=instructions,
-            created_by_session_id=getattr(parent_agent, "session_id", None),
+            created_by_session_id=_existing_session_id(db, parent_agent),
             steps=steps,
         )
         return _ok({"status": "created", "workflow": db.get_legal_workflow(run_id)})
