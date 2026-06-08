@@ -165,6 +165,11 @@ LEX_EDIT_SCHEMA = {
         "- insert_table_rows: copy template_row, fill cell text from rows_data\n\n"
         "## Block-level ops\n"
         "- insert_paragraphs: insert paras with optional page breaks after after_para\n\n"
+        "## Header/footer ops\n"
+        "- replace_header_footer: replace text in Word header/footer parts. "
+        "Use lex_read(mode='headers_footers') first and pass kind/ref_type/part_path "
+        "when needed. Header/footer edits are direct XML replacements; Track Changes "
+        "is not applied there.\n\n"
         "Use lex_read first to see § numbers and table structure, "
         "then target your edits precisely."
     ),
@@ -181,14 +186,15 @@ LEX_EDIT_SCHEMA = {
                     "replace", "insert", "delete", "set_format",
                     "replace_table_cell", "replace_table_cells",
                     "insert_table_rows", "insert_paragraphs",
-                    "create_table",
+                    "create_table", "replace_header_footer",
                 ],
                 "description": (
                     "Operation type. Paragraph-level: replace, insert, delete, set_format. "
                     "Table-level: replace_table_cell (single cell), replace_table_cells (batch), "
                     "insert_table_rows (copy template row with cell text), "
                     "create_table (insert a new table with headers and data rows). "
-                    "Block-level: insert_paragraphs (insert multiple paras after anchor)."
+                    "Block-level: insert_paragraphs (insert multiple paras after anchor). "
+                    "Header/footer: replace_header_footer."
                 ),
             },
             "target": {
@@ -222,7 +228,21 @@ LEX_EDIT_SCHEMA = {
             },
             "old_text": {
                 "type": "string",
-                "description": "Text to find in the table cell. For replace_table_cell.",
+                "description": "Text to find. For replace_table_cell and replace_header_footer.",
+            },
+            "kind": {
+                "type": "string",
+                "enum": ["all", "header", "footer"],
+                "description": "Header/footer part kind for replace_header_footer. Default: all.",
+            },
+            "ref_type": {
+                "type": "string",
+                "enum": ["default", "first", "even", "unknown"],
+                "description": "Optional Word section reference type filter for replace_header_footer.",
+            },
+            "part_path": {
+                "type": "string",
+                "description": "Optional exact OPC part path from lex_read, e.g. word/header1.xml or word/footer1.xml.",
             },
             "replacements": {
                 "type": "array",
@@ -304,6 +324,29 @@ def _handle_edit(args: dict, **kwargs) -> str:
         font_size = 11.0
 
     # ── Table / block operations (no target needed) ──────────────────────────
+    if op == "replace_header_footer":
+        try:
+            from lexitool.header_footer_ops import replace_header_footer_text
+
+            old_text = args.get("old_text", "")
+            new_text = args.get("new_text", "")
+            if not old_text:
+                return tool_error("'old_text' is required for replace_header_footer")
+            res = replace_header_footer_text(
+                path,
+                old_text,
+                new_text,
+                kind=args.get("kind", "all"),
+                ref_type=args.get("ref_type"),
+                part_path=args.get("part_path"),
+                output=path,
+            )
+            res["op"] = op
+            res["tc_mode"] = "direct-xml"
+            return tool_result(res)
+        except Exception as e:
+            return tool_error(str(e))
+
     if op in ("replace_table_cell", "replace_table_cells",
               "insert_table_rows", "insert_paragraphs",
               "create_table"):

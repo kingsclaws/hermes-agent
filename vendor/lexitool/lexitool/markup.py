@@ -908,7 +908,8 @@ def _export_headers_footers(path: str) -> str:
                         continue
                     seen.add(marker)
                     textbox = " textbox" if item.get("has_textbox") else ""
-                    lines.append(f"§HF{idx} [{kind}:{ref_type}{textbox}] {text}")
+                    part_label = f" part={part}" if part else ""
+                    lines.append(f"§HF{idx} [{kind}:{ref_type}{part_label}{textbox}] {text}")
 
     if not lines and parts:
         lines.append("[headers-footers]")
@@ -917,7 +918,7 @@ def _export_headers_footers(path: str) -> str:
             if not text:
                 continue
             textbox = " textbox" if info.get("has_textbox") else ""
-            lines.append(f"§HF [{info.get('kind', 'part')}:{part}{textbox}] {text}")
+            lines.append(f"§HF [{info.get('kind', 'part')}:unknown part={part}{textbox}] {text}")
 
     return "\n".join(lines) if lines else "(no headers or footers found)"
 

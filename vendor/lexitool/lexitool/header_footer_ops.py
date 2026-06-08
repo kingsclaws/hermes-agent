@@ -16,6 +16,9 @@ from __future__ import annotations
 
 import re
 import zipfile
+import os
+import shutil
+import tempfile
 from pathlib import Path
 
 from lxml import etree
@@ -59,6 +62,20 @@ def _extract_text_from_xml(xml_bytes: bytes) -> str:
 def _has_textbox(xml_bytes: bytes) -> bool:
     root = etree.fromstring(xml_bytes)
     return root.find(f".//{_wqn('txbxContent')}") is not None
+
+
+def _replace_text_in_xml(xml_bytes: bytes, find: str, replace: str) -> tuple[bytes, int]:
+    """Replace text inside w:t nodes while preserving the rest of the part XML."""
+    root = etree.fromstring(xml_bytes)
+    count = 0
+    for el in root.iter():
+        if el.tag != _wqn("t") or not el.text or find not in el.text:
+            continue
+        el.text = el.text.replace(find, replace)
+        if " " in el.text:
+            el.set(_XML_SPACE, "preserve")
+        count += 1
+    return etree.tostring(root, xml_declaration=True, encoding="UTF-8", standalone="yes"), count
 
 
 # ── Part discovery via zipfile ────────────────────────────────────────────── #
@@ -212,6 +229,109 @@ def audit_all(docx_path: str) -> dict:
             ftr["has_textbox"] = p["has_textbox"] if p else False
 
     return {"parts": parts, "sections": section_map}
+
+
+def replace_header_footer_text(
+    docx_path: str,
+    find: str,
+    replace: str,
+    *,
+    kind: str = "all",
+    ref_type: str | None = None,
+    part_path: str | None = None,
+    output: str | None = None,
+) -> dict:
+    """Replace text in Word header/footer parts.
+
+    Args:
+        docx_path: Source .docx path.
+        find: Text to find inside w:t nodes.
+        replace: Replacement text.
+        kind: "header", "footer", or "all".
+        ref_type: Optional section reference type: default, first, even, unknown.
+        part_path: Optional exact OPC path such as "word/header1.xml".
+        output: Output path. Defaults to overwriting docx_path.
+
+    Returns:
+        Dict with replacement counts per OPC part.
+    """
+    if not find:
+        raise ValueError("find text is required")
+    kind = (kind or "all").strip().lower()
+    if kind not in {"all", "header", "footer"}:
+        raise ValueError("kind must be all, header, or footer")
+    wanted_part = (part_path or "").strip().lstrip("/")
+    wanted_ref_type = (ref_type or "").strip().lower()
+
+    with zipfile.ZipFile(docx_path, "r") as zf:
+        members = {info.filename: zf.read(info.filename) for info in zf.infolist()}
+        parts = _discover_parts(zf)
+        section_map = _parse_section_map(zf)
+
+    part_ref_types: dict[str, set[str]] = {}
+    for sec in section_map:
+        for key in ("headers", "footers"):
+            for ref in sec.get(key, []):
+                target = str(ref.get("part") or "")
+                full_path = f"word/{target}" if target and not target.startswith("word/") else target
+                if not full_path:
+                    continue
+                part_ref_types.setdefault(full_path, set()).add(str(ref.get("type") or "default").lower())
+
+    changed_parts: list[dict] = []
+    total = 0
+    for name, info in sorted(parts.items()):
+        part_kind = str(info.get("kind") or "")
+        if kind != "all" and part_kind != kind:
+            continue
+        if wanted_part and name != wanted_part:
+            continue
+        if wanted_ref_type:
+            ref_types = part_ref_types.get(name) or {"unknown"}
+            if wanted_ref_type not in ref_types:
+                continue
+        new_xml, count = _replace_text_in_xml(members[name], find, replace)
+        if count:
+            members[name] = new_xml
+            total += count
+            changed_parts.append({
+                "part_path": name,
+                "kind": part_kind,
+                "ref_types": sorted(part_ref_types.get(name) or ["unknown"]),
+                "count": count,
+            })
+
+    out_path = output or docx_path
+    if total:
+        fd, tmp = tempfile.mkstemp(
+            prefix=Path(out_path).stem + ".",
+            suffix=Path(out_path).suffix or ".docx",
+            dir=str(Path(out_path).parent),
+        )
+        os.close(fd)
+        try:
+            with zipfile.ZipFile(tmp, "w", compression=zipfile.ZIP_DEFLATED) as zout:
+                for name, data in members.items():
+                    zout.writestr(name, data)
+            shutil.move(tmp, out_path)
+        except Exception:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
+
+    return {
+        "ok": True,
+        "path": out_path,
+        "kind": kind,
+        "ref_type": wanted_ref_type or None,
+        "part_path": wanted_part or None,
+        "find": find,
+        "replace": replace,
+        "total_replacements": total,
+        "changed_parts": changed_parts,
+    }
 
 
 def detect_stale_entities(docx_path: str) -> list[dict]:
