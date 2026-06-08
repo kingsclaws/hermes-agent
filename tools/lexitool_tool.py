@@ -206,7 +206,8 @@ LEX_EDIT_SCHEMA = {
         "- set_table_cells: batch set cells by stable row/column coordinates\n"
         "- insert_table_rows: copy template_row, fill cell text from rows_data\n\n"
         "## Block-level ops\n"
-        "- insert_paragraphs: insert paras with optional page breaks after after_para\n\n"
+        "- insert_paragraphs: insert paras with optional page breaks after after_para\n"
+        "- create_table: insert a new table after a lex_read § paragraph\n\n"
         "## Header/footer ops\n"
         "- replace_header_footer: replace text in Word header/footer parts. "
         "Use lex_read(mode='headers_footers') first and pass kind/ref_type/part_path "
@@ -337,7 +338,11 @@ LEX_EDIT_SCHEMA = {
             },
             "after_para": {
                 "type": "integer",
-                "description": "0-indexed paragraph number to insert after. For insert_paragraphs and create_table.",
+                "description": (
+                    "Anchor paragraph. For create_table, pass lex_read's visible "
+                    "§N paragraph number (1-indexed; 0 is accepted as legacy §1). "
+                    "For insert_paragraphs, existing behavior is 0-indexed."
+                ),
             },
             "paragraphs": {
                 "type": "array",

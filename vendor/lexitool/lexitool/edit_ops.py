@@ -966,7 +966,8 @@ def create_table(docx_path: str, after_para: int,
     """
     Create a new table and insert it after the specified paragraph.
 
-    after_para: 0-indexed paragraph number to insert after
+    after_para: lex_read paragraph number (§N, 1-indexed) to insert after.
+                0 is accepted as a legacy alias for §1.
     headers: column header texts
     rows: list of rows, each row is a list of cell text strings
     """
@@ -980,12 +981,29 @@ def create_table(docx_path: str, after_para: int,
         return EditResult(ok=False, message="Document body not found", path=docx_path)
 
     all_paras = [el for el in body if el.tag == f"{W}p"]
-    if after_para < 0 or after_para >= len(all_paras):
+    if not all_paras:
+        return EditResult(ok=False, message="No body paragraphs found", path=docx_path)
+
+    try:
+        after_para_int = int(after_para)
+    except (TypeError, ValueError):
+        return EditResult(ok=False, message=f"Invalid after_para: {after_para!r}", path=docx_path)
+
+    if after_para_int == 0:
+        # Backward compatibility for the previous 0-indexed API. New callers
+        # should pass lex_read's visible §N number, e.g. after_para=12.
+        anchor_idx = 0
+        visible_after_para = 1
+    else:
+        anchor_idx = after_para_int - 1
+        visible_after_para = after_para_int
+
+    if anchor_idx < 0 or anchor_idx >= len(all_paras):
         return EditResult(ok=False,
-                          message=f"Paragraph {after_para} out of range (0-{len(all_paras)-1})",
+                          message=f"Paragraph §{after_para_int} out of range (§1-§{len(all_paras)})",
                           path=docx_path)
 
-    anchor = all_paras[after_para]
+    anchor = all_paras[anchor_idx]
     ncols = max(len(headers), max((len(r) for r in rows), default=0))
     if ncols == 0:
         return EditResult(ok=False, message="No columns to create", path=docx_path)
@@ -1030,14 +1048,17 @@ def create_table(docx_path: str, after_para: int,
         for _ in range(ncols - len(row)):
             tr.append(_make_cell(""))
 
-    # Insert after anchor paragraph
-    anchor.addnext(tbl)
+    # Insert directly in the body so the table lands before sectPr and exactly
+    # after the requested lex_read paragraph, even in documents with sections.
+    body_children = list(body)
+    body.insert(body_children.index(anchor) + 1, tbl)
 
     _write_docx(docx_path, etree.tostring(root, xml_declaration=True,
                                           encoding="UTF-8", standalone=True),
                 other, output=output)
+    row_count = (1 if headers else 0) + len(rows)
     return EditResult(ok=True,
-                      message=f"Created table ({ncols} cols, {len(headers) and 1 + len(rows)} rows) after paragraph {after_para}",
+                      message=f"Created table ({ncols} cols, {row_count} rows) after §{visible_after_para}",
                       path=output or docx_path)
 
 
