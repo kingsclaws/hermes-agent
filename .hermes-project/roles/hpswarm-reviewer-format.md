@@ -37,19 +37,28 @@
 
 ## 工作流
 
+### 收到指定段落范围时（来自 lex_proofread 或 Coordinator）
+
+你已经拿到了精确的审阅范围（如 "审阅 §48-§347"），不要再次拆分。
+
+```
+1. lex_read(path, paras=[start-end], show_format=true) → 阅读你负责的段落范围
+2. 按六维清单逐项审阅（在审阅范围内逐项检查）
+3. 明确格式问题直接修复（lex_format/lex_list/lex_section）
+4. 返回审阅报告
+```
+
+### 收到全文格式审阅任务时
+
 ```
 1. lex_stats(path) → 字体/样式/TC 概览
 2. lex_read(path, mode="structure") → 结构层级
-3. 确认 Drafter 已完成验证协议
-   → 检查是否附带了"验证通过"标记和修改段落列表
-   → 如果 Drafter 未提供验证报告，退回要求补做
-4. （文档 > 30 段时）分段审阅：
-   a. 按 ≤15 段/chunk 分割，chunk 间重叠 1 段
-   b. 逐 chunk: lex_read(path, paras=[start-end], show_format=true)
-   c. 逐 chunk 检查格式标记的一致性
-5. 按六维清单逐项审阅（在分段审阅的每个 chunk 中逐项检查）
-6. 明确问题直接修复（lex_format/lex_list/lex_section）
-7. 返回审阅报告（如为分段审阅，附 chunk 格式报告）
+3. 如果文档 > 200 段：告知 Coordinator 使用 lex_proofread(review_type="format")
+   代替手动审阅。你不应该手动拆分超大文档。
+4. 如果文档 ≤ 200 段：
+   a. 按六维清单逐项审阅
+   b. 明确问题直接修复
+5. 返回审阅报告
 ```
 
 ## 输出格式
@@ -71,9 +80,9 @@
 
 ## Iron Rules
 - 审阅前确认 Drafter 已完成强制验证协议（检查验证通过标记）
-- 文档 > 30 段时，必须分段审阅（≤15 段/chunk，chunk 间重叠 1 段），不可跳段
-- 所有分段阅读取必须使用 `show_format=true`，不能使用纯文本模式
-- 分段审阅时逐 chunk 检查格式一致性（chunk 间字体/字号/间距/缩进一致）
+- 收到指定段落范围（goal 包含 "Read your section with lex_read(path=..., paras=[...])"）时，只审阅该范围，不要再次拆分
+- 收到全文审阅且文档 > 200 段时，告知 Coordinator 使用 `lex_proofread(review_type="format")`，不要手动拆分审阅
+- 所有段落读取必须使用 `show_format=true`，不能使用纯文本模式
 - 只审阅格式，不管内容
 - 逐项检查，不可跳项
 - 明确格式问题可以自行修复

@@ -56,7 +56,12 @@ def _write_docx(path: str, doc_xml: bytes, other: dict[str, bytes],
 # ── Clause-index building ─────────────────────────────────────────────────────
 
 def _build_clause_index(paras: list) -> dict[str, int]:
-    """Build clause-number → paragraph-index map from AOHead styles."""
+    """Build clause-number → paragraph-index map from AOHead styles.
+
+    Falls back to _build_broad_clause_index when no AOHead styles are found,
+    ensuring coverage for documents that use standard Heading styles or
+    manually-formatted headings (inferred).
+    """
     art = sec1 = sec2 = sec3 = 0
     clause_to_pidx = {}
 
@@ -92,7 +97,87 @@ def _build_clause_index(paras: list) -> dict[str, int]:
             cn += f".{sec3}"
         clause_to_pidx[cn] = pi
 
+    if not clause_to_pidx:
+        clause_to_pidx = _build_broad_clause_index(paras)
+
     return clause_to_pidx
+
+
+# English section heading patterns — detected at paragraph start
+_SECTION_HEAD_RE = re.compile(
+    r'^\s*(?:Section|SECTION|Clause|CLAUSE|Article|ARTICLE)\s+(\d+(?:\.\d+)*)\b',
+)
+# Mixed: "第1条 (Section 1)" or "Article 1 第1条"
+_MIXED_HEAD_RE = re.compile(
+    r'^\s*(?:Section|Article|Clause)\s+(\d+(?:\.\d+)*)\s+第\1条',
+)
+
+
+def _is_inferred_heading(p) -> bool:
+    """Check if a paragraph looks like a heading based on formatting heuristics.
+
+    Mirrors markup.py's _infer_heading logic: bold first run, no first-line
+    indent, short text. Works on raw lxml paragraph elements.
+    """
+    pPr = p.find(f"{W}pPr")
+
+    # Never override explicit heading style or outline level
+    if pPr is not None:
+        pStyle = pPr.find(f"{W}pStyle")
+        if pStyle is not None:
+            style_id = (pStyle.get(f"{W}val", "") or "").lower()
+            if "heading" in style_id or "标题" in style_id or style_id.startswith("toc"):
+                return False
+        if pPr.find(f"{W}outlineLvl") is not None:
+            return False
+        numPr = pPr.find(f"{W}numPr")
+        if numPr is not None and numPr.find(f"{W}numId") is not None:
+            return False
+
+    # Find first text-bearing run and check for bold
+    first_text_run = None
+    for child in p:
+        if child.tag == f"{W}r":
+            if child.find(f"{W}t") is not None:
+                first_text_run = child
+                break
+        elif child.tag in (f"{W}ins", f"{W}del"):
+            for r in child.findall(f"{W}r"):
+                if r.find(f"{W}t") is not None:
+                    first_text_run = r
+                    break
+            if first_text_run is not None:
+                break
+
+    if first_text_run is None:
+        return False
+
+    rPr = first_text_run.find(f"{W}rPr")
+    if rPr is None:
+        return False
+    if rPr.find(f"{W}b") is None:
+        return False  # Must be bold
+
+    # Check for no first-line indent
+    if pPr is not None:
+        ind = pPr.find(f"{W}ind")
+        if ind is not None:
+            first_line = ind.get(f"{W}firstLine")
+            if first_line is not None:
+                try:
+                    if int(first_line) > 0:
+                        return False
+                except (ValueError, TypeError):
+                    pass
+
+    # Length check: short text is a heading signal
+    text_len = len("".join(
+        (t.text or "") for t in p.iter(f"{W}t")
+    ).strip())
+    if text_len > 80:
+        return False
+
+    return True
 
 
 # ── Field-code flattening ─────────────────────────────────────────────────────
@@ -975,12 +1060,53 @@ def _build_broad_clause_index(paras: list) -> dict[str, int]:
 
     # Pass 2: if no heading styles found, detect clauses from paragraph text
     if not clause_to_pidx:
-        manual_clause = re.compile(r'^第(\d+(?:\.\d+)*)条')
+        # Match both Arabic-digit and Chinese-numeral clause headings:
+        #   第一条, 第十二条, 第3.1条, 第5.2.3条
+        _MANUAL_CLAUSE_RE = re.compile(
+            r'^第([\d一二三四五六七八九十百]+(?:\.\d+)*)条'
+        )
         for pi, p in enumerate(paras):
             full_text = "".join(txt for _, txt in _get_direct_runs(p))
-            m = manual_clause.match(full_text.strip())
+            m = _MANUAL_CLAUSE_RE.match(full_text.strip())
             if m:
-                cn = m.group(1)
+                raw_cn = m.group(1)
+                cn = _cn_to_digit(raw_cn)  # Convert 一 → 1, 十二 → 12
+                if cn not in clause_to_pidx:
+                    clause_to_pidx[cn] = pi
+
+    # Pass 3: supplement with English section headings and inferred
+    # (bold + short) headings. Always runs to catch headings that Pass 1/2
+    # missed — mixed CN/EN docs, Section/Article patterns, pure inferred.
+    _MANUAL_CLAUSE_RE = re.compile(
+        r'^第([\d一二三四五六七八九十百]+(?:\.\d+)*)条'
+    )
+    for pi, p in enumerate(paras):
+        full_text = "".join(txt for _, txt in _get_direct_runs(p))
+        if not full_text.strip():
+            continue
+        # Try English section heading patterns
+        m = _SECTION_HEAD_RE.match(full_text.strip())
+        if m:
+            cn = m.group(1)
+            if cn not in clause_to_pidx:
+                clause_to_pidx[cn] = pi
+            continue
+        # Try Chinese clause headings (numeric + Chinese numeral)
+        m2 = _MANUAL_CLAUSE_RE.match(full_text.strip())
+        if m2:
+            cn = _cn_to_digit(m2.group(1))
+            if cn not in clause_to_pidx:
+                clause_to_pidx[cn] = pi
+            continue
+        # Try inferred headings (bold, no indent, short text)
+        if _is_inferred_heading(p):
+            # Extract leading number if present (both Arabic and Chinese)
+            num_match = re.match(
+                r'^[\s]*([\d一二三四五六七八九十百]+(?:\.\d+)*)[\.\s、)]',
+                full_text.strip()
+            )
+            if num_match:
+                cn = _cn_to_digit(num_match.group(1))
                 if cn not in clause_to_pidx:
                     clause_to_pidx[cn] = pi
 

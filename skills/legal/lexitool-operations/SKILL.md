@@ -81,11 +81,21 @@ For project intake:
 For DOCX revision:
 
 1. Copy the template or source document first if editing creates a deliverable.
-2. Use `lex_read(mode="structure")` to understand layout.
+2. **Run convention analysis** before editing an existing document:
+   - `lex_ref(path, op="term_format_audit")` — extract defined terms with their exact formatting (bold/italic/underline/caps/font)
+   - `lex_read(mode="structure")` — understand document structure and numbering scheme
+   - Sample-read 3-4 paragraphs of the same clause type with `lex_read(paras=[...], show_format=true)`
+   - Identify: defined term formatting convention, cross-reference convention (第X条 vs Section X vs Clause X), numbering scheme, drafting voice (shall/may vs 应当/可以)
 3. Use targeted `lex_read(paras=[...])` before each edit.
 4. Use `lex_edit` with Track Changes for atomic modifications.
 5. Use `lex_ref` when cross-references are affected.
-6. Verify with `lex_read`, `lex_stats`, and relevant audits.
+6. Execute the "Content Integration Verification" checklist:
+   - Defined term format matches host convention
+   - New terms exist in host's definition clause
+   - Cross-reference convention matches host
+   - Drafting voice and sentence structure consistent
+   - New clause reads as organically integrated
+7. Verify with `lex_read`, `lex_stats`, and relevant audits.
 
 For complex legal workflows:
 

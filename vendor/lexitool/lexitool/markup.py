@@ -200,23 +200,154 @@ def _extract_para_markers(pPr) -> list[str]:
     return markers
 
 
+def _infer_heading(para_el, pPr) -> str | None:
+    """Detect paragraphs that look like headings but lack Word heading styles.
+
+    Many legal templates format headings manually (bold + larger font +
+    centered/no indent) instead of using Heading 1/2 styles. This heuristic
+    marks such paragraphs as [heading:inferred] so AI agents can recognize
+    the document structure.
+
+    Only fires when the paragraph has NO explicit outline level or heading
+    style. Short paragraphs (< 60 chars) with bold + no first-line indent
+    are strong heading candidates.
+    """
+    if pPr is None:
+        pPr = para_el.find(f"{W}pPr")
+    # Allow None pPr — default formatting from Normal style; we'll check
+    # run-level bold/size heuristics instead of requiring pPr.
+
+    # Never override explicit outline level or heading style
+    if pPr is not None:
+        pStyle = pPr.find(f"{W}pStyle")
+        if pStyle is not None:
+            style_id = (pStyle.get(f"{W}val", "") or "").lower()
+            if "heading" in style_id or "标题" in style_id or style_id.startswith("toc"):
+                return None
+        if pPr.find(f"{W}outlineLvl") is not None:
+            return None
+
+        # Check for numbering — numbered paragraphs are content, not headings
+        numPr = pPr.find(f"{W}numPr")
+        if numPr is not None and numPr.find(f"{W}numId") is not None:
+            return None
+
+    # Find the first text-bearing run
+    first_text_run = None
+    for child in para_el:
+        if child.tag == f"{W}r":
+            if child.find(f"{W}t") is not None:
+                first_text_run = child
+                break
+        elif child.tag in (f"{W}ins", f"{W}del"):
+            for r in child.findall(f"{W}r"):
+                if r.find(f"{W}t") is not None:
+                    first_text_run = r
+                    break
+            if first_text_run is not None:
+                break
+
+    if first_text_run is None:
+        return None
+
+    rPr = first_text_run.find(f"{W}rPr")
+    if rPr is None:
+        return None
+
+    b = rPr.find(f"{W}b")
+    if b is None:
+        return None  # Must be bold
+
+    # Check for no paragraph indentation
+    if pPr is not None:
+        ind = pPr.find(f"{W}ind")
+        if ind is not None:
+            first_line = ind.get(f"{W}firstLine")
+            if first_line is not None:
+                try:
+                    if int(first_line) > 0:
+                        return None  # Has first-line indent → body text
+                except (ValueError, TypeError):
+                    pass
+
+        # Check center alignment (strong heading signal)
+        jc = pPr.find(f"{W}jc")
+        is_centered = jc is not None and jc.get(f"{W}val", "") == "center"
+    else:
+        is_centered = False
+
+    # Aggregate paragraph text length
+    text_len = len("".join(
+        (t.text or "") for t in para_el.iter(f"{W}t")
+    ).strip())
+
+    if text_len == 0 or text_len > 80:
+        return None  # Too short or too long for a heading
+
+    # Check if font size is >= body text size
+    sz = rPr.find(f"{W}sz")
+    szCs = rPr.find(f"{W}szCs")
+    sz_val = None
+    if sz is not None:
+        try:
+            sz_val = int(sz.get(f"{W}val", "0")) / 2  # half-points → pt
+        except (ValueError, TypeError):
+            pass
+    if sz_val is None and szCs is not None:
+        try:
+            sz_val = int(szCs.get(f"{W}val", "0")) / 2
+        except (ValueError, TypeError):
+            pass
+
+    if sz_val is not None and sz_val < 11:
+        return None  # Too small for a heading font
+
+    if is_centered and text_len <= 40:
+        return "[heading:inferred,l1]"
+
+    # Short bold text without indent — likely a heading
+    if text_len <= 50:
+        return "[heading:inferred,l2]"
+
+    return "[heading:inferred,l3]"
+
+
 def export_paragraphs(
     doc_path: str,
     para_indices: list[int] | None = None,
-    show_tc: bool = True,
+    show_tc: bool | str = True,
     show_format: bool = True,
+    include_comments: bool = False,
+    comment_map: dict[int, list[str]] | None = None,
 ) -> str:
     """Read a .docx file and return annotated text with inline format markup.
 
     Args:
         doc_path: Path to .docx file.
         para_indices: 1-indexed paragraph numbers to export (None = all).
-        show_tc: Include [ins]/[del] markup around tracked changes.
+        show_tc: Track Changes mode.
+            True or "all" — show [ins]/[del] markup (default).
+            "final" — accept all revisions (show insertions, hide deletions).
+            "original" — reject all revisions (show deletions, hide insertions).
+            False — no Track Changes markup at all.
         show_format: Include format tags ([b], [font:...], etc.).
+        include_comments: Append inline [comment:author text] markers.
+        comment_map: Pre-built dict mapping paragraph index to list of comment texts.
+            If None and include_comments is True, comments are parsed from the docx.
 
     Returns:
         Annotated text with §-prefixed paragraph markers.
     """
+    # Normalize show_tc parameter
+    tc_mode = "all"
+    if show_tc is False:
+        tc_mode = "none"
+    elif show_tc is True:
+        tc_mode = "all"
+    elif isinstance(show_tc, str):
+        tc_mode = show_tc.lower()
+        if tc_mode not in ("all", "final", "original", "none"):
+            tc_mode = "all"
     with zipfile.ZipFile(doc_path, "r") as zf:
         doc_xml = zf.read("word/document.xml")
 
@@ -234,23 +365,41 @@ def export_paragraphs(
     para_count = 0
     # Track bookmark starts/ends across paragraphs
     open_bookmarks: list[str] = []
+    # Body text stats for heading inference
+    first_para_runs: list[dict] = []
+    body_font_sz_hints: dict[str, float] = {}
+    # Collect paragraph positions (element index → paragraph number)
+    para_positions: dict[int, int] = {}  # lxml element position → 1-based para num
 
     for child in body:
-        if child.tag == f"{W}p":
+        # Unwrap sdtContent containers that may wrap tables or paragraphs
+        actual = child
+        if child.tag in (f"{W}sdt", f"{W}customXml"):
+            sdt_content = child.find(f"{W}sdtContent")
+            if sdt_content is not None and len(sdt_content) == 1:
+                actual = sdt_content[0]
+
+        if actual.tag == f"{W}p":
             para_count += 1
             if para_set is not None and para_count not in para_set:
                 continue
 
+            # Track para position for comment anchoring
+            para_positions[para_count] = para_count
+
             line = _export_paragraph(
-                child, para_count, show_tc, show_format, open_bookmarks
+                actual, para_count, tc_mode, show_format, open_bookmarks,
             )
+            if include_comments and comment_map and para_count in comment_map:
+                for c in comment_map[para_count]:
+                    line += f" [comment:{c}]"
             lines.append(line)
 
-        elif child.tag == f"{W}tbl":
+        elif actual.tag == f"{W}tbl":
             # Include table when reading all paragraphs, or when it falls
             # within (or immediately before) the requested paragraph range.
             if para_set is None or (para_min - 1 <= para_count <= para_max):
-                table_text = _export_table(child, show_tc, show_format)
+                table_text = _export_table(actual, tc_mode, show_format)
                 if table_text:
                     lines.append(table_text)
 
@@ -258,7 +407,7 @@ def export_paragraphs(
 
 
 def _export_paragraph(
-    para_el, para_num: int, show_tc: bool, show_format: bool,
+    para_el, para_num: int, tc_mode: str, show_format: bool,
     open_bookmarks: list[str],
 ) -> str:
     """Export a single paragraph to annotated text."""
@@ -269,11 +418,18 @@ def _export_paragraph(
     # Paragraph-level markers
     if show_format:
         markers = _extract_para_markers(pPr)
+        # Heading inference: detect manual headings where Word style is
+        # not used but visual formatting clearly indicates a heading.
+        if not any(m.startswith("[outline:") or m.startswith("[heading:")
+                   for m in markers):
+            heading_marker = _infer_heading(para_el, pPr)
+            if heading_marker:
+                markers.insert(0, heading_marker)
         for m in markers:
             parts.append(m)
 
     # Collect runs with their format context
-    _export_runs(para_el, parts, show_tc, show_format, open_bookmarks)
+    _export_runs(para_el, parts, tc_mode, show_format, open_bookmarks)
 
     # Detect breaks at paragraph level
     if show_format:
@@ -283,12 +439,12 @@ def _export_paragraph(
 
 
 def _export_runs(
-    para_el, parts: list[str], show_tc: bool, show_format: bool,
+    para_el, parts: list[str], tc_mode: str, show_format: bool,
     open_bookmarks: list[str],
 ) -> None:
     """Process all runs, bookmarks, and TC wrappers in a paragraph."""
     # Build a flat list of "segments" with their TC context
-    segments = _collect_segments(para_el)
+    segments = _collect_segments(para_el, tc_mode)
 
     current_fmt: dict[str, Any] = {}
     current_tc: str | None = None
@@ -320,8 +476,11 @@ def _export_runs(
         if has_field_marker:
             continue
 
+        if not seg.get("text"):
+            continue
+
         # Handle TC state changes — need to track which tag is open
-        if show_tc:
+        if tc_mode == "all":
             seg_tc = seg.get("tc")
             if seg_tc != current_tc:
                 if current_tc:
@@ -329,9 +488,6 @@ def _export_runs(
                 if seg_tc:
                     parts.append(f"[{seg_tc}]")
                 current_tc = seg_tc
-
-        if not seg.get("text"):
-            continue
 
         if show_format:
             fmt = seg["format"]
@@ -378,11 +534,17 @@ def _export_runs(
         parts.append(f"[/{current_tc}]")
 
 
-def _collect_segments(para_el) -> list[dict]:
+def _collect_segments(para_el, tc_mode: str = "all") -> list[dict]:
     """Walk paragraph children and collect text segments with TC/format context.
 
     Also detects Word field codes (REF, PAGEREF, NOTEREF, STYLEREF) and
     emits [ref:name], [page-ref:name], etc. markers.
+
+    tc_mode controls how Track Changes content is collected:
+      "all"      — show all TC content with [ins]/[del] markers (default)
+      "final"    — accept all revisions: drop deletions, show insertions as plain
+      "original" — reject all revisions: drop insertions, show deletions as plain
+      "none"     — strip all TC markers (plain text only)
     """
     segments: list[dict] = []
     bm_id_to_name: dict[str, str] = {}
@@ -502,7 +664,58 @@ def _collect_segments(para_el) -> list[dict]:
             else:
                 segments.append({"text": "[line-break]", "format": {}, "tc": None})
 
+        # Recurse into wrapper elements that can contain w:r, w:ins, w:del
+        elif child.tag in _TC_WRAPPER_TAGS:
+            _collect_segments_from_wrapper(child, segments)
+
+    # Apply TC mode filtering
+    if tc_mode == "final":
+        segments = [s for s in segments if s.get("tc") != "del"]
+        for s in segments:
+            if s.get("tc") == "ins":
+                s["tc"] = None
+    elif tc_mode == "original":
+        segments = [s for s in segments if s.get("tc") != "ins"]
+        for s in segments:
+            if s.get("tc") == "del":
+                s["tc"] = None
+    elif tc_mode == "none":
+        for s in segments:
+            s["tc"] = None
+
     return segments
+
+
+_TC_WRAPPER_TAGS = {
+    f"{W}smartTag", f"{W}moveFrom", f"{W}moveTo",
+    f"{W}customXmlMoveFromRangeStart", f"{W}customXmlMoveToRangeStart",
+    f"{W}sdt",
+}
+
+
+def _collect_segments_from_wrapper(wrapper_el, segments: list[dict]) -> None:
+    """Recurse into wrapper elements that may contain w:r, w:del, or w:ins."""
+    children = wrapper_el
+    # w:sdt wraps content in w:sdtContent
+    if wrapper_el.tag == f"{W}sdt":
+        sdt_content = wrapper_el.find(f"{W}sdtContent")
+        if sdt_content is not None:
+            children = sdt_content
+
+    for child in children:
+        if child.tag == f"{W}r":
+            seg = _segment_from_run(child)
+            segments.append(seg)
+        elif child.tag == f"{W}ins":
+            for r in child.findall(f"{W}r"):
+                seg = _segment_from_run(r)
+                seg["tc"] = "ins"
+                segments.append(seg)
+        elif child.tag == f"{W}del":
+            for r in child.findall(f"{W}r"):
+                seg = _segment_from_run(r, is_del=True)
+                seg["tc"] = "del"
+                segments.append(seg)
 
 
 def _field_type_from_instr(instr: str) -> str:
@@ -531,13 +744,18 @@ def _segment_from_run(r_el, is_del: bool = False) -> dict:
 
     text_tag = f"{W}delText" if is_del else f"{W}t"
     text_parts = []
-    for child in r_el:
+    # Use iter() not direct children — w:delText may be wrapped inside
+    # additional elements in some OOXML variants.
+    for child in r_el.iter():
         if child.tag == text_tag:
             text_parts.append(child.text or "")
         elif child.tag == f"{W}tab":
             text_parts.append("\t")
         elif child.tag == f"{W}br":
             text_parts.append("\n")
+        # Fallback: some OOXML writers put deleted text in w:t instead of w:delText
+        elif is_del and child.tag == f"{W}t" and text_tag != f"{W}t":
+            text_parts.append(child.text or "")
 
     return {"text": "".join(text_parts), "format": fmt, "tc": None}
 
@@ -560,35 +778,155 @@ def _export_breaks(para_el, parts: list[str]) -> None:
                 parts.append("[section-break:continuous]")
 
 
-def _export_table(tbl_el, show_tc: bool, show_format: bool) -> str:
-    """Export a table as a structured text block."""
-    rows = tbl_el.findall(f"{W}tr")
+def _export_table(tbl_el, tc_mode: str, show_format: bool) -> str:
+    """Export a table as a structured text block.
+
+    Handles merged cells (gridSpan / vMerge), sdtContent wrappers around
+    rows and cells, and TC markup inside table cell runs.
+    """
+    # Collect all table rows (use iter() to find rows inside sdtContent wrappers)
+    rows: list = []
+    for el in tbl_el.iter(f"{W}tr"):
+        # Only include rows that are descendants of THIS table, not nested tables
+        parent_tbl = el.getparent()
+        if parent_tbl is not None:
+            # Walk up to find the nearest w:tbl ancestor
+            ancestor = parent_tbl
+            while ancestor is not None and ancestor.tag != f"{W}tbl":
+                ancestor = ancestor.getparent()
+            if ancestor is not tbl_el:
+                continue  # This row belongs to a nested table
+        rows.append(el)
+
     if not rows:
         return ""
 
-    lines = []
+    # First pass: determine max columns per row (accounting for gridSpan)
+    max_cols = 0
+    row_grids: list[list[int]] = []  # gridSpan per cell per row
+
     for row in rows:
-        cells = row.findall(f"{W}tc")
-        cell_texts = []
+        cells = _get_row_cells(row)
+        cell_spans = []
         for cell in cells:
+            span = _get_grid_span(cell)
+            cell_spans.append(span)
+        row_grids.append(cell_spans)
+        total_spans = sum(cell_spans)
+        if total_spans > max_cols:
+            max_cols = total_spans
+
+    # Second pass: emit rows, handling vertical merges with carry-forward
+    prev_row_cells: list[str] = []
+    lines = []
+
+    for row_idx, row in enumerate(rows):
+        cells = _get_row_cells(row)
+        cell_texts: list[str] = []
+        col_idx = 0
+
+        for cell_idx, cell in enumerate(cells):
+            grid_span = row_grids[row_idx][cell_idx] if cell_idx < len(row_grids[row_idx]) else 1
+            vmerge = _get_vmerge(cell)
+
+            # Extract cell text (handle sdtContent wrappers around paragraphs)
             cell_parts = []
-            for p in cell.findall(f"{W}p"):
-                cell_parts.append(_get_para_plain_text(p))
-            cell_texts.append("".join(cell_parts))
+            for p in cell.iter(f"{W}p"):
+                cell_parts.append(_get_para_plain_text(p, tc_mode))
+            text = "".join(cell_parts).strip()
+
+            if vmerge == "continue":
+                # Vertically merged cell — carry forward from previous row
+                if col_idx < len(prev_row_cells):
+                    text = prev_row_cells[col_idx]
+                else:
+                    text = "(merged)"
+
+            # Pad for gridSpan > 1: repeat the cell text (or leave empty for merged)
+            for _ in range(grid_span):
+                cell_texts.append(text)
+                col_idx += 1
+
+        # Pad row to max_cols
+        while len(cell_texts) < max_cols:
+            cell_texts.append("")
+
+        # Store for vertical merge carry-forward
+        prev_row_cells = list(cell_texts)
         lines.append(" | ".join(cell_texts))
 
     result = "[table]\n" + "\n".join(f"  {line}" for line in lines)
     return result
 
 
-def _get_para_plain_text(para_el) -> str:
-    """Get plain text from a paragraph element."""
+def _get_row_cells(row) -> list:
+    """Get w:tc elements from a row, unwrapping sdtContent containers."""
+    cells = []
+    for child in row:
+        if child.tag == f"{W}tc":
+            cells.append(child)
+        elif child.tag == f"{W}sdt":
+            sdt_content = child.find(f"{W}sdtContent")
+            if sdt_content is not None:
+                for inner in sdt_content:
+                    if inner.tag == f"{W}tc":
+                        cells.append(inner)
+    return cells
+
+
+def _get_grid_span(cell) -> int:
+    """Return the gridSpan value for a cell (default 1)."""
+    tcPr = cell.find(f"{W}tcPr")
+    if tcPr is None:
+        return 1
+    grid_span = tcPr.find(f"{W}gridSpan")
+    if grid_span is None:
+        return 1
+    try:
+        return int(grid_span.get(f"{W}val", "1"))
+    except (ValueError, TypeError):
+        return 1
+
+
+def _get_vmerge(cell) -> str | None:
+    """Return the vMerge value for a cell: 'restart', 'continue', or None."""
+    tcPr = cell.find(f"{W}tcPr")
+    if tcPr is None:
+        return None
+    vmerge = tcPr.find(f"{W}vMerge")
+    if vmerge is None:
+        return None
+    val = vmerge.get(f"{W}val", "continue")
+    return val or "continue"
+
+
+def _get_para_plain_text(para_el, tc_mode: str = "none") -> str:
+    """Get plain text from a paragraph element, optionally including TC markup.
+
+    tc_mode:
+      "all"      — show [del] markers for w:delText
+      "final"    — accept deletions: skip w:delText
+      "original" — reject deletions: show w:delText as plain text (no markers)
+      "none"     — no TC markers (default for this function)
+    """
     parts = []
     for child in para_el.iter():
-        if child.tag in (f"{W}t", f"{W}delText"):
+        if child.tag == f"{W}t":
             parts.append(child.text or "")
+        elif child.tag == f"{W}delText":
+            if tc_mode == "all":
+                if child.text:
+                    parts.append(f"[del]{child.text}[/del]")
+            elif tc_mode == "original":
+                parts.append(child.text or "")
+            elif tc_mode == "final":
+                pass  # Skip deleted text in final mode
+            else:
+                parts.append(child.text or "")
         elif child.tag == f"{W}tab":
             parts.append("\t")
+        elif child.tag == f"{W}br":
+            parts.append("\n")
     return "".join(parts)
 
 
@@ -839,13 +1177,91 @@ def _get_para_text(para_el) -> str:
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
+def _load_comment_map(docx_path: str) -> dict[int, list[str]]:
+    """Parse word/comments.xml and return a dict mapping para index → comment texts.
+
+    Comment references in comments.xml use w:annotationRef which points to
+    the paragraph element the comment was attached to. We resolve these to
+    the 1-indexed paragraph number from word/document.xml.
+    """
+    try:
+        with zipfile.ZipFile(docx_path, "r") as zf:
+            if "word/comments.xml" not in zf.namelist():
+                return {}
+            comments_xml = zf.read("word/comments.xml")
+            doc_xml = zf.read("word/document.xml")
+    except Exception:
+        return {}
+
+    # Build an element-address map: lxml element → 1-based para index
+    doc_root = etree.fromstring(doc_xml)
+    doc_body = doc_root.find(f"{W}body")
+    if doc_body is None:
+        return {}
+
+    para_index_map: dict[str, int] = {}  # paraId → 1-based para index
+    para_count = 0
+    for child in doc_body:
+        if child.tag == f"{W}p":
+            para_count += 1
+            para14_id = child.get(f"{W}paraId") or child.get(
+                "{http://schemas.microsoft.com/office/word/2010/wordml}paraId", ""
+            )
+            # Also index by element position as fallback
+            para14_id_fallback = child.get(
+                "{http://schemas.microsoft.com/office/word/2010/wordml}paraId", ""
+            )
+            pid = para14_id or para14_id_fallback
+            if pid:
+                para_index_map[pid] = para_count
+
+    # Parse comments
+    comments_root = etree.fromstring(comments_xml)
+    # Build: author name map
+    people_map: dict[str, str] = {}
+    for cmt in comments_root:
+        if cmt.tag == f"{W}comment":
+            cmt_id = cmt.get(f"{W}id", "")
+            author = cmt.get(f"{W}author", "comment")
+            text_parts = []
+            for r in cmt.iter(f"{W}r"):
+                t = r.find(f"{W}t")
+                if t is not None and t.text:
+                    text_parts.append(t.text)
+            full_text = "".join(text_parts).strip()
+            if not full_text:
+                continue
+
+            # Resolve comment to paragraph via annotationRef or direct child position
+            # OOXML comments extended: w15:paraId attached to paragraphs
+            # Simple approach: comments are usually about the paragraph they're near
+            # We store by comment index for later attachment
+            if cmt_id:
+                people_map[cmt_id] = f"{author}: {full_text}"
+
+    # Map comments to paragraphs via comment reference ranges in document.xml
+    comment_map: dict[int, list[str]] = {}
+    para_num = 0
+    for child in doc_body:
+        if child.tag == f"{W}p":
+            para_num += 1
+            # Check for commentRangeStart elements
+            for crs in child.iter(f"{W}commentRangeStart"):
+                cmt_id = crs.get(f"{W}id", "")
+                if cmt_id and cmt_id in people_map:
+                    comment_map.setdefault(para_num, []).append(people_map[cmt_id])
+
+    return comment_map
+
+
 def lex_read(
     path: str,
     paras: list[int] | None = None,
     mode: str = "full",
-    show_tc: bool = True,
+    show_tc: bool | str = True,
     show_format: bool = True,
     include_headers_footers: bool = True,
+    include_comments: bool = False,
 ) -> str:
     """Read document content with inline format markup.
 
@@ -854,9 +1270,15 @@ def lex_read(
         paras: Specific paragraphs (1-indexed), None = all.
         mode: "full" (all content), "structure" (headings only), "stats" (counts),
             "headers_footers" (only section header/footer mapping).
-        show_tc: Include [ins]/[del] markup around tracked changes.
+        show_tc: Track Changes mode.
+            True or "all" — show [ins]/[del] markup (default).
+            "final" — accept all revisions (show insertions, hide deletions).
+            "original" — reject all revisions (show deletions, hide insertions).
+            False — no Track Changes markup.
         show_format: Include format tags around styled text.
         include_headers_footers: Append header/footer text to full reads.
+        include_comments: Append inline [comment:author: text] markers at
+            paragraph level. Reads word/comments.xml from the .docx.
 
     Returns:
         Annotated text with §-prefixed paragraph markers.
@@ -867,7 +1289,17 @@ def lex_read(
         return _export_stats(path)
     if mode in {"headers_footers", "headers-footers", "hf"}:
         return _export_headers_footers(path)
-    body = export_paragraphs(path, paras, show_tc, show_format)
+
+    # Load comments if requested
+    comment_map = None
+    if include_comments:
+        comment_map = _load_comment_map(path)
+
+    body = export_paragraphs(
+        path, paras, show_tc, show_format,
+        include_comments=include_comments,
+        comment_map=comment_map,
+    )
     if include_headers_footers:
         hf = _export_headers_footers(path)
         if hf.strip() and hf.strip() != "(no headers or footers found)":

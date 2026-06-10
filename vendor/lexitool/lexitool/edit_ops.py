@@ -1062,10 +1062,70 @@ def create_table(docx_path: str, after_para: int,
                       path=output or docx_path)
 
 
+# ── Color-based cleanup ───────────────────────────────────────────────────────
+
+def _run_color(run: etree._Element) -> str | None:
+    rpr = run.find(f"{W}rPr")
+    if rpr is None:
+        return None
+    color = rpr.find(f"{W}color")
+    if color is None:
+        return None
+    val = color.get(f"{W}val")
+    return val.upper() if val else None
+
+
+def _is_blue_run(run: etree._Element, colors: set[str]) -> bool:
+    val = _run_color(run)
+    if not val:
+        return False
+    return val in colors
+
+
+def remove_blue_text(docx_path: str, *,
+                     colors: set[str] | None = None,
+                     output: str | None = None) -> EditResult:
+    """Remove blue runs from document.xml.
+
+    Legal templates often use blue text for internal drafting notes. This
+    operation deletes whole blue runs directly; it does not apply Track Changes
+    because these notes are usually non-client-facing template instructions.
+    """
+    blue_colors = {c.upper().lstrip("#") for c in (colors or {"0000FF", "0000CC", "0563C1", "2F5496"})}
+
+    doc_xml, other = _read_docx(docx_path)
+    root = etree.fromstring(doc_xml)
+
+    removed_runs = 0
+    removed_chars = 0
+    for run in list(root.iter(f"{W}r")):
+        if not _is_blue_run(run, blue_colors):
+            continue
+        text = _get_para_text(run)
+        removed_chars += len(text)
+        parent = run.getparent()
+        if parent is not None:
+            parent.remove(run)
+            removed_runs += 1
+
+    if removed_runs:
+        _write_docx(docx_path, etree.tostring(root, xml_declaration=True,
+                                              encoding="UTF-8", standalone=True),
+                    other, output=output)
+
+    return EditResult(ok=True,
+                      message=f"Removed {removed_runs} blue text runs ({removed_chars} chars)",
+                      path=output or docx_path)
+
+
 # ── Paragraph block insertion ─────────────────────────────────────────────────
 
 def insert_paragraph_block(docx_path: str, after_para: int,
                            paragraphs: list[dict], *,
+                           tc: bool = True,
+                           author: str = "agent",
+                           font: str = "宋体",
+                           sz: float = 22.0,
                            output: str | None = None) -> EditResult:
 	"""
 	Insert a block of paragraphs after a specified paragraph number.
@@ -1074,6 +1134,11 @@ def insert_paragraph_block(docx_path: str, after_para: int,
 	  - text (str, required)
 	  - bold (bool, default False)
 	  - page_break_before (bool, default False): insert a page break before this paragraph
+	  - font (str, optional): override font for this paragraph
+	  - sz (float, optional): override font size in half-points for this paragraph
+
+	When tc=True (default), inserted content is wrapped in w:ins elements
+	for Track Changes visibility.
 	"""
 	if not paragraphs:
 		return EditResult(ok=False, message="No paragraphs provided", path=docx_path)
@@ -1092,26 +1157,57 @@ def insert_paragraph_block(docx_path: str, after_para: int,
 
 	anchor = all_paras[after_para]
 	inserted = 0
+	tc_mode = tc
 
 	for pg in paragraphs:
 		text = pg.get("text", "")
 		bold = pg.get("bold", False)
 		page_break = pg.get("page_break_before", False)
+		pg_font = pg.get("font", font)
+		pg_sz = pg.get("sz", sz)
 
 		new_p = etree.Element(f"{W}p")
 
+		# Paragraph-level run properties: set font / size here so that
+		# individual runs don't need their own rPr, avoiding double-nesting
+		# with the document default style.
+		pPr = etree.SubElement(new_p, f"{W}pPr")
+		pPr_rPr = etree.SubElement(pPr, f"{W}rPr")
+		pPr_rFonts = etree.SubElement(pPr_rPr, f"{W}rFonts")
+		pPr_rFonts.set(f"{W}ascii", pg_font)
+		pPr_rFonts.set(f"{W}hAnsi", pg_font)
+		pPr_rFonts.set(f"{W}eastAsia", pg_font)
+		etree.SubElement(pPr_rPr, f"{W}sz").set(f"{W}val", str(int(pg_sz)))
+		etree.SubElement(pPr_rPr, f"{W}szCs").set(f"{W}val", str(int(pg_sz)))
+
 		if page_break:
-			pPr = etree.SubElement(new_p, f"{W}pPr")
-			sectPr = body.find(f"{W}sectPr")
-			# Add page break before on the paragraph properties
 			pB = etree.SubElement(pPr, f"{W}pageBreakBefore")
-			# Also insert a page break run for broader compatibility
 			r_pb = etree.SubElement(new_p, f"{W}r")
 			br = etree.SubElement(r_pb, f"{W}br")
 			br.set(f"{W}type", "page")
 
 		if text:
-			new_p.append(_make_run(text, bold=bold))
+			# Build the run with only bold in rPr — font / size are
+			# already set at the paragraph level above.
+			run = etree.Element(f"{W}r")
+			if bold:
+				run_rPr = etree.SubElement(run, f"{W}rPr")
+				etree.SubElement(run_rPr, f"{W}b")
+			t_el = etree.SubElement(run, f"{W}t")
+			t_el.set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
+			t_el.text = text
+
+			if tc:
+				tid = _next_tc_id(root)
+				ins = etree.Element(f"{W}ins")
+				ins.set(f"{W}id", str(tid))
+				ins.set(f"{W}author", author)
+				from datetime import datetime
+				ins.set(f"{W}date", datetime.now().strftime("%Y-%m-%dT%H:%M:%SZ"))
+				ins.append(run)
+				new_p.append(ins)
+			else:
+				new_p.append(run)
 
 		anchor.addnext(new_p)
 		anchor = new_p  # subsequent paragraphs go after this one
@@ -1122,4 +1218,5 @@ def insert_paragraph_block(docx_path: str, after_para: int,
 	            other, output=output)
 	return EditResult(ok=True,
 	                  message=f"Inserted {inserted} paragraphs after paragraph {after_para}",
+	                  tc_mode=tc_mode,
 	                  path=output or docx_path)

@@ -81,6 +81,8 @@ LEGAL_ORCHESTRATE_SCHEMA = {
                     "review_translation",
                     "proofread",
                     "deliver",
+                    "template_audit",
+                    "template_fill",
                 ],
                 "description": "Native legal workflow step to run.",
             },
@@ -848,6 +850,57 @@ def _handle_legal_orchestrate(args: dict, **kwargs) -> str:
             task_id=kwargs.get("task_id"),
         )
 
+    if task_type in ("template_audit", "template_fill"):
+        from tools.registry import registry as _registry
+
+        if task_type == "template_audit":
+            if not document_path:
+                return tool_error("template_audit requires document_path.")
+            return _registry.dispatch(
+                "lex_template_audit",
+                {"path": document_path},
+                task_id=kwargs.get("task_id"),
+                parent_agent=parent_agent,
+            )
+
+        if task_type == "template_fill":
+            if not document_path:
+                return tool_error("template_fill requires document_path.")
+            if not instructions:
+                return tool_error("template_fill requires instructions (JSON fill_values).")
+            try:
+                fill_values = json.loads(instructions)
+            except json.JSONDecodeError:
+                return tool_error("template_fill instructions must be valid JSON with 'blanks' and 'checkboxes' keys.")
+            output = str(args.get("output") or "").strip() or document_path
+            manifest_json = str(args.get("manifest_json") or args.get("term_sheet_path") or "").strip()
+            if not manifest_json:
+                manifest_result = _registry.dispatch(
+                    "lex_template_audit",
+                    {"path": document_path},
+                    task_id=kwargs.get("task_id"),
+                    parent_agent=parent_agent,
+                )
+                try:
+                    manifest = json.loads(manifest_result)
+                except (json.JSONDecodeError, TypeError):
+                    manifest_json = manifest_result
+                else:
+                    if isinstance(manifest, dict) and not manifest.get("error"):
+                        manifest_json = json.dumps(manifest, ensure_ascii=False)
+            return _registry.dispatch(
+                "lex_template_fill",
+                {
+                    "path": document_path,
+                    "manifest_json": manifest_json,
+                    "fill_values_json": json.dumps(fill_values, ensure_ascii=False),
+                    "output": output,
+                    "tc": bool(args.get("tc", True)),
+                },
+                task_id=kwargs.get("task_id"),
+                parent_agent=parent_agent,
+            )
+
     if task_type == "plan":
         from tools.registry import registry as _registry
 
@@ -927,6 +980,36 @@ def _handle_legal_orchestrate(args: dict, **kwargs) -> str:
             review_types = ["review_content", "review_format", "review_xref"]
             if term_sheet_path:
                 review_types.append("review_ts")
+
+        # Auto-route large documents to lex_proofread (split-and-parallel review).
+        # Prevents the attention-degradation death march where a single reviewer
+        # receives 2000+ paragraphs and manually chunks them 15 at a time.
+        if document_path:
+            try:
+                para_count = _paragraph_count(document_path)
+                if para_count > 200:
+                    from tools.registry import registry as _registry
+
+                    proofread_types = [
+                        t.replace("review_", "")
+                        for t in review_types
+                        if t.replace("review_", "") in {"content", "format", "ts", "xref", "translation"}
+                    ]
+                    if not proofread_types:
+                        proofread_types = ["content", "format", "xref"]
+                    return _registry.dispatch(
+                        "lex_proofread",
+                        {
+                            "path": document_path,
+                            "review_types": proofread_types,
+                            "chunk_size": int(args.get("chunk_size") or 300),
+                        },
+                        task_id=kwargs.get("task_id"),
+                        parent_agent=parent_agent,
+                    )
+            except Exception:
+                pass  # Fall through to manual review if stats fail
+
         invalid = [name for name in review_types if name not in _REVIEW_TASK_TYPES]
         if invalid:
             return tool_error(f"Unknown review_types: {', '.join(invalid)}")
@@ -1051,6 +1134,106 @@ def _handle_legal_orchestrate(args: dict, **kwargs) -> str:
         if result.get("error"):
             return tool_error(str(result["error"]), data=result)
         return _tool_ok(result)
+
+    # Structured-template auto-detection — intercept before generic draft/revise.
+    # Annotated templates (NAFMII, APLMA, CSRC, etc.) have fill-in blanks,
+    # checkboxes, and colored notes.  The correct workflow has THREE phases:
+    #
+    #   Phase 1 (mechanical): lex_template_fill blanks + checkboxes only
+    #   Phase 2 (intellectual): Drafter reads the partially-filled document,
+    #           drafts custom clauses guided by the remaining annotations,
+    #           verifies every edit — THIS IS WHERE THE REAL WORK HAPPENS
+    #   Phase 3 (cleanup): lex_template_fill deletes annotations + guide + highlights
+    #
+    # Then review proceeds normally.
+    if task_type in ("draft", "revise") and document_path:
+        try:
+            from tools.lex_template_tool import detect_nafmii_template
+
+            naftype = detect_nafmii_template(document_path)
+            if naftype:
+                from tools.registry import registry as _registry
+
+                manifest_json = _registry.dispatch(
+                    "lex_template_audit",
+                    {"path": document_path},
+                    task_id=kwargs.get("task_id"),
+                    parent_agent=parent_agent,
+                )
+                try:
+                    manifest = json.loads(manifest_json)
+                except (json.JSONDecodeError, TypeError):
+                    manifest = {"raw": str(manifest_json)[:2000]}
+
+                return _tool_ok({
+                    "template_detected": True,
+                    "template_type": naftype,
+                    "document_path": document_path,
+                    "manifest": manifest,
+                    "workflow": [
+                        {
+                            "step": 1,
+                            "phase": "mechanical_fill",
+                            "action": "legal_orchestrate(task_type='template_fill', phases=['fill_blanks','select_checkboxes'], ...)",
+                            "what_happens": "替换所有高亮空白为实际值；勾选☑选项。注释和批注保留——Drafter 需要它们作为起草指引。",
+                        },
+                        {
+                            "step": 2,
+                            "phase": "substantive_drafting",
+                            "action": "delegate_task(role='drafter', ...)",
+                            "what_happens": "Drafter 逐段阅读填写后的文档，根据残留的注释/批注起草自定义条款、适配标准条款、处理勾选导致的可选条款增删、交叉引用验证。完成后执行完整强制验证协议。",
+                        },
+                        {
+                            "step": 3,
+                            "phase": "cleanup",
+                            "action": "legal_orchestrate(task_type='template_fill', phases=['delete_colored_notes','delete_annotations','delete_guide','strip_highlights'], ...)",
+                            "what_happens": "Drafter 起草完毕后，删除所有注释、批注、使用说明、高亮——文档变为清洁版。",
+                        },
+                        {
+                            "step": 4,
+                            "phase": "review",
+                            "action": "lex_proofread(path, review_type='all', nafmii_mode=True) or parallel delegate reviewer tasks",
+                            "what_happens": "审阅阶段。NAFMII 模式下启用：前置机械审计（检查残留空白/注释）+ 条款感知分块 + 表格强化审查。",
+                        },
+                    ],
+                    "next_step": (
+                        "标注版模板检测到。请按以下顺序处理：\n"
+                        "1. 提供 blanks 和 checkboxes 的填写值，调用 template_fill（仅 fill 和 checkbox 阶段）\n"
+                        "2. 委派 Drafter 进行实质性起草（文档中的注释/批注是起草指引，此时保留）\n"
+                        "3. Drafter 完成后，调用 template_fill（仅 cleanup 阶段）删除注释\n"
+                        "4. 进入审阅阶段"
+                    ),
+                    "project_dir": str(project_root),
+                    "status": "awaiting_mechanical_fill",
+                    "task_type": task_type,
+                })
+        except Exception:
+            pass  # If detection fails, fall through to normal draft
+
+    # Auto-route large-document draft/revise to iterative drafting.
+    # A single drafter receiving 2000+ paragraphs will suffer attention
+    # degradation.  Iterative drafting feeds 12-paragraph chunks sequentially,
+    # each with pre-read context and readback verification.
+    if task_type in ("draft", "revise") and document_path:
+        try:
+            para_count = _paragraph_count(document_path)
+            if para_count > 40:
+                result = _run_iterative_drafting(
+                    parent_agent=parent_agent,
+                    project_root=project_root,
+                    document_path=document_path,
+                    instructions=instructions,
+                    related_paths=related_paths,
+                    term_sheet_path=term_sheet_path,
+                    chunk_size=int(args.get("chunk_size") or 12),
+                    learning_workflow_type=learning_workflow_type or "document_drafting",
+                    learning_scope=learning_scope,
+                )
+                if result.get("error"):
+                    return tool_error(str(result["error"]), data=result)
+                return _tool_ok(result)
+        except Exception:
+            pass  # Document may not exist yet → fall through to single-child draft
 
     if task_type not in _ROLE_FILE_BY_TASK_TYPE:
         return tool_error(f"Unknown task_type: {task_type}")

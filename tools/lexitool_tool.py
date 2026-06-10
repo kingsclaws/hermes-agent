@@ -85,8 +85,17 @@ LEX_READ_SCHEMA = {
                 "description": "full=all content with markup, structure=headings only, stats=counts only, headers_footers=only Word section header/footer text. Default: full.",
             },
             "show_tc": {
-                "type": "boolean",
-                "description": "Include [ins]/[del] markup for Track Changes. Default: true.",
+                "oneOf": [
+                    {"type": "boolean"},
+                    {"type": "string", "enum": ["all", "final", "original"]},
+                ],
+                "description": (
+                    "Track Changes display mode. "
+                    "true or 'all'=show [ins]/[del] markup (default). "
+                    "'final'=accept all revisions: show insertions as plain text, hide deletions. "
+                    "'original'=reject all revisions: show deletions as plain text, hide insertions. "
+                    "false=no TC markup."
+                ),
             },
             "show_format": {
                 "type": "boolean",
@@ -95,6 +104,14 @@ LEX_READ_SCHEMA = {
             "include_headers_footers": {
                 "type": "boolean",
                 "description": "Append Word section header/footer text to full reads. Default: true.",
+            },
+            "include_comments": {
+                "type": "boolean",
+                "description": (
+                    "Append inline [comment:author: text] markers at paragraph level. "
+                    "Reads word/comments.xml to resolve comment references to their "
+                    "target paragraphs. Default: false."
+                ),
             },
         },
         "required": ["path"],
@@ -105,13 +122,23 @@ LEX_READ_SCHEMA = {
 def _handle_read(args: dict, **kwargs) -> str:
     from lexitool.markup import lex_read
     path = _resolve_path(args["path"])
+    show_tc = args.get("show_tc", True)
+    # Normalize: accept string "final"/"original" or boolean
+    if isinstance(show_tc, str):
+        show_tc = show_tc.lower()
+        if show_tc in ("true", "all"):
+            show_tc = True
+        elif show_tc == "false":
+            show_tc = False
+        # "final", "original" pass through as strings
     result = lex_read(
         path=path,
         paras=args.get("paras"),
         mode=args.get("mode", "full"),
-        show_tc=args.get("show_tc", True),
+        show_tc=show_tc,
         show_format=args.get("show_format", True),
         include_headers_footers=args.get("include_headers_footers", True),
+        include_comments=args.get("include_comments", False),
     )
     return tool_result(result)
 
@@ -207,7 +234,8 @@ LEX_EDIT_SCHEMA = {
         "- insert_table_rows: copy template_row, fill cell text from rows_data\n\n"
         "## Block-level ops\n"
         "- insert_paragraphs: insert paras with optional page breaks after after_para\n"
-        "- create_table: insert a new table after a lex_read § paragraph\n\n"
+        "- create_table: insert a new table after a lex_read § paragraph\n"
+        "- remove_blue_text: remove blue internal-note text runs from the document\n\n"
         "## Header/footer ops\n"
         "- replace_header_footer: replace text in Word header/footer parts. "
         "Use lex_read(mode='headers_footers') first and pass kind/ref_type/part_path "
@@ -231,6 +259,7 @@ LEX_EDIT_SCHEMA = {
                     "set_table_cells",
                     "insert_table_rows", "insert_paragraphs",
                     "create_table", "replace_header_footer",
+                    "remove_blue_text",
                 ],
                 "description": (
                     "Operation type. Paragraph-level: replace, insert, delete, set_format. "
@@ -239,6 +268,7 @@ LEX_EDIT_SCHEMA = {
                     "insert_table_rows (copy template row with cell text), "
                     "create_table (insert a new table with headers and data rows). "
                     "Block-level: insert_paragraphs (insert multiple paras after anchor). "
+                    "Cleanup: remove_blue_text (delete blue internal-note runs). "
                     "Header/footer: replace_header_footer."
                 ),
             },
@@ -382,6 +412,7 @@ def _handle_edit(args: dict, **kwargs) -> str:
         _read_docx, _write_docx,
         replace_table_cell_text, replace_table_cell_text_all,
         set_table_cells_by_position, insert_table_rows, insert_paragraph_block,
+        remove_blue_text,
     )
 
     path = _resolve_path(args["path"])
@@ -420,9 +451,12 @@ def _handle_edit(args: dict, **kwargs) -> str:
 
     if op in ("replace_table_cell", "replace_table_cells", "set_table_cells",
               "insert_table_rows", "insert_paragraphs",
-              "create_table"):
+              "create_table", "remove_blue_text"):
         try:
-            if op == "replace_table_cell":
+            if op == "remove_blue_text":
+                res = remove_blue_text(path, output=path)
+
+            elif op == "replace_table_cell":
                 table_index = args.get("table_index", 0)
                 old_text = args.get("old_text", "")
                 new_text = args.get("new_text", "")
@@ -477,6 +511,8 @@ def _handle_edit(args: dict, **kwargs) -> str:
                     return tool_error("'paragraphs' is required for insert_paragraphs")
                 res = insert_paragraph_block(
                     path, after_para, paragraphs,
+                    tc=tc, author=author,
+                    sz=int(font_size * 2),
                     output=path,
                 )
 
@@ -561,8 +597,18 @@ def _handle_edit(args: dict, **kwargs) -> str:
                 old_text = _get_para_text(para_el)[target.char_start:target.char_end]
             else:
                 old_text = _get_para_text(para_el)
-            if tc:
-                tc_result = tc_replace_first_in_para(para_el, old_text, new_text, tc_id, author)
+
+            # Parse format markers from new_text so that [b], [i], [u]
+            # are converted to actual OOXML formatting instead of being
+            # treated as literal text.
+            new_text_plain, format_segments = _parse_format_markers(new_text)
+            has_fmt = _has_format_markers(new_text)
+
+            # When format markers are present, force TC mode so we can
+            # create multiple runs with different formatting.
+            if tc or has_fmt:
+                tc_result = tc_replace_first_in_para(para_el, old_text, new_text_plain, tc_id, author)
+                used_nearby_fallback = False
                 if not tc_result.get("ok"):
                     para_text = _get_para_text(para_el)
                     located = _locate_normalized_text(para_text, old_text)
@@ -571,39 +617,54 @@ def _handle_edit(args: dict, **kwargs) -> str:
                         actual_old = para_text[start:end]
                         if actual_old and actual_old != old_text:
                             tc_result = tc_replace_first_in_para(
-                                para_el, actual_old, new_text, tc_id, author
+                                para_el, actual_old, new_text_plain, tc_id, author
                             )
-                # Fallback: if text not found in the body-level paragraph,
-                # search ALL paragraphs including table cells.
+                # Fallback: search ALL paragraphs including table cells.
                 if not tc_result.get("ok") and _all_idx is not None:
                     tc_result = _search_and_tc_replace_nearby(
-                        all_paras, _all_idx, old_text, new_text, tc_id, author
+                        all_paras, _all_idx, old_text, new_text_plain, tc_id, author
                     )
+                    used_nearby_fallback = tc_result.get("ok", False)
                 if not tc_result.get("ok"):
                     return tool_error(
                         f"Text '{old_text}' not found in paragraph {target.para_start}"
                         + (" or nearby table cells" if _all_idx is not None else "")
                     )
+                if has_fmt and not used_nearby_fallback:
+                    _apply_format_segments_to_ins(
+                        para_el, tc_result["inserted_id"], format_segments
+                    )
             else:
-                result = _direct_replace(para_el, old_text, new_text)
-                # Fallback: if text not found in the body-level paragraph,
-                # search ALL paragraphs including table cells.  This handles
-                # the case where the LLM identified a paragraph number from
-                # lex_read (which only counts body-level w:p) but the actual
-                # text lives inside a table adjacent to that paragraph.
+                result = _direct_replace(para_el, old_text, new_text_plain)
+                # Fallback: try whitespace-normalized matching
+                if not result["ok"]:
+                    para_text = _get_para_text(para_el)
+                    located = _locate_normalized_text(para_text, old_text)
+                    if located is not None:
+                        start, end = located
+                        actual_old = para_text[start:end]
+                        if actual_old and actual_old != old_text:
+                            result = _direct_replace(para_el, actual_old, new_text_plain)
+                # Further fallback: search ALL paragraphs including table cells
                 if not result["ok"] and _all_idx is not None:
                     result = _search_and_replace_nearby(
-                        all_paras, _all_idx, old_text, new_text
+                        all_paras, _all_idx, old_text, new_text_plain
                     )
                 if not result["ok"]:
                     return tool_error(f"Text '{old_text}' not found in paragraph {target.para_start}" +
                                       (" or nearby table cells" if _all_idx is not None else ""))
 
         elif op == "insert":
-            if tc:
-                tc_ins_text(para_el, new_text, tc_id, author, position=target.char_start or "end")
+            new_text_plain, format_segments = _parse_format_markers(new_text)
+            has_fmt = _has_format_markers(new_text)
+
+            if tc or has_fmt:
+                ins = tc_ins_text(para_el, new_text_plain, tc_id, author, position=target.char_start or "end")
+                if has_fmt:
+                    inserted_id = ins.get(f"{W}id")
+                    _apply_format_segments_to_ins(para_el, inserted_id, format_segments)
             else:
-                _direct_insert(para_el, new_text, target.char_start or -1)
+                _direct_insert(para_el, new_text_plain, target.char_start or -1)
 
         elif op == "set_format" and fmt:
             _apply_format_to_range(para_el, target.char_start, target.char_end, fmt)
@@ -676,8 +737,9 @@ def _direct_replace(para_el, old_text: str, new_text: str) -> dict:
     Uses iter() to find ALL w:t descendants (including those nested inside
     w:ins, w:del, w:smartTag, and other wrappers common in table cells).
     Supports cross-run matching: if old_text spans multiple w:t elements,
-    the combined text is flattened into the first w:t and the rest are
-    cleared — same strategy as edit_ops.replace_text().
+    only the overlapped elements are modified — other runs are preserved.
+    This is critical for numbered paragraphs where the auto-number text
+    lives in a separate run from the content text.
     """
     W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
     t_elements = [el for el in para_el.iter() if el.tag == f"{W}t"]
@@ -689,11 +751,116 @@ def _direct_replace(para_el, old_text: str, new_text: str) -> dict:
     if match_text is None:
         return {"ok": False, "reason": "text not found"}
 
-    new_full = full_text.replace(match_text, new_text, 1)
-    t_elements[0].text = new_full
-    for t in t_elements[1:]:
-        t.text = ""
+    pos = full_text.find(match_text)
+    end_pos = pos + len(match_text)
+
+    # Build character offset ranges for each w:t, then modify only those
+    # that overlap the match.  This preserves run structure (auto-number
+    # text, TC markup, mid-paragraph format changes, etc.).
+    new_text_inserted = False
+    offset = 0
+    for t in t_elements:
+        tlen = len(t.text or "")
+        t_start = offset
+        t_end = offset + tlen
+        offset = t_end
+
+        if t_start < end_pos and t_end > pos:
+            local_start = max(0, pos - t_start)
+            local_end = min(tlen, end_pos - t_start)
+            before = (t.text or "")[:local_start]
+            after = (t.text or "")[local_end:]
+
+            if not new_text_inserted:
+                t.text = before + new_text + after
+                new_text_inserted = True
+            else:
+                t.text = after if after else None
+
     return {"ok": True, "matched_text": match_text}
+
+
+def _parse_format_markers(text: str):
+    """Parse [b]/[i]/[u] format markers from text.
+
+    Returns (plain_text, segments) where segments is a list of
+    {"text": str, "bold": bool, "italic": bool, "underline": bool}.
+    The plain_text strips all markers for text matching.
+    """
+    segments = []
+    bold = False
+    italic = False
+    underline = False
+
+    pattern = re.compile(r"\[/(?:b|i|u)\]|\[(?:b|i|u)\]")
+    pos = 0
+    for m in pattern.finditer(text):
+        if m.start() > pos:
+            segments.append({
+                "text": text[pos:m.start()],
+                "bold": bold, "italic": italic, "underline": underline,
+            })
+        tag = m.group()
+        if tag == "[b]":
+            bold = True
+        elif tag == "[/b]":
+            bold = False
+        elif tag == "[i]":
+            italic = True
+        elif tag == "[/i]":
+            italic = False
+        elif tag == "[u]":
+            underline = True
+        elif tag == "[/u]":
+            underline = False
+        pos = m.end()
+
+    if pos < len(text):
+        segments.append({
+            "text": text[pos:],
+            "bold": bold, "italic": italic, "underline": underline,
+        })
+
+    plain_text = "".join(s["text"] for s in segments)
+    return plain_text, segments
+
+
+def _apply_format_segments_to_ins(para_el, inserted_id, segments):
+    """Replace the single r inside a w:ins with multiple formatted runs."""
+    W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+    from lxml import etree
+
+    for ins in para_el.iter(f"{W}ins"):
+        if ins.get(f"{W}id") == str(inserted_id):
+            for r in list(ins.findall(f"{W}r")):
+                ins.remove(r)
+
+            for seg in segments:
+                if not seg["text"]:
+                    continue
+                r = etree.Element(f"{W}r")
+                if seg["bold"] or seg["italic"] or seg["underline"]:
+                    rPr = etree.SubElement(r, f"{W}rPr")
+                    if seg["bold"]:
+                        etree.SubElement(rPr, f"{W}b")
+                        etree.SubElement(rPr, f"{W}bCs")
+                    if seg["italic"]:
+                        etree.SubElement(rPr, f"{W}i")
+                        etree.SubElement(rPr, f"{W}iCs")
+                    if seg["underline"]:
+                        u = etree.SubElement(rPr, f"{W}u")
+                        u.set(f"{W}val", "single")
+                t = etree.SubElement(r, f"{W}t")
+                t.set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
+                t.text = seg["text"]
+                ins.append(r)
+            return True
+    return False
+
+
+def _has_format_markers(text: str) -> bool:
+    """Check if text contains [b]/[i]/[u] format markers."""
+    return bool(re.search(r"\[/?(?:b|i|u)\]", text))
 
 
 def _normalize_match_text(text: str) -> str:
@@ -1390,7 +1557,13 @@ LEX_REF_SCHEMA = {
         "  list_fields     — List all field codes (REF, PAGEREF, TOC, etc.) in the document\n"
         "  resolve_fields  — Convert [ref:name]/[page-ref:name] markup in runs to real field codes\n"
         "  scan_xref       — Dry-run scan: find static '第X条' patterns and what they'd link to\n"
-        "  auto_xref       — Full conversion: add bookmarks to headings, wrap xref text in hyperlinks"
+        "  auto_xref       — Full conversion: add bookmarks to headings, wrap xref text in hyperlinks\n"
+        "  xref_audit      — Comprehensive audit: scan ALL references (第X条/Section/Clause/Article)\n"
+        "                     against actual headings, find dead refs and unreferenced clauses\n"
+        "  audit_documents  — Run xref_audit on multiple docs + cross_doc_scan. Full project audit\n"
+        "  cross_doc_scan   — Multi-document scan: validate 《DocName》第X条 cross-document refs\n"
+        "  convert_static_refs — Convert hardcoded 第X条 text to real Word REF fields\n"
+        "  term_format_audit — Extract defined terms with run-level formatting (bold/italic/underline/caps/font)"
     ),
     "parameters": {
         "type": "object",
@@ -1403,7 +1576,9 @@ LEX_REF_SCHEMA = {
                 "type": "string",
                 "enum": ["add_bookmark", "remove_bookmark", "add_ref", "add_page_ref",
                          "add_noteref", "add_styleref", "list", "list_fields",
-                         "resolve_fields", "scan_xref", "auto_xref", "cross_doc_scan"],
+                         "resolve_fields", "scan_xref", "auto_xref", "cross_doc_scan",
+                         "xref_audit", "audit_documents", "convert_static_refs",
+                         "term_format_audit"],
                 "description": "Operation to perform.",
             },
             "name": {
@@ -1421,7 +1596,16 @@ LEX_REF_SCHEMA = {
             "docs": {
                 "type": "array",
                 "items": {"type": "string"},
-                "description": "List of document paths for cross_doc_scan. All docs are scanned for cross-references to each other.",
+                "description": "List of document paths for cross_doc_scan / audit_documents. All docs are scanned for cross-references to each other.",
+            },
+            "clauses": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Specific clause numbers to convert (for convert_static_refs). If omitted, converts all.",
+            },
+            "dry_run": {
+                "type": "boolean",
+                "description": "Preview mode for convert_static_refs — shows what would change without writing.",
             },
         },
         "required": ["path", "op"],
@@ -1449,7 +1633,8 @@ def _handle_ref(args: dict, **kwargs) -> str:
             fields.update_fields(path)
         return tool_result(result)
 
-    if op in ("scan_xref", "auto_xref", "cross_doc_scan"):
+    if op in ("scan_xref", "auto_xref", "cross_doc_scan", "xref_audit",
+               "audit_documents", "convert_static_refs"):
         from lexitool import xref
         if op == "scan_xref":
             result = xref.scan_xrefs(path)
@@ -1459,8 +1644,27 @@ def _handle_ref(args: dict, **kwargs) -> str:
                 return tool_error("'docs' is required for cross_doc_scan (list of doc paths)")
             docs = [_resolve_path(d) for d in docs]
             result = xref.cross_doc_scan(docs)
+        elif op == "xref_audit":
+            result = xref.xref_audit(path)
+        elif op == "audit_documents":
+            docs = args.get("docs", [])
+            if not docs:
+                return tool_error("'docs' is required for audit_documents (list of doc paths)")
+            docs = [_resolve_path(d) for d in docs]
+            result = xref.audit_documents(docs)
+        elif op == "convert_static_refs":
+            clauses = args.get("clauses")
+            dry_run = args.get("dry_run", True)
+            result = xref.convert_static_refs(path, clauses=clauses, dry_run=dry_run)
         else:
             result = xref.auto_xref(path)
+        return tool_result(result)
+
+    if op == "term_format_audit":
+        from lexitool.defined_terms import term_format_audit
+        from docx import Document
+        doc = Document(path)
+        result = term_format_audit(doc)
         return tool_result(result)
 
     name = args.get("name")

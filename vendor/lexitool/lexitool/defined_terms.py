@@ -298,3 +298,114 @@ def _ensure_bold(run_el):
         rPr.append(OxmlElement("w:b"))
     if rPr.find(qn("w:bCs")) is None:
         rPr.append(OxmlElement("w:bCs"))
+
+
+# --------------------------------------------------------------------------- #
+# 术语格式审计                                                                   #
+# --------------------------------------------------------------------------- #
+
+def _run_format(run_el) -> dict:
+    """Extract character formatting properties from a w:r element's w:rPr."""
+    rPr = run_el.find(qn("w:rPr"))
+    if rPr is None:
+        return {}
+
+    fmt = {}
+    b_el = rPr.find(qn("w:b"))
+    if b_el is not None:
+        val = b_el.get(qn("w:val"))
+        fmt["bold"] = val != "false" and val != "0"
+
+    i_el = rPr.find(qn("w:i"))
+    if i_el is not None:
+        val = i_el.get(qn("w:val"))
+        fmt["italic"] = val != "false" and val != "0"
+
+    u_el = rPr.find(qn("w:u"))
+    if u_el is not None:
+        val = u_el.get(qn("w:val"))
+        fmt["underline"] = val != "false" and val != "0" and val != "none"
+
+    caps_el = rPr.find(qn("w:caps"))
+    if caps_el is not None:
+        val = caps_el.get(qn("w:val"))
+        fmt["caps"] = val != "false" and val != "0"
+
+    small_caps_el = rPr.find(qn("w:smallCaps"))
+    if small_caps_el is not None:
+        val = small_caps_el.get(qn("w:val"))
+        fmt["small_caps"] = val != "false" and val != "0"
+
+    rFonts_el = rPr.find(qn("w:rFonts"))
+    if rFonts_el is not None:
+        ascii_font = rFonts_el.get(qn("w:ascii"))
+        ea_font = rFonts_el.get(qn("w:eastAsia"))
+        cs_font = rFonts_el.get(qn("w:cs"))
+        fmt["font_name"] = ascii_font or ea_font or cs_font
+
+    sz_el = rPr.find(qn("w:sz"))
+    if sz_el is not None:
+        val = sz_el.get(qn("w:val"))
+        if val:
+            try:
+                fmt["font_size"] = float(val) / 2.0
+            except (ValueError, TypeError):
+                pass
+
+    return fmt
+
+
+def term_format_audit(
+    doc,
+    para_range: tuple[int, int] | None = None,
+    extra_patterns: list[str] | None = None,
+    cfg=None,
+) -> list[dict]:
+    """
+    Scan paragraphs for defined terms and return their run-level formatting.
+
+    Reuses _find_term_spans() for detection, then inspects the run properties
+    at each term's character position to report formatting (bold, italic,
+    underline, caps, font_name, font_size).
+
+    Returns:
+        [{para_index, text_preview, terms: [{text, char_start, char_end,
+          format: {bold?, italic?, underline?, caps?, small_caps?, font_name?, font_size?}}]}, ...]
+    """
+    paras = doc.paragraphs
+    start, end = para_range if para_range else (0, len(paras))
+    extra = _merge_extra_patterns(extra_patterns, cfg)
+    results = []
+
+    for i in range(start, min(end, len(paras))):
+        para = paras[i]
+        full = _para_full_text(para)
+        term_spans = _find_term_spans(full, extra)
+        if not term_spans:
+            continue
+
+        runs_with_pos = _get_all_runs_with_pos(para)
+        terms_out = []
+
+        for char_start, char_end in term_spans:
+            # Find the run that contains the term's start position
+            term_fmt = {}
+            for run_el, r_start, r_end in runs_with_pos:
+                if r_start <= char_start < r_end:
+                    term_fmt = _run_format(run_el)
+                    break
+
+            terms_out.append({
+                "text": full[char_start:char_end],
+                "char_start": char_start,
+                "char_end": char_end,
+                "format": term_fmt,
+            })
+
+        results.append({
+            "para_index": i,
+            "text_preview": full[:80],
+            "terms": terms_out,
+        })
+
+    return results
