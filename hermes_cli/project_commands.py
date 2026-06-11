@@ -9,8 +9,57 @@ Drafter and Reviewer sub-agents — no separate profiles needed.
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime, timezone
 from pathlib import Path
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Master SOP resolution — reads from the canonical role files instead of
+# using hardcoded lightweight templates.
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _resolve_master_roles_dir() -> Path | None:
+    """Resolve the master role files directory.
+
+    Checks, in order:
+    1. HERMES_AGENT_ROOT env var + .hermes-project/roles/
+    2. Relative to this file: ../../.hermes-project/roles/
+    """
+    env_root = os.environ.get("HERMES_AGENT_ROOT")
+    if env_root:
+        candidate = Path(env_root) / ".hermes-project" / "roles"
+        if candidate.is_dir():
+            return candidate
+    # Derive from this file's location: hermes_cli/project_commands.py →
+    # repo_root/.hermes-project/roles/
+    candidate = Path(__file__).resolve().parent.parent / ".hermes-project" / "roles"
+    if candidate.is_dir():
+        return candidate
+    return None
+
+
+# Role file name mapping: project-local name → master name
+_ROLE_MAPPING: dict[str, str] = {
+    "drafter.md":                     "hpswarm-drafter.md",
+    "reviewer-content.md":            "hpswarm-reviewer-content.md",
+    "reviewer-format.md":             "hpswarm-reviewer-format.md",
+    "reviewer-ts-consistency.md":     "hpswarm-reviewer-ts-consistency.md",
+    "reviewer-cross-ref.md":          "hpswarm-reviewer-cross-ref.md",
+    # reviewer-translation.md has no master yet — kept as hardcoded fallback
+}
+
+
+def _load_role_content(local_name: str, fallback: str) -> str:
+    """Load role content from master file, falling back to hardcoded template."""
+    roles_dir = _resolve_master_roles_dir()
+    master_name = _ROLE_MAPPING.get(local_name)
+    if roles_dir and master_name:
+        master_path = roles_dir / master_name
+        if master_path.is_file():
+            return master_path.read_text(encoding="utf-8")
+    return fallback
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Embedded content — the code IS the harness
@@ -251,39 +300,39 @@ Instead, you delegate to specialized sub-agents via the `delegate_task` tool.
 ## Sub-Agent Roles
 
 ### Drafter（起草员）
-- 能力：`lex_docx` 工具集 —— 创建、编辑、格式化 .docx 文件
-- 输出：结构完整的草稿文档 + TC 修改痕迹
-- 工具集：`["lex-docx", "file"]`
+- 能力：`lexitool` 工具集 —— 创建、编辑、格式化 .docx 文件
+- 输出：结构完整的草稿文档 + TC 修改痕迹 + 修订对照表 + 验证报告
+- 工具集：`["lexitool", "file"]`
 
 ### Reviewer-Content（内容审阅员）
-- 能力：`lex_docx` 工具集 —— 全文内容审阅
-- 检查：法律实质、完整性、一致性、语言质量
+- 能力：`lexitool` 工具集 —— 全文内容审阅
+- 检查：法律实质、完整性、一致性、语言质量、有机融合
 - 输出：内容审阅报告（重大问题 + 建议改进）
-- 工具集：`["lex-docx", "file"]`
+- 工具集：`["lexitool", "file"]`
 
 ### Reviewer-Format（格式审阅员）
-- 能力：`lex_docx` 工具集 —— 全文格式审阅
+- 能力：`lexitool` 工具集 —— 全文格式审阅
 - 检查：字体、段落、编号、表格、页眉页脚
 - 输出：格式审阅报告（问题清单 + 修复建议）
-- 工具集：`["lex-docx", "file"]`
+- 工具集：`["lexitool", "file"]`
 
 ### Reviewer-TS-Consistency（TS商业一致性审阅员）
-- 能力：`lex_docx` + `lex_ref` 工具集 —— 商业条款与 Term Sheet 一致性审阅
+- 能力：`lexitool` + `lex_ref` 工具集 —— 商业条款与 Term Sheet 一致性审阅
 - 检查：对价/价格、交易范围、陈述与保证、责任与救济、特殊商业条款
 - 输出：TS 商业一致性审阅报告（偏差清单 + 缺失条款）
-- 工具集：`["lex-docx", "file"]`
+- 工具集：`["lexitool", "file"]`
 
 ### Reviewer-Cross-Ref（交叉引用审阅员）
-- 能力：`lex_docx` + `lex_ref` + `lex_corpus` 工具集 —— 全文档集交叉引用审阅
+- 能力：`lexitool` + `lex_ref` + `lex_corpus` 工具集 —— 全文档集交叉引用审阅
 - 检查：文档内 xref、跨文档 xref、定义术语一致性、法规引用
 - 输出：交叉引用审阅报告（断裂引用清单 + 术语不一致清单）
-- 工具集：`["lex-docx", "lex-ref", "lex-corpus", "file"]`
+- 工具集：`["lexitool", "lex-ref", "lex-corpus", "file"]`
 
 ### Reviewer-Translation（翻译审阅员）
-- 能力：`lex_docx` + `lex_corpus` 工具集 —— 法律文书翻译审阅（中英/英中）
+- 能力：`lexitool` + `lex_corpus` 工具集 —— 法律文书翻译审阅（中英/英中）
 - 检查：术语准确度、法律含义完整性、British English、LMA 标准、格式规范
 - 输出：翻译审阅报告（术语一致性 + 质量问题 + 数字/日期核对）
-- 工具集：`["lex-docx", "lex-corpus", "file"]`
+- 工具集：`["lexitool", "lex-corpus", "file"]`
 
 ## Delegation Rules
 
@@ -345,8 +394,8 @@ Instead, you delegate to specialized sub-agents via the `delegate_task` tool.
 4. delegate_task → Drafter
    - goal: 起草 <文档类型>，包含 <要求>
    - context: <drafter.md role prompt> + <project context>
-   - toolsets: ["lex-docx", "file"]
-5. 等待 Drafter 完成 → 得到草稿路径
+   - toolsets: ["lexitool", "file"]
+5. 等待 Drafter 完成 → 得到草稿路径 + 修订对照表 + 验证报告
 6. [并行] delegate_task → Reviewer-Content
    - goal: 对 <草稿路径> 进行全文内容审阅
    - context: <reviewer-content.md role prompt> + <STANDARDS.md 审阅标准>
@@ -369,8 +418,9 @@ Instead, you delegate to specialized sub-agents via the `delegate_task` tool.
 
 ### 修改任务（已有文档）
 ```
-1. 先让 Drafter 读取现有文档：stats → export_structure
-2. 然后按起草任务的 5-13 步执行
+1. 先让 Drafter 执行文档约定分析：lex_ref(op="term_format_audit") → 四维约定分析
+2. 再让 Drafter 读取现有文档：lex_read → 识别修改范围
+3. 然后按起草任务的 4-13 步执行（含修订对照表 + 内容一体化验证）
 ```
 
 ## Iron Rules
@@ -382,15 +432,19 @@ Instead, you delegate to specialized sub-agents via the `delegate_task` tool.
 - 所有修改在 Track Changes 模式下进行
 - 段落编号不变（审阅完成前不增删整段）
 - 先结构后内容：任何文件操作必须先 `lex_stats` → `lex_list`
+- **修改已有合同前必须先执行"文档约定分析"** — 运行 `term_format_audit` + 四维约定分析。Coordinator 必须将约定分析结果传入 Drafter context。
+- **Drafter 必须输出修订对照表** — 每次修改后附带结构化对照表（§N: 原文→修订文+理由）。Coordinator 必须在验证门中检查对照表完整性。缺少对照表 → 退回补做。审阅时对照表传入 Reviewer context。
+- **修改已有合同时，内容一体化验证为强制项** — 仅检查格式验证不够。Drafter 必须逐项确认术语格式一致性、术语存在性、引用惯例、行文风格、编号融入、有机整合。
 
 ## Quality Gates
-1. Gate 1: Structure complete（TOC, heading levels, numbering）
-2. Gate 2: Content reviewed（法律实质、完整性、一致性）
-3. Gate 3: Format reviewed（字体、间距、缩进、表格）
-4. Gate 4: TS consistency reviewed（商业条款与 Term Sheet 一致）
-5. Gate 5: Cross-references validated（文档内/跨文档引用准确）
-6. Gate 6: Translation reviewed（术语一致、法律含义完整、British English）
-7. Gate 7: Final cleanup（定稿，交付）
+1. Gate 1: Convention analysis（约定分析 — 修改已有合同时强制）
+2. Gate 2: Structure complete（TOC, heading levels, numbering）
+3. Gate 3: Content reviewed（法律实质、完整性、一致性、有机融合）
+4. Gate 4: Format reviewed（字体、间距、缩进、表格）
+5. Gate 5: TS consistency reviewed（商业条款与 Term Sheet 一致）
+6. Gate 6: Cross-references validated（文档内/跨文档引用准确）
+7. Gate 7: Translation reviewed（术语一致、法律含义完整、British English）
+8. Gate 8: Final cleanup（定稿，交付）
 
 ## Gate Enforcement
 
@@ -988,7 +1042,7 @@ def _create_scaffolding(project_dir: Path, name: str, client: str, goal: str, cw
         "cwd": cwd_path,
         "management_dir": str(project_dir),
         "created": now,
-        "toolsets": ["lex-docx"],
+        "toolsets": ["lexitool"],
     }
     (hermes_dir / "project-meta.json").write_text(
         json.dumps(meta, indent=2, ensure_ascii=False) + "\n"
@@ -1004,11 +1058,12 @@ def _create_scaffolding(project_dir: Path, name: str, client: str, goal: str, cw
     (hermes_dir / "project-context.md").write_text(context)
     (project_dir / "AGENTS.md").write_text(AGENTS_MD_TEMPLATE)
     (project_dir / "STANDARDS.md").write_text(STANDARDS_MD)
-    (roles_dir / "drafter.md").write_text(DRAFTER_MD)
-    (roles_dir / "reviewer-content.md").write_text(REVIEWER_CONTENT_MD)
-    (roles_dir / "reviewer-format.md").write_text(REVIEWER_FORMAT_MD)
-    (roles_dir / "reviewer-ts-consistency.md").write_text(REVIEWER_TS_CONSISTENCY_MD)
-    (roles_dir / "reviewer-cross-ref.md").write_text(REVIEWER_CROSS_REF_MD)
+    # Load roles from master SOP files, falling back to hardcoded templates
+    (roles_dir / "drafter.md").write_text(_load_role_content("drafter.md", DRAFTER_MD))
+    (roles_dir / "reviewer-content.md").write_text(_load_role_content("reviewer-content.md", REVIEWER_CONTENT_MD))
+    (roles_dir / "reviewer-format.md").write_text(_load_role_content("reviewer-format.md", REVIEWER_FORMAT_MD))
+    (roles_dir / "reviewer-ts-consistency.md").write_text(_load_role_content("reviewer-ts-consistency.md", REVIEWER_TS_CONSISTENCY_MD))
+    (roles_dir / "reviewer-cross-ref.md").write_text(_load_role_content("reviewer-cross-ref.md", REVIEWER_CROSS_REF_MD))
     (roles_dir / "reviewer-translation.md").write_text(REVIEWER_TRANSLATION_MD)
 
     # Init project state and seed memory files
