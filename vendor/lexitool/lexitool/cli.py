@@ -59,6 +59,18 @@ Commands:
     replace             替换段内文字（--tc 启用 Track Changes）
     delete              删除段内文字（--tc 启用 Track Changes）
 
+  ── 交叉引用 ──────────────────────────────────────────────────────────────────
+    xref audit          单文档全量引用审计（第X条/Section/Clause/Article）
+    xref scan           多文档跨文档引用扫描
+    xref convert        将静态第X条引用转为可点击 REF 域
+    xref-audit          （legacy flat alias）
+    cross-doc-scan      （legacy flat alias）
+    audit-documents     （legacy flat alias）
+    convert-static-refs （legacy flat alias）
+
+  ── 术语格式 ──────────────────────────────────────────────────────────────────
+    term-format-audit   提取定义术语及 run 级格式（加粗/斜体/下划线/caps/字体/字号）
+
   ── Canonical family aliases ─────────────────────────────────────────────────
     footer audit        审查所有 footer OPC parts（推荐入口）
     footer fill         批量替换所有 footer parts 中的文本（推荐入口）
@@ -2043,6 +2055,107 @@ def cmd_delete(args):
 # main                                                                         #
 # =========================================================================== #
 
+# =========================================================================== #
+# xref-audit / cross-doc-scan / audit-documents / convert-static-refs          #
+# =========================================================================== #
+
+def cmd_xref_audit(args):
+    """lex_docx xref-audit report.docx [--fmt json|text]"""
+    from lexitool import xref
+    result = xref.xref_audit(args.docx)
+    if args.fmt == "text":
+        dr = result.get("dead_refs", [])
+        uc = result.get("unreferenced_clauses", [])
+        total = result.get("total_refs", 0)
+        print(f"Total refs scanned: {total}")
+        print(f"Dead refs ({len(dr)}):")
+        for r in dr[:30]:
+            print(f"  P{r.get('para','?')} \"{r.get('ref_text','')}\" → target={r.get('target','?')} reason={r.get('reason','')}")
+        print(f"Unreferenced clauses ({len(uc)}):")
+        for c in uc[:30]:
+            print(f"  {c}")
+    else:
+        _out(result)
+
+def cmd_cross_doc_scan(args):
+    """lex_docx cross-doc-scan main.docx --docs doc2.docx doc3.docx [--fmt json|text]"""
+    from lexitool import xref
+    docs = [args.docx] + (args.docs or [])
+    docs = [str(Path(d).resolve()) for d in docs]
+    result = xref.cross_doc_scan(docs)
+    if args.fmt == "text":
+        broken = result.get("broken_refs", [])
+        print(f"Cross-doc refs scanned: {len(result.get('all_refs', []))}")
+        print(f"Broken refs ({len(broken)}):")
+        for r in broken[:30]:
+            print(f"  {r.get('source_doc','')} P{r.get('para','?')} \"{r.get('ref_text','')}\" → {r.get('target_doc','')}")
+    else:
+        _out(result)
+
+def cmd_audit_documents(args):
+    """lex_docx audit-documents main.docx --docs doc2.docx doc3.docx [--fmt json|text]"""
+    from lexitool import xref
+    docs = [args.docx] + (args.docs or [])
+    docs = [str(Path(d).resolve()) for d in docs]
+    result = xref.audit_documents(docs)
+    if args.fmt == "text":
+        for doc_name, audit in result.items():
+            dr = audit.get("dead_refs", [])
+            print(f"\n{doc_name}: {len(dr)} dead refs")
+            for r in dr[:15]:
+                print(f"  P{r.get('para','?')} \"{r.get('ref_text','')}\" → {r.get('target','?')}")
+    else:
+        _out(result)
+
+def cmd_convert_static_refs(args):
+    """lex_docx convert-static-refs report.docx [--clauses 3.2 5.1] [--dry-run] [--out out.docx]"""
+    from lexitool import xref
+    clauses = args.clauses or None
+    dry_run = args.dry_run if hasattr(args, "dry_run") else True
+    result = xref.convert_static_refs(args.docx, clauses=clauses, dry_run=dry_run)
+    if not dry_run:
+        _save_doc(_load_doc(args.docx), args.out or args.docx)
+    _out(result)
+
+def cmd_term_format_audit(args):
+    """lex_docx term-format-audit report.docx [--range 0,50] [--fmt json|text]"""
+    from lexitool.defined_terms import term_format_audit
+    from docx import Document
+    doc = Document(args.docx)
+    para_range = None
+    if args.range:
+        lo, hi = [int(x.strip()) for x in args.range.split(",", 1)]
+        para_range = (lo, hi + 1)
+    result = term_format_audit(doc, para_range=para_range)
+    if args.fmt == "text":
+        for entry in result:
+            print(f"\n§{entry['para_index']}: {entry['text_preview'][:60]}...")
+            for t in entry["terms"]:
+                fmt = t["format"]
+                flags = " ".join(k for k, v in [("bold", fmt.get("bold")), ("italic", fmt.get("italic")),
+                    ("underline", fmt.get("underline")), ("caps", fmt.get("caps")),
+                    ("small_caps", fmt.get("small_caps"))] if v)
+                font_info = ""
+                if fmt.get("font_name"):
+                    font_info += f" font={fmt['font_name']}"
+                if fmt.get("font_size"):
+                    font_info += f" size={fmt['font_size']}pt"
+                print(f"  \"{t['text']}\" => {flags}{font_info}")
+    else:
+        _out(result)
+
+def cmd_xref_family(args):
+    """xref family alias: lex_docx xref audit|scan|convert"""
+    if args.xref_cmd == "audit":
+        return cmd_xref_audit(args)
+    if args.xref_cmd == "scan":
+        return cmd_cross_doc_scan(args)
+    if args.xref_cmd == "convert":
+        return cmd_convert_static_refs(args)
+    print("error: xref subcommand required (audit|scan|convert)", file=sys.stderr)
+    sys.exit(1)
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="lex_docx",
@@ -2732,6 +2845,55 @@ Commands:
     p.add_argument("--yes", action="store_true")
     p.add_argument("--out")
 
+    # ── xref family ─────────────────────────────────────────────────────────── #
+    p = sub.add_parser("xref", help="交叉引用族命令（audit|scan|convert）")
+    xref_sub = p.add_subparsers(dest="xref_cmd", required=True)
+
+    sp = xref_sub.add_parser("audit", help="单文档全量引用审计（第X条/Section/Clause/Article）")
+    sp.add_argument("docx")
+    sp.add_argument("--fmt", choices=["json", "text"], default="json")
+    sp.set_defaults(func=cmd_xref_family)
+
+    sp = xref_sub.add_parser("scan", help="多文档跨文档引用扫描")
+    sp.add_argument("docx")
+    sp.add_argument("--docs", nargs="+", help="其他文档路径列表")
+    sp.add_argument("--fmt", choices=["json", "text"], default="json")
+    sp.set_defaults(func=cmd_xref_family)
+
+    sp = xref_sub.add_parser("convert", help="将静态第X条引用转为可点击 REF 域")
+    sp.add_argument("docx")
+    sp.add_argument("--clauses", nargs="+", help="指定条款号（省略则转换全部）")
+    sp.add_argument("--dry-run", action="store_true", default=True, help="预览模式（默认开启）")
+    sp.add_argument("--out")
+    sp.set_defaults(func=cmd_xref_family)
+
+    # ── flat xref aliases ───────────────────────────────────────────────────── #
+    p = sub.add_parser("xref-audit", help="单文档全量引用审计（legacy flat command）")
+    p.add_argument("docx")
+    p.add_argument("--fmt", choices=["json", "text"], default="json")
+
+    p = sub.add_parser("cross-doc-scan", help="多文档跨文档引用扫描（legacy flat command）")
+    p.add_argument("docx")
+    p.add_argument("--docs", nargs="+", help="其他文档路径列表")
+    p.add_argument("--fmt", choices=["json", "text"], default="json")
+
+    p = sub.add_parser("audit-documents", help="多文档全项目审计（legacy flat command）")
+    p.add_argument("docx")
+    p.add_argument("--docs", nargs="+", help="其他文档路径列表")
+    p.add_argument("--fmt", choices=["json", "text"], default="json")
+
+    p = sub.add_parser("convert-static-refs", help="将静态引用转为 REF 域（legacy flat command）")
+    p.add_argument("docx")
+    p.add_argument("--clauses", nargs="+")
+    p.add_argument("--dry-run", action="store_true", default=True)
+    p.add_argument("--out")
+
+    # ── term-format-audit ───────────────────────────────────────────────────── #
+    p = sub.add_parser("term-format-audit", help="提取定义术语及其 run 级格式（加粗/斜体/下划线/caps/字体）")
+    p.add_argument("docx")
+    p.add_argument("--range", help="段落范围（如 0,50）")
+    p.add_argument("--fmt", choices=["json", "text"], default="json")
+
     args = parser.parse_args()
 
     dispatch = {
@@ -2785,6 +2947,12 @@ Commands:
         "insert":             cmd_insert,
         "replace":            cmd_replace,
         "delete":             cmd_delete,
+        "xref":               getattr(args, "func", cmd_xref_family),
+        "xref-audit":         cmd_xref_audit,
+        "cross-doc-scan":     cmd_cross_doc_scan,
+        "audit-documents":    cmd_audit_documents,
+        "convert-static-refs": cmd_convert_static_refs,
+        "term-format-audit":  cmd_term_format_audit,
     }
 
     func = dispatch.get(args.command)

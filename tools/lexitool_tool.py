@@ -413,6 +413,7 @@ def _handle_edit(args: dict, **kwargs) -> str:
         replace_table_cell_text, replace_table_cell_text_all,
         set_table_cells_by_position, insert_table_rows, insert_paragraph_block,
         remove_blue_text,
+        trim_paragraph,
     )
 
     path = _resolve_path(args["path"])
@@ -451,7 +452,7 @@ def _handle_edit(args: dict, **kwargs) -> str:
 
     if op in ("replace_table_cell", "replace_table_cells", "set_table_cells",
               "insert_table_rows", "insert_paragraphs",
-              "create_table", "remove_blue_text"):
+              "create_table", "remove_blue_text", "trim_end"):
         try:
             if op == "remove_blue_text":
                 res = remove_blue_text(path, output=path)
@@ -526,6 +527,17 @@ def _handle_edit(args: dict, **kwargs) -> str:
                 res = create_table(
                     path, after_para, headers, rows,
                     font_size=font_size,
+                    output=path,
+                )
+
+            elif op == "trim_end":
+                para = args.get("para", 0)
+                chars = args.get("chars", 1)
+                from_end = args.get("from_end", True)
+                res = trim_paragraph(
+                    path, para,
+                    chars=chars,
+                    from_end=from_end,
                     output=path,
                 )
 
@@ -2840,6 +2852,92 @@ def _handle_project_delete_task(args: dict, **kwargs) -> str:
     return tool_result(result)
 
 
+# ── lex_comment ─────────────────────────────────────────────────────────────
+
+LEX_COMMENT_SCHEMA = {
+    "name": "lex_comment",
+    "description": (
+        "Manage Word comments (批注) in a .docx file. "
+        "Supports listing, adding, and removing comments.\n\n"
+        "Ops:\n"
+        "- list: List all comments, optionally filtered by paragraph index or author\n"
+        "- add: Add a comment to a specific paragraph\n"
+        "- remove: Remove a comment by its ID\n"
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "path": {
+                "type": "string",
+                "description": "Path to the .docx file.",
+            },
+            "op": {
+                "type": "string",
+                "enum": ["list", "add", "remove"],
+                "description": "Operation: list, add, or remove comments.",
+            },
+            "para": {
+                "type": "integer",
+                "description": "Paragraph index (0-based) for add operation or filtering list.",
+            },
+            "text": {
+                "type": "string",
+                "description": "Comment text (required for add).",
+            },
+            "author": {
+                "type": "string",
+                "description": "Comment author name (default: 'agent'), or filter for list.",
+            },
+            "comment_id": {
+                "type": "integer",
+                "description": "Comment ID to remove (required for remove).",
+            },
+        },
+        "required": ["path", "op"],
+    },
+}
+
+
+def _handle_comment(args: dict, **kwargs) -> str:
+    from lexitool.comment_ops import add_comment, list_comments, remove_comment
+    path = _resolve_path(args["path"])
+    op = args["op"]
+    author = args.get("author", "agent")
+
+    if op == "list":
+        para = args.get("para")
+        res = list_comments(path, para=para, author=args.get("author"))
+        return tool_result({
+            "ok": res.ok, "op": "list",
+            "comments": res.data, "count": len(res.data),
+            "message": res.message,
+        })
+
+    elif op == "add":
+        para = args.get("para", 0)
+        text = args.get("text", "")
+        if not text:
+            return tool_error("'text' is required for add operation")
+        res = add_comment(path, para, text, author=author)
+        return tool_result({
+            "ok": res.ok, "op": "add",
+            "comment": res.data[0] if res.data else None,
+            "message": res.message,
+        })
+
+    elif op == "remove":
+        comment_id = args.get("comment_id")
+        if comment_id is None:
+            return tool_error("'comment_id' is required for remove operation")
+        res = remove_comment(path, int(comment_id))
+        return tool_result({
+            "ok": res.ok, "op": "remove",
+            "comment_id": comment_id, "message": res.message,
+        })
+
+    return tool_error(f"Unknown op: {op}")
+
+
 # ── Registration ──────────────────────────────────────────────────────────────
 
 _TOOLS = [
@@ -2850,6 +2948,7 @@ _TOOLS = [
     # Write
     ("lex_edit",     "lexitool", LEX_EDIT_SCHEMA,     _handle_edit),
     ("lex_tc",       "lexitool", LEX_TC_SCHEMA,       _handle_tc),
+    ("lex_comment",  "lexitool", LEX_COMMENT_SCHEMA,  _handle_comment),
     ("lex_format",   "lexitool", LEX_FORMAT_SCHEMA,   _handle_format),
     # Structure
     ("lex_list",     "lexitool", LEX_LIST_SCHEMA,     _handle_list),

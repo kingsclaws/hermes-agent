@@ -549,8 +549,13 @@ def tc_ins_mixed(
     return inserted
 
 
+def _normalize_quotes(text: str) -> str:
+    """将 Word 自动弯引号标准化为直引号以匹配搜索。"""
+    return text.replace('“', '"').replace('”', '"').replace('‘', ''').replace('’', ''')
+
+
 def _para_full_text(para_el) -> str:
-    """获取段落完整文本，将 <w:tab/> 转为 \\t。"""
+    """获取段落完整文本，将 <w:tab/> 转为 \\t，并标准化弯引号。"""
     parts = []
     for child in para_el.iter():
         tag = child.tag
@@ -558,7 +563,7 @@ def _para_full_text(para_el) -> str:
             parts.append(child.text or "")
         elif tag == qn("w:tab"):
             parts.append("\t")
-    return "".join(parts)
+    return _normalize_quotes("".join(parts))
 
 
 def _get_all_runs_with_pos(para_el) -> list[tuple]:
@@ -631,6 +636,12 @@ def tc_replace_first_in_para(
     """
     if hasattr(para_el, "_element"):
         para_el = para_el._element
+
+    old_text = _normalize_quotes(old_text)
+    if after_text:
+        after_text = _normalize_quotes(after_text)
+    if before_text:
+        before_text = _normalize_quotes(before_text)
 
     full = _para_full_text(para_el)
     if not old_text:

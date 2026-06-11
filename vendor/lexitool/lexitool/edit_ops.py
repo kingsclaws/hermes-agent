@@ -165,6 +165,7 @@ class EditResult:
     para: int | None = None
     text: str = ""
     tc_mode: bool = False
+    tc_applied: bool = False
     tc_id: int | None = None
     path: str = ""
 
@@ -201,7 +202,7 @@ def insert_text(docx_path: str, para: int, text: str, *,
         _write_docx(docx_path, etree.tostring(root, xml_declaration=True,
                                               encoding="UTF-8", standalone=True),
                     other, output=output)
-        return EditResult(ok=True, para=para, text=text, tc_mode=True, tc_id=tid,
+        return EditResult(ok=True, para=para, text=text, tc_mode=True, tc_applied=True, tc_id=tid,
                           message=f"TC 插入段落 {para} 完成（id={tid}）",
                           path=output or docx_path)
     else:
@@ -209,7 +210,7 @@ def insert_text(docx_path: str, para: int, text: str, *,
         _write_docx(docx_path, etree.tostring(root, xml_declaration=True,
                                               encoding="UTF-8", standalone=True),
                     other, output=output)
-        return EditResult(ok=True, para=para, text=text, tc_mode=False,
+        return EditResult(ok=True, para=para, text=text, tc_mode=False, tc_applied=False,
                           message=f"直接插入段落 {para} 完成",
                           path=output or docx_path)
 
@@ -262,7 +263,7 @@ def replace_text(docx_path: str, para: int, old: str, new: str, *,
         _write_docx(docx_path, etree.tostring(root, xml_declaration=True,
                                               encoding="UTF-8", standalone=True),
                     other, output=output)
-        return EditResult(ok=True, para=para, text=f"{old}→{new}", tc_mode=True,
+        return EditResult(ok=True, para=para, text=f"{old}→{new}", tc_mode=True, tc_applied=True,
                           tc_id=tid, message=f"TC 替换段落 {para}：{old}→{new}",
                           path=output or docx_path)
     else:
@@ -272,13 +273,16 @@ def replace_text(docx_path: str, para: int, old: str, new: str, *,
         texts = [(i, t.text or "") for i, t in enumerate(t_elements)]
         full_text = "".join(t for _, t in texts)
 
-        if old not in full_text:
+        full_text_norm = _normalize_quotes(full_text)
+        old_norm = _normalize_quotes(old)
+        if old_norm not in full_text_norm:
             return EditResult(ok=False, para=para, text=old,
                               message=f"段落 {para} 中未找到 '{old}'",
                               path=docx_path)
 
-        # 执行替换
-        new_full = full_text.replace(old, new, 1)
+        # 执行替换（保持在原始文本上的位置，只标准化引号用于匹配）
+        pos = full_text_norm.find(old_norm)
+        new_full = full_text[:pos] + new + full_text[pos + len(old):]
 
         # 重新分配文本到 w:t 元素
         # 策略：将新文本放入第一个 w:t，清空其余
@@ -290,7 +294,7 @@ def replace_text(docx_path: str, para: int, old: str, new: str, *,
         _write_docx(docx_path, etree.tostring(root, xml_declaration=True,
                                               encoding="UTF-8", standalone=True),
                     other, output=output)
-        return EditResult(ok=True, para=para, text=f"{old}→{new}", tc_mode=False,
+        return EditResult(ok=True, para=para, text=f"{old}→{new}", tc_mode=False, tc_applied=False,
                           message=f"直接替换段落 {para}：{old}→{new}",
                           path=output or docx_path)
 
@@ -334,16 +338,20 @@ def delete_text(docx_path: str, para: int, *,
         _write_docx(docx_path, etree.tostring(root, xml_declaration=True,
                                               encoding="UTF-8", standalone=True),
                     other, output=output)
-        return EditResult(ok=True, para=para, text=to_del, tc_mode=True,
+        return EditResult(ok=True, para=para, text=to_del, tc_mode=True, tc_applied=True,
                           tc_id=tid, message=f"TC 删除段落 {para} 完成",
                           path=output or docx_path)
     else:
         if text:
-            # 仅删除匹配文本
+            # 仅删除匹配文本（标准化引号匹配）
             for t in p.iter(f"{W}t"):
-                if t.text and text in t.text:
-                    t.text = t.text.replace(text, "", 1)
-                    break
+                if t.text:
+                    t_norm = _normalize_quotes(t.text)
+                    text_norm = _normalize_quotes(text)
+                    if text_norm in t_norm:
+                        pos = t_norm.find(text_norm)
+                        t.text = t.text[:pos] + t.text[pos + len(text):]
+                        break
         else:
             # 清空所有 w:t
             for t in p.iter(f"{W}t"):
@@ -351,9 +359,66 @@ def delete_text(docx_path: str, para: int, *,
         _write_docx(docx_path, etree.tostring(root, xml_declaration=True,
                                               encoding="UTF-8", standalone=True),
                     other, output=output)
-        return EditResult(ok=True, para=para, text=text or "(全部)", tc_mode=False,
+        return EditResult(ok=True, para=para, text=text or "(全部)", tc_mode=False, tc_applied=False,
                           message=f"直接删除段落 {para} 完成",
                           path=output or docx_path)
+
+
+def trim_paragraph(docx_path: str, para: int, *,
+                   chars: int = 1,
+                   from_end: bool = True,
+                   output: str | None = None) -> EditResult:
+    """
+    删除段落开始或末尾的指定数量字符。
+
+    chars: 要删除的字符数（默认 1）
+    from_end: True=从末尾删除，False=从开头删除
+    """
+    doc_xml, other = _read_docx(docx_path)
+    root = etree.fromstring(doc_xml)
+    p = _find_para(root, para)
+    if p is None:
+        return EditResult(ok=False, message=f"段落 {para} 不存在", path=docx_path)
+
+    t_nodes = list(p.iter(f"{W}t"))
+    if not t_nodes:
+        return EditResult(ok=False, message=f"段落 {para} 无文本可删除", path=docx_path)
+
+    full_text = _get_para_text(p)
+    if len(full_text) < chars:
+        return EditResult(ok=False, message=f"段落 {para} 仅有 {len(full_text)} 字符，无法删除 {chars} 字符", path=docx_path)
+
+    if from_end:
+        # 从末尾删除：从最后一个 w:t 开始向前删除字符
+        remaining = chars
+        for t in reversed(t_nodes):
+            if t.text and remaining > 0:
+                tlen = len(t.text)
+                if tlen >= remaining:
+                    t.text = t.text[:tlen - remaining]
+                    break
+                else:
+                    remaining -= tlen
+                    t.text = ""
+    else:
+        # 从开头删除：从第一个 w:t 开始向后删除字符
+        remaining = chars
+        for t in t_nodes:
+            if t.text and remaining > 0:
+                tlen = len(t.text)
+                if tlen >= remaining:
+                    t.text = t.text[remaining:]
+                    break
+                else:
+                    remaining -= tlen
+                    t.text = ""
+
+    _write_docx(docx_path, etree.tostring(root, xml_declaration=True,
+                                          encoding="UTF-8", standalone=True),
+                other, output=output)
+    return EditResult(ok=True, para=para, tc_applied=False,
+                      message=f"段落 {para} {'末尾' if from_end else '开头'}删除 {chars} 字符",
+                      path=output or docx_path)
 
 
 # ── 原地 TC 替换（保留原 run 格式、跨 run 支持） ─────────────────────────────
@@ -507,7 +572,7 @@ def replace_text_in_place(docx_path: str, para: int, old: str, new: str, *,
     _write_docx(docx_path, etree.tostring(root, xml_declaration=True,
                                           encoding="UTF-8", standalone=True),
                 other, output=output)
-    return EditResult(ok=True, para=para, text=f"{old}→{new}", tc_mode=True,
+    return EditResult(ok=True, para=para, text=f"{old}→{new}", tc_mode=True, tc_applied=True,
                       tc_id=tid, message=f"原地 TC 替换段落 {para}：{old}→{new}",
                       path=output or docx_path)
 
@@ -554,7 +619,7 @@ def delete_paragraph_tc(docx_path: str, para: int, *,
     _write_docx(docx_path, etree.tostring(root, xml_declaration=True,
                                           encoding="UTF-8", standalone=True),
                 other, output=output)
-    return EditResult(ok=True, para=para, tc_mode=True, tc_id=tid,
+    return EditResult(ok=True, para=para, tc_mode=True, tc_applied=True, tc_id=tid,
                       message=f"段落 {para} 已标记为删除（TC）",
                       path=output or docx_path)
 
@@ -577,9 +642,10 @@ def _find_table(root: etree._Element, table_index: int) -> etree._Element | None
 
 def _find_cell_by_text(table: etree._Element, text: str) -> etree._Element | None:
 	"""Find the first w:tc in a table that contains the given text."""
+	text_norm = _normalize_quotes(text)
 	for tc in table.iter(f"{W}tc"):
 		cell_text = _get_cell_text(tc)
-		if text in cell_text:
+		if text_norm in _normalize_quotes(cell_text):
 			return tc
 	return None
 
@@ -705,7 +771,7 @@ def set_table_cells_by_position(docx_path: str, table_index: int,
 		tc_el = row_cells[col_idx]
 		old_text = item.get("old_text")
 		current_text = _get_cell_text(tc_el)
-		if old_text is not None and old_text not in current_text:
+		if old_text is not None and _normalize_quotes(old_text) not in _normalize_quotes(current_text):
 			errors.append(f"Cell ({row_idx},{col_idx}) does not contain expected old_text")
 			continue
 
@@ -753,7 +819,7 @@ def set_table_cells_by_position(docx_path: str, table_index: int,
 		            other, output=output)
 
 	message = f"Set {changed}/{len(cells)} cells in table {table_index}"
-	return EditResult(ok=True, tc_mode=tc, message=message, path=output or docx_path)
+	return EditResult(ok=True, tc_mode=tc, tc_applied=tc, message=message, path=output or docx_path)
 
 
 # ── Table cell text editing ───────────────────────────────────────────────────
@@ -817,7 +883,7 @@ def replace_table_cell_text(docx_path: str, table_index: int, old: str, new: str
 		_write_docx(docx_path, etree.tostring(root, xml_declaration=True,
 		                                      encoding="UTF-8", standalone=True),
 		            other, output=output)
-		return EditResult(ok=True, tc_mode=True, tc_id=tid,
+		return EditResult(ok=True, tc_mode=True, tc_applied=True, tc_id=tid,
 		                  message=f"TC replaced cell text in table {table_index}: '{old}' -> '{new}'",
 		                  path=output or docx_path)
 	else:
@@ -825,7 +891,7 @@ def replace_table_cell_text(docx_path: str, table_index: int, old: str, new: str
 		_write_docx(docx_path, etree.tostring(root, xml_declaration=True,
 		                                      encoding="UTF-8", standalone=True),
 		            other, output=output)
-		return EditResult(ok=True,
+		return EditResult(ok=True, tc_applied=False,
 		                  message=f"Replaced cell text in table {table_index}: '{old}' -> '{new}'",
 		                  path=output or docx_path)
 
@@ -895,7 +961,7 @@ def replace_table_cell_text_all(docx_path: str, table_index: int,
 	_write_docx(docx_path, etree.tostring(root, xml_declaration=True,
 	                                      encoding="UTF-8", standalone=True),
 	            other, output=output)
-	return EditResult(ok=True, tc_mode=tc,
+	return EditResult(ok=True, tc_mode=tc, tc_applied=tc,
 	                  message=f"Batch replaced {matched}/{len(replacements)} cells in table {table_index}",
 	                  path=output or docx_path)
 
@@ -952,7 +1018,7 @@ def insert_table_rows(docx_path: str, table_index: int, template_row_index: int,
 	_write_docx(docx_path, etree.tostring(root, xml_declaration=True,
 	                                      encoding="UTF-8", standalone=True),
 	            other, output=output)
-	return EditResult(ok=True,
+	return EditResult(ok=True, tc_applied=False,
 	                  message=f"Inserted {inserted} rows into table {table_index} (copied from row {template_row_index})",
 	                  path=output or docx_path)
 
@@ -1057,7 +1123,7 @@ def create_table(docx_path: str, after_para: int,
                                           encoding="UTF-8", standalone=True),
                 other, output=output)
     row_count = (1 if headers else 0) + len(rows)
-    return EditResult(ok=True,
+    return EditResult(ok=True, tc_applied=False,
                       message=f"Created table ({ncols} cols, {row_count} rows) after §{visible_after_para}",
                       path=output or docx_path)
 
@@ -1113,7 +1179,7 @@ def remove_blue_text(docx_path: str, *,
                                               encoding="UTF-8", standalone=True),
                     other, output=output)
 
-    return EditResult(ok=True,
+    return EditResult(ok=True, tc_applied=False,
                       message=f"Removed {removed_runs} blue text runs ({removed_chars} chars)",
                       path=output or docx_path)
 
@@ -1216,7 +1282,7 @@ def insert_paragraph_block(docx_path: str, after_para: int,
 	_write_docx(docx_path, etree.tostring(root, xml_declaration=True,
 	                                      encoding="UTF-8", standalone=True),
 	            other, output=output)
-	return EditResult(ok=True,
+	return EditResult(ok=True, tc_applied=tc,
 	                  message=f"Inserted {inserted} paragraphs after paragraph {after_para}",
 	                  tc_mode=tc_mode,
 	                  path=output or docx_path)
