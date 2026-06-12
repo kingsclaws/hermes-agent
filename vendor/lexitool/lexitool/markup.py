@@ -406,6 +406,15 @@ def export_paragraphs(
     return "\n".join(lines)
 
 
+def _count_tc_segments(para_el) -> int:
+    """Count the number of w:ins and w:del elements in a paragraph."""
+    count = 0
+    for child in para_el.iter():
+        if child.tag in (f"{W}ins", f"{W}del"):
+            count += 1
+    return count
+
+
 def _export_paragraph(
     para_el, para_num: int, tc_mode: str, show_format: bool,
     open_bookmarks: list[str],
@@ -414,6 +423,13 @@ def _export_paragraph(
     parts = [f"§{para_num} "]
 
     pPr = para_el.find(f"{W}pPr")
+
+    # TC density warning: if a paragraph has many TC alternations,
+    # the [ins]/[del] markup is hard to parse for both humans and AI.
+    if tc_mode == "all":
+        tc_count = _count_tc_segments(para_el)
+        if tc_count > 5:
+            parts.append(f"[tc-density:high,{tc_count}-segments] ")
 
     # Paragraph-level markers
     if show_format:

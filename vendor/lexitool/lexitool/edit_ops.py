@@ -237,11 +237,73 @@ def replace_text(docx_path: str, para: int, old: str, new: str, *,
     tid = _next_tc_id(root)
 
     if tc:
-        # TC 模式：旧 → <w:del>，新 → <w:ins>
+        # TC 模式：内联替换 — 在匹配位置将旧文本包裹为 <w:del>，
+        # 紧跟 <w:ins> 插入新文本。仅移除和替换包含匹配文本的 w:r 元素，
+        # 保留不相关的 w:r 及其他段落子元素。
         from datetime import datetime
         dt = datetime.now().strftime("%Y-%m-%dT%H:%M:%SZ")
 
-        # 在段落末尾追加 <w:del>（旧文本）+ <w:ins>（新文本）
+        # 收集段落直接 w:r 子元素的文本
+        w_r_children = [child for child in p if child.tag == f"{W}r"]
+
+        # Build text map: for each w:r, compute its text and character range
+        run_texts = []
+        char_pos = 0
+        for r_el in w_r_children:
+            text = "".join(t.text or "" for t in r_el.findall(f"{W}t"))
+            run_texts.append((r_el, text, char_pos, char_pos + len(text)))
+            char_pos += len(text)
+
+        full_text = "".join(t for _, t, _, _ in run_texts)
+        full_text_norm = _normalize_quotes(full_text)
+        old_norm = _normalize_quotes(old)
+        if old_norm not in full_text_norm:
+            return EditResult(ok=False, para=para, text=old,
+                              message=f"段落 {para} 中未找到 '{old}'",
+                              path=docx_path)
+
+        pos = full_text_norm.find(old_norm)
+        end_pos = pos + len(old)
+
+        # Classify w:r elements relative to the match
+        before_runs = []
+        match_runs = []
+        after_runs = []
+
+        for r_el, text, r_start, r_end in run_texts:
+            if r_end <= pos:
+                before_runs.append(r_el)
+            elif r_start >= end_pos:
+                after_runs.append(r_el)
+            else:
+                match_runs.append(r_el)
+
+        if not match_runs:
+            return EditResult(ok=False, para=para, text=old,
+                              message=f"段落 {para} 中未找到 '{old}' 的边界",
+                              path=docx_path)
+
+        # Compute before/after text within the matched runs
+        match_start_pos = run_texts[w_r_children.index(match_runs[0])][2]
+        match_text = "".join(
+            "".join(t.text or "" for t in r_el.findall(f"{W}t"))
+            for r_el in match_runs
+        )
+        match_end_pos = match_start_pos + len(match_text)
+        before_in_match = full_text[match_start_pos:pos]
+        after_in_match = full_text[end_pos:match_end_pos]
+
+        # Remove only the matched w:r elements
+        insert_idx = list(p).index(match_runs[0]) if match_runs else 0
+        for r_el in match_runs:
+            p.remove(r_el)
+
+        # Build replacement: before_part + w:del(old) + w:ins(new) + after_part
+        new_elems = []
+
+        if before_in_match:
+            new_elems.append(_make_run(before_in_match, font=font, sz=sz))
+
         del_el = etree.Element(f"{W}del")
         del_el.set(f"{W}id", str(tid))
         del_el.set(f"{W}author", author)
@@ -250,15 +312,21 @@ def replace_text(docx_path: str, para: int, old: str, new: str, *,
         for t in d_run.iter(f"{W}t"):
             t.tag = f"{W}delText"
         del_el.append(d_run)
-        p.append(del_el)
+        new_elems.append(del_el)
 
         tid2 = tid + 1
-        ins = etree.Element(f"{W}ins")
-        ins.set(f"{W}id", str(tid2))
-        ins.set(f"{W}author", author)
-        ins.set(f"{W}date", dt)
-        ins.append(_make_run(new, bold=bold, italic=italic, font=font, sz=sz))
-        p.append(ins)
+        ins_el = etree.Element(f"{W}ins")
+        ins_el.set(f"{W}id", str(tid2))
+        ins_el.set(f"{W}author", author)
+        ins_el.set(f"{W}date", dt)
+        ins_el.append(_make_run(new, bold=bold, italic=italic, font=font, sz=sz))
+        new_elems.append(ins_el)
+
+        if after_in_match:
+            new_elems.append(_make_run(after_in_match, font=font, sz=sz))
+
+        for i, elem in enumerate(new_elems):
+            p.insert(insert_idx + i, elem)
 
         _write_docx(docx_path, etree.tostring(root, xml_declaration=True,
                                               encoding="UTF-8", standalone=True),
@@ -297,6 +365,41 @@ def replace_text(docx_path: str, para: int, old: str, new: str, *,
         return EditResult(ok=True, para=para, text=f"{old}→{new}", tc_mode=False, tc_applied=False,
                           message=f"直接替换段落 {para}：{old}→{new}",
                           path=output or docx_path)
+
+
+def replace_text_all(docx_path: str, targets: list[int], old: str, new: str, *,
+                     tc: bool = True,
+                     author: str = "agent",
+                     font_size: float = 11.0,
+                     output: str | None = None) -> dict:
+    """
+    Cross-paragraph batch replacement.  Finds `old` in each target paragraph
+    and replaces it with `new`.  Returns per-paragraph results.
+
+    targets: list of 0-based paragraph indices
+    """
+    results = []
+    ok_count = 0
+    for para_idx in targets:
+        res = replace_text(docx_path, para_idx, old, new,
+                          tc=tc, author=author, font_size=font_size,
+                          output=output)
+        results.append({
+            "para": para_idx + 1,
+            "ok": res.ok,
+            "message": res.message,
+            "tc_applied": res.tc_applied,
+        })
+        if res.ok:
+            ok_count += 1
+    return {
+        "ok": ok_count == len(targets),
+        "total": len(targets),
+        "succeeded": ok_count,
+        "failed": len(targets) - ok_count,
+        "results": results,
+        "message": f"Replaced in {ok_count}/{len(targets)} paragraphs",
+    }
 
 
 def delete_text(docx_path: str, para: int, *,

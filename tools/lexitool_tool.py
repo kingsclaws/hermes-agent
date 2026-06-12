@@ -259,15 +259,16 @@ LEX_EDIT_SCHEMA = {
                     "set_table_cells",
                     "insert_table_rows", "insert_paragraphs",
                     "create_table", "replace_header_footer",
-                    "remove_blue_text",
+                    "remove_blue_text", "replace_all",
                 ],
                 "description": (
-                    "Operation type. Paragraph-level: replace, insert, delete, set_format. "
+                    "Operation type. Paragraph-level: replace, insert, delete, set_format, replace_all. "
                     "Table-level: replace_table_cell (single cell), replace_table_cells (batch), "
                     "set_table_cells (batch by row/col coordinates), "
                     "insert_table_rows (copy template row with cell text), "
                     "create_table (insert a new table with headers and data rows). "
                     "Block-level: insert_paragraphs (insert multiple paras after anchor). "
+                    "Batch: replace_all (cross-paragraph find-and-replace with TC). "
                     "Cleanup: remove_blue_text (delete blue internal-note runs). "
                     "Header/footer: replace_header_footer."
                 ),
@@ -275,6 +276,11 @@ LEX_EDIT_SCHEMA = {
             "target": {
                 "type": "string",
                 "description": "Target specifier: §N, §N:X-Y, §N:rM, §N:rM:X-Y, or §N-M.",
+            },
+            "targets": {
+                "type": "array",
+                "items": {"type": "integer"},
+                "description": "List of paragraph numbers (1-indexed §N) for replace_all batch operation.",
             },
             "new_text": {
                 "type": "string",
@@ -550,6 +556,27 @@ def _handle_edit(args: dict, **kwargs) -> str:
                 "tc_id": res.tc_id,
             })
 
+        except Exception as e:
+            return tool_error(str(e))
+
+    # ── Batch replace_all ────────────────────────────────────────────────────
+    if op == "replace_all":
+        targets = args.get("targets", [])
+        old_text = args.get("old_text", "")
+        new_text = args.get("new_text", "")
+        if not targets:
+            return tool_error("'targets' is required for replace_all (list of paragraph numbers)")
+        if not old_text:
+            return tool_error("'old_text' is required for replace_all")
+        try:
+            from lexitool.edit_ops import replace_text_all
+            para_indices = [int(t) - 1 for t in targets]  # convert 1-indexed to 0-indexed
+            result = replace_text_all(
+                path, para_indices, old_text, new_text,
+                tc=tc, author=author, font_size=font_size,
+                output=path,
+            )
+            return tool_result(result)
         except Exception as e:
             return tool_error(str(e))
 
@@ -1102,6 +1129,10 @@ LEX_TC_SCHEMA = {
                 "enum": ["ins", "del"],
                 "description": "Filter by change type: 'ins' for insertions only, 'del' for deletions only. Omit for both.",
             },
+            "text_pattern": {
+                "type": "string",
+                "description": "Filter by text content: only match TC entries whose text contains this string. Enables selective accept/reject by content rather than just type.",
+            },
             "para_range": {
                 "oneOf": [
                     {"type": "string"},
@@ -1131,6 +1162,7 @@ def _handle_tc(args: dict, **kwargs) -> str:
     op = args["op"]
     author = args.get("author")
     type_filter = args.get("type_filter")
+    text_pattern = args.get("text_pattern")
     para_range_str = args.get("para_range")
     dry_run = args.get("dry_run", False)
     include_tables = args.get("include_tables", False)
@@ -1156,7 +1188,8 @@ def _handle_tc(args: dict, **kwargs) -> str:
     if op == "list":
         items = tc_ops.list_tc(doc, author_filter=author,
                                para_range=para_range, type_filter=type_filter,
-                               include_tables=include_tables)
+                               include_tables=include_tables,
+                               text_pattern=text_pattern)
         return tool_result({"ok": True, "op": "list", "tc_items": items,
                             "count": len(items)})
 
@@ -1164,11 +1197,13 @@ def _handle_tc(args: dict, **kwargs) -> str:
     if op == "accept":
         stats = tc_ops.accept_all(doc, author_filter=author,
                                   para_range=para_range, type_filter=type_filter,
-                                  include_tables=include_tables)
+                                  include_tables=include_tables,
+                                  text_pattern=text_pattern)
     else:
         stats = tc_ops.reject_all(doc, author_filter=author,
                                   para_range=para_range, type_filter=type_filter,
-                                  include_tables=include_tables)
+                                  include_tables=include_tables,
+                                  text_pattern=text_pattern)
 
     if dry_run:
         return tool_result({"ok": True, "op": op, "dry_run": True, "would_change": stats})
@@ -2858,11 +2893,14 @@ LEX_COMMENT_SCHEMA = {
     "name": "lex_comment",
     "description": (
         "Manage Word comments (批注) in a .docx file. "
-        "Supports listing, adding, and removing comments.\n\n"
+        "Supports listing, adding, replying, and deleting comments.\n\n"
         "Ops:\n"
-        "- list: List all comments, optionally filtered by paragraph index or author\n"
-        "- add: Add a comment to a specific paragraph\n"
-        "- remove: Remove a comment by its ID\n"
+        "- list: List all comments, optionally filtered by paragraph or author\n"
+        "- add: Add a comment to a paragraph, optionally anchored to a character range\n"
+        "- reply: Reply to an existing comment by ID\n"
+        "- delete: Remove a comment by its ID (also accepts 'remove' as alias)\n\n"
+        "Use add with range_start/range_end to anchor the comment to specific text "
+        "within a paragraph. Use reply to continue a discussion thread on an existing comment."
     ),
     "parameters": {
         "type": "object",
@@ -2873,8 +2911,8 @@ LEX_COMMENT_SCHEMA = {
             },
             "op": {
                 "type": "string",
-                "enum": ["list", "add", "remove"],
-                "description": "Operation: list, add, or remove comments.",
+                "enum": ["list", "add", "reply", "delete", "remove"],
+                "description": "Operation: list, add, reply, or delete/remove comments.",
             },
             "para": {
                 "type": "integer",
@@ -2882,7 +2920,7 @@ LEX_COMMENT_SCHEMA = {
             },
             "text": {
                 "type": "string",
-                "description": "Comment text (required for add).",
+                "description": "Comment text (required for add and reply).",
             },
             "author": {
                 "type": "string",
@@ -2890,7 +2928,15 @@ LEX_COMMENT_SCHEMA = {
             },
             "comment_id": {
                 "type": "integer",
-                "description": "Comment ID to remove (required for remove).",
+                "description": "Comment ID to reply to or delete (required for reply and delete).",
+            },
+            "range_start": {
+                "type": "integer",
+                "description": "Character offset where comment begins within the paragraph (for add op).",
+            },
+            "range_end": {
+                "type": "integer",
+                "description": "Character offset where comment ends within the paragraph (for add op).",
             },
         },
         "required": ["path", "op"],
@@ -2899,7 +2945,7 @@ LEX_COMMENT_SCHEMA = {
 
 
 def _handle_comment(args: dict, **kwargs) -> str:
-    from lexitool.comment_ops import add_comment, list_comments, remove_comment
+    from lexitool.comment_ops import add_comment, list_comments, remove_comment, reply_comment
     path = _resolve_path(args["path"])
     op = args["op"]
     author = args.get("author", "agent")
@@ -2918,20 +2964,36 @@ def _handle_comment(args: dict, **kwargs) -> str:
         text = args.get("text", "")
         if not text:
             return tool_error("'text' is required for add operation")
-        res = add_comment(path, para, text, author=author)
+        range_start = args.get("range_start")
+        range_end = args.get("range_end")
+        res = add_comment(path, para, text, author=author,
+                         range_start=range_start, range_end=range_end)
         return tool_result({
             "ok": res.ok, "op": "add",
             "comment": res.data[0] if res.data else None,
             "message": res.message,
         })
 
-    elif op == "remove":
+    elif op == "reply":
         comment_id = args.get("comment_id")
         if comment_id is None:
-            return tool_error("'comment_id' is required for remove operation")
+            return tool_error("'comment_id' is required for reply operation")
+        text = args.get("text", "")
+        if not text:
+            return tool_error("'text' is required for reply operation")
+        res = reply_comment(path, int(comment_id), text, author=author)
+        return tool_result({
+            "ok": res.ok, "op": "reply",
+            "comment_id": comment_id, "message": res.message,
+        })
+
+    elif op in ("remove", "delete"):
+        comment_id = args.get("comment_id")
+        if comment_id is None:
+            return tool_error("'comment_id' is required for delete operation")
         res = remove_comment(path, int(comment_id))
         return tool_result({
-            "ok": res.ok, "op": "remove",
+            "ok": res.ok, "op": op,
             "comment_id": comment_id, "message": res.message,
         })
 

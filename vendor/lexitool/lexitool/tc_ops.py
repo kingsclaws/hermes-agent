@@ -59,12 +59,27 @@ def _collect_body_del(body, author_filter, *, skip_para_mark: bool = True):
 # list_tc                                                                         #
 # ────────────────────────────────────────────────────────────────────────────── #
 
+def _tc_text_matches(el, tc_type: str, text_pattern: str | None) -> bool:
+    """Check if a TC element's text contains the given pattern."""
+    if not text_pattern:
+        return True
+    text_tag = qn("w:t") if tc_type == "ins" else qn("w:delText")
+    parts = []
+    for t_el in el.iter(text_tag):
+        if t_el.text:
+            parts.append(t_el.text)
+    return text_pattern in "".join(parts)
+
+
 def list_tc(doc, author_filter: str | None = None,
             para_range: tuple[int, int] | None = None,
             type_filter: str | None = None,
-            include_tables: bool = False) -> list[dict]:
+            include_tables: bool = False,
+            text_pattern: str | None = None) -> list[dict]:
     """
     List all tracked changes (w:ins / w:del) in the document body.
+
+    text_pattern: if set, only include TC entries whose text contains this string.
     """
     items: list[dict] = []
     for rec in ox.iter_revision_records(
@@ -74,6 +89,8 @@ def list_tc(doc, author_filter: str | None = None,
         type_filter=type_filter,
         include_tables=include_tables,
     ):
+        if text_pattern and text_pattern not in rec.text:
+            continue
         items.append({
             "id": rec.tc_id,
             "type": rec.tc_type,
@@ -93,12 +110,15 @@ def _quoted_text_map(doc, para_range: tuple[int, int] | None = None) -> dict[str
 def _tc_candidates(doc, author_filter: str | None = None,
                    para_range: tuple[int, int] | None = None,
                    type_filter: str | None = None,
-                   include_tables: bool = False) -> dict[str, list]:
+                   include_tables: bool = False,
+                   text_pattern: str | None = None) -> dict[str, list]:
     """Return filtered candidate XML elements for accept/reject actions.
 
     When include_tables=True, TC entries inside tables (which have no paragraph
     index) are included even when para_range filtering is active. This is
     essential for sections that span both paragraphs and tables.
+
+    text_pattern: if set, only include TC entries whose text content contains this string.
     """
     body = doc.element.body
     para_map = _body_paragraph_index_map(doc)
@@ -107,6 +127,8 @@ def _tc_candidates(doc, author_filter: str | None = None,
         if not _author_ok(el, author_filter):
             return False
         if type_filter is not None and tc_type != type_filter:
+            return False
+        if not _tc_text_matches(el, tc_type, text_pattern):
             return False
         p_el = _ancestor_paragraph(el)
         para_idx = para_map.get(_el_key(p_el)) if p_el is not None else None
@@ -158,14 +180,16 @@ def _tc_candidates(doc, author_filter: str | None = None,
 def accept_all(doc, author_filter: str | None = None,
                para_range: tuple[int, int] | None = None,
                type_filter: str | None = None,
-               include_tables: bool = False) -> dict:
+               include_tables: bool = False,
+               text_pattern: str | None = None) -> dict:
     """
-    Accept tracked changes in the document, optionally filtered by author / range / type.
+    Accept tracked changes in the document, optionally filtered by author / range / type / text.
 
     type_filter:
       - "ins" → only accept insertions
       - "del" → only accept deletions
       - None  → accept both
+    text_pattern: if set, only accept TC entries whose text contains this string.
     """
     body = doc.element.body
     stats = {
@@ -175,7 +199,8 @@ def accept_all(doc, author_filter: str | None = None,
         "row_del_accepted": 0,
         "para_mark_cleaned": 0,
     }
-    cands = _tc_candidates(doc, author_filter, para_range, type_filter, include_tables=include_tables)
+    cands = _tc_candidates(doc, author_filter, para_range, type_filter,
+                          include_tables=include_tables, text_pattern=text_pattern)
 
     # ── 1. Table-row TC ───────────────────────────────────────────────── #
     rows_to_remove: set = set()
@@ -233,14 +258,16 @@ def accept_all(doc, author_filter: str | None = None,
 def reject_all(doc, author_filter: str | None = None,
                para_range: tuple[int, int] | None = None,
                type_filter: str | None = None,
-               include_tables: bool = False) -> dict:
+               include_tables: bool = False,
+               text_pattern: str | None = None) -> dict:
     """
-    Reject tracked changes in the document, optionally filtered by author / range / type.
+    Reject tracked changes in the document, optionally filtered by author / range / type / text.
 
     type_filter:
       - "ins" → only reject insertions
       - "del" → only reject deletions
       - None  → reject both
+    text_pattern: if set, only reject TC entries whose text contains this string.
     """
     body = doc.element.body
     stats = {
@@ -250,7 +277,8 @@ def reject_all(doc, author_filter: str | None = None,
         "row_del_rejected": 0,
         "para_mark_cleaned": 0,
     }
-    cands = _tc_candidates(doc, author_filter, para_range, type_filter, include_tables=include_tables)
+    cands = _tc_candidates(doc, author_filter, para_range, type_filter,
+                          include_tables=include_tables, text_pattern=text_pattern)
 
     # ── 1. Table-row TC ───────────────────────────────────────────────── #
     rows_to_remove: set = set()

@@ -50,6 +50,68 @@ def _write_docx_zf(path: str, doc_xml: bytes, other: dict[str, bytes]) -> None:
     shutil.move(tmp, path)
 
 
+CT_NS = "http://schemas.openxmlformats.org/package/2006/content-types"
+REL_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
+OO_REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+
+COMMENTS_CT = "application/vnd.openxmlformats-officedocument.wordprocessingml.comments+xml"
+COMMENTS_EXT_CT = "application/vnd.openxmlformats-officedocument.wordprocessingml.commentsExtended+xml"
+
+
+def _ensure_content_type(other: dict[str, bytes], part_name: str, content_type: str) -> None:
+    """Ensure [Content_Types].xml has an Override entry for the given part."""
+    ct_bytes = other.get("[Content_Types].xml")
+    if ct_bytes is None:
+        return
+    ct_root = etree.fromstring(ct_bytes)
+    # Check if override already exists
+    for ov in ct_root:
+        if ov.get("PartName") == part_name:
+            return
+    # Add override
+    ov = etree.SubElement(ct_root, f"{{{CT_NS}}}Override")
+    ov.set("PartName", part_name)
+    ov.set("ContentType", content_type)
+    other["[Content_Types].xml"] = etree.tostring(ct_root, xml_declaration=True,
+                                                   encoding="UTF-8", standalone=True)
+
+
+def _ensure_relationship(other: dict[str, bytes], rel_type: str, target: str) -> str:
+    """Ensure word/_rels/document.xml.rels has a relationship entry. Returns the rId."""
+    rels_key = "word/_rels/document.xml.rels"
+    rels_bytes = other.get(rels_key)
+    if rels_bytes is None:
+        # Create minimal .rels file
+        rels = (
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            f'<Relationships xmlns="{REL_NS}"></Relationships>'
+        )
+        rels_root = etree.fromstring(rels.encode("utf-8"))
+    else:
+        rels_root = etree.fromstring(rels_bytes)
+    # Check if relationship already exists
+    for r in rels_root:
+        if r.get("Type") == rel_type and r.get("Target") == target:
+            return r.get("Id", "rId1")
+    # Find next rId
+    max_id = 0
+    for r in rels_root:
+        rid = r.get("Id", "")
+        if rid.startswith("rId"):
+            try:
+                max_id = max(max_id, int(rid[3:]))
+            except ValueError:
+                pass
+    new_rid = f"rId{max_id + 1}"
+    rel = etree.SubElement(rels_root, "Relationship")
+    rel.set("Id", new_rid)
+    rel.set("Type", rel_type)
+    rel.set("Target", target)
+    other[rels_key] = etree.tostring(rels_root, xml_declaration=True,
+                                      encoding="UTF-8", standalone=True)
+    return new_rid
+
+
 def _next_comment_id(comments_root: etree._Element) -> int:
     max_id = 0
     for el in comments_root.iter(f"{W}comment"):
@@ -86,8 +148,79 @@ def _find_para(root: etree._Element, para_idx: int) -> etree._Element | None:
     return None
 
 
+def _insert_comment_marks_at_char_range(p, cmt_id, range_start, range_end):
+    """Insert commentRangeStart/End/Reference at a character range within a paragraph.
+
+    Places commentRangeStart before the character at range_start,
+    and commentRangeEnd + commentReference after the character at range_end.
+    If range_start/range_end are None, marks are appended at paragraph end.
+    """
+    crs = etree.Element(f"{W}commentRangeStart")
+    crs.set(f"{W}id", str(cmt_id))
+    cre = etree.Element(f"{W}commentRangeEnd")
+    cre.set(f"{W}id", str(cmt_id))
+    cref = etree.Element(f"{W}r")
+    cr_an = etree.SubElement(cref, f"{W}commentReference")
+    cr_an.set(f"{W}id", str(cmt_id))
+
+    if range_start is None and range_end is None:
+        p.append(crs)
+        p.append(cre)
+        p.append(cref)
+        return
+
+    # Find the insertion points by character offset
+    t_elements = [(el, el.text or "") for el in p.iter(f"{W}t")]
+    if not t_elements:
+        p.append(crs)
+        p.append(cre)
+        p.append(cref)
+        return
+
+    # Insert commentRangeStart at range_start
+    if range_start is not None:
+        offset = 0
+        inserted_start = False
+        for t_el, t_text in t_elements:
+            tlen = len(t_text)
+            if not inserted_start and offset + tlen >= range_start:
+                local_pos = range_start - offset
+                if local_pos <= 0:
+                    t_el.addprevious(crs)
+                else:
+                    # Split the text: before gets commentRangeStart after it
+                    parent = t_el.getparent()
+                    idx = list(parent).index(t_el)
+                    parent.insert(idx + 1, crs)
+                inserted_start = True
+                break
+            offset += tlen
+        if not inserted_start:
+            p.append(crs)
+
+    # Insert commentRangeEnd and commentReference at range_end
+    if range_end is not None:
+        offset = 0
+        inserted_end = False
+        for t_el, t_text in t_elements:
+            tlen = len(t_text)
+            if not inserted_end and offset + tlen >= range_end:
+                parent = t_el.getparent()
+                idx = list(parent).index(t_el)
+                parent.insert(idx + 1, cre)
+                parent.insert(idx + 2, cref)
+                inserted_end = True
+                break
+            offset += tlen
+        if not inserted_end:
+            p.append(cre)
+            p.append(cref)
+
+
 def add_comment(docx_path: str, para: int, text: str, *,
                 author: str = "agent",
+                range_start: int | None = None,
+                range_end: int | None = None,
                 output: str | None = None) -> CommentResult:
     """
     Add a Word comment to a paragraph.
@@ -95,6 +228,8 @@ def add_comment(docx_path: str, para: int, text: str, *,
     para: paragraph index (0-based, matches python-docx)
     text: comment text
     author: comment author name
+    range_start: character offset where comment begins (None = whole paragraph)
+    range_end: character offset where comment ends (None = whole paragraph)
     """
     out = output or docx_path
     if out != docx_path:
@@ -109,6 +244,12 @@ def add_comment(docx_path: str, para: int, text: str, *,
     # Prepare comments.xml
     cmt_bytes, is_new = _ensure_comments_xml(other)
     cmt_root = etree.fromstring(cmt_bytes)
+
+    # Ensure Content_Types and relationships are correct
+    _ensure_content_type(other, "/word/comments.xml", COMMENTS_CT)
+    _ensure_relationship(other,
+        f"{OO_REL}/comments", "comments.xml")
+
     cmt_id = _next_comment_id(cmt_root)
 
     # Create comment element
@@ -128,18 +269,7 @@ def add_comment(docx_path: str, para: int, text: str, *,
         cmt_t.text = line
 
     # Add comment reference marks to the paragraph
-    crs = etree.Element(f"{W}commentRangeStart")
-    crs.set(f"{W}id", str(cmt_id))
-    cre = etree.Element(f"{W}commentRangeEnd")
-    cre.set(f"{W}id", str(cmt_id))
-    cref = etree.Element(f"{W}r")
-    cr_an = etree.SubElement(cref, f"{W}commentReference")
-    cr_an.set(f"{W}id", str(cmt_id))
-
-    # Insert at end of paragraph: commentRangeStart, commentRangeEnd, then commentReference run
-    p.append(crs)
-    p.append(cre)
-    p.append(cref)
+    _insert_comment_marks_at_char_range(p, cmt_id, range_start, range_end)
 
     other["word/comments.xml"] = etree.tostring(cmt_root, xml_declaration=True,
                                                   encoding="UTF-8", standalone=True)
@@ -249,3 +379,56 @@ def remove_comment(docx_path: str, comment_id: int, *,
     _write_docx_zf(out, etree.tostring(root, xml_declaration=True, encoding="UTF-8",
                                         standalone=True), other)
     return CommentResult(ok=True, message=f"Comment {comment_id} removed", path=out)
+
+
+def reply_comment(docx_path: str, comment_id: int, text: str, *,
+                  author: str = "agent",
+                  output: str | None = None) -> CommentResult:
+    """Reply to an existing comment by appending a reply paragraph to its body.
+
+    The reply appears inline within the same comment bubble in Word.
+    """
+    out = output or docx_path
+    if out != docx_path:
+        shutil.copy2(docx_path, out)
+
+    doc_xml, other = _read_docx_zf(out)
+
+    if "word/comments.xml" not in other:
+        return CommentResult(ok=False, message="No comments in document", path=out)
+
+    cmt_root = etree.fromstring(other["word/comments.xml"])
+
+    # Find the target comment
+    target_cmt = None
+    for cmt in cmt_root:
+        if cmt.tag == f"{W}comment" and cmt.get(f"{W}id") == str(comment_id):
+            target_cmt = cmt
+            break
+
+    if target_cmt is None:
+        return CommentResult(ok=False, message=f"Comment {comment_id} not found", path=out)
+
+    # Add a reply separator paragraph then the reply text
+    sep_p = etree.SubElement(target_cmt, f"{W}p")
+    sep_r = etree.SubElement(sep_p, f"{W}r")
+    sep_rPr = etree.SubElement(sep_r, f"{W}rPr")
+    sep_b = etree.SubElement(sep_rPr, f"{W}b")
+    sep_t = etree.SubElement(sep_r, f"{W}t")
+    sep_t.set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
+    sep_t.text = f"[回复 — {author}]: "
+
+    for line in text.split("\n"):
+        reply_p = etree.SubElement(target_cmt, f"{W}p")
+        reply_r = etree.SubElement(reply_p, f"{W}r")
+        reply_t = etree.SubElement(reply_r, f"{W}t")
+        reply_t.set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
+        reply_t.text = line
+
+    other["word/comments.xml"] = etree.tostring(cmt_root, xml_declaration=True,
+                                                  encoding="UTF-8", standalone=True)
+    # No document.xml changes needed for reply — same comment ID, same anchors
+    _write_docx_zf(out, doc_xml, other)
+    return CommentResult(ok=True, message=f"Reply added to comment {comment_id}",
+                         data=[{"id": comment_id, "author": author, "text": text}],
+                         path=out)
