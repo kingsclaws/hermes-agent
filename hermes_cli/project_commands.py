@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -1079,6 +1080,7 @@ def _create_scaffolding(project_dir: Path, name: str, client: str, goal: str, cw
 
 # Valid project phases in linear order
 _PHASES = ["init", "drafting", "review", "execution", "cp", "closing", "registration"]
+LEGAL_HARNESS_VERSION = "2026-06-12.legal-harness-v1"
 
 _PROJECT_STATE_TEMPLATE = """\
 # Project State — {name}
@@ -1210,6 +1212,96 @@ def _write_tasks(project_dir: str, data: dict) -> None:
     tasks_path = Path(project_dir) / ".hermes-project" / "project-tasks.json"
     tasks_path.parent.mkdir(parents=True, exist_ok=True)
     tasks_path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n")
+
+
+def _read_project_json(project_dir: str, filename: str, default: dict | None = None) -> dict:
+    path = Path(project_dir) / ".hermes-project" / filename
+    if not path.is_file():
+        return default.copy() if isinstance(default, dict) else {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else (default.copy() if isinstance(default, dict) else {})
+    except Exception:
+        return default.copy() if isinstance(default, dict) else {}
+
+
+def _write_project_json(project_dir: str, filename: str, data: dict) -> None:
+    path = Path(project_dir) / ".hermes-project" / filename
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+
+def _ensure_legal_harness_files(project_dir: str, *, project_name: str = "", client: str = "", goal: str = "") -> dict:
+    """Create/update legal harness sidecar files for a project directory."""
+    src = Path(project_dir)
+    hermes_dir = src / ".hermes-project"
+    hermes_dir.mkdir(parents=True, exist_ok=True)
+    memories_dir = hermes_dir / "memories"
+    memories_dir.mkdir(parents=True, exist_ok=True)
+
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    created: list[str] = []
+
+    meta_path = hermes_dir / "project-meta.json"
+    meta = {}
+    if meta_path.is_file():
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        except Exception:
+            meta = {}
+    if not meta:
+        meta = {
+            "name": project_name or src.name,
+            "client": client or "",
+            "goal": goal or "",
+            "cwd": str(src),
+            "management_dir": str(src),
+            "created": now,
+            "toolsets": ["lexitool"],
+        }
+        meta_path.write_text(json.dumps(meta, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        created.append(str(meta_path))
+
+    state_path = hermes_dir / "project-state.json"
+    if not state_path.is_file():
+        _init_project_state(src, meta.get("name") or project_name or src.name, now)
+        created.append(str(state_path))
+
+    facts_path = hermes_dir / "project-facts.json"
+    if not facts_path.is_file():
+        _write_project_facts(str(src), {"facts": [], "updated_at": now})
+        created.append(str(facts_path))
+    _sync_project_facts_memory(str(src), _read_project_facts(str(src)))
+
+    defaults = {
+        "convention-profiles.json": {"version": LEGAL_HARNESS_VERSION, "profiles": [], "updated_at": now},
+        "legal-review-plans.json": {"version": LEGAL_HARNESS_VERSION, "plans": [], "updated_at": now},
+        "edit-verification-records.json": {"version": LEGAL_HARNESS_VERSION, "records": [], "updated_at": now},
+    }
+    for filename, default_data in defaults.items():
+        path = hermes_dir / filename
+        if not path.is_file():
+            _write_project_json(str(src), filename, default_data)
+            created.append(str(path))
+
+    memory_path = memories_dir / "legal_harness.md"
+    if not memory_path.is_file():
+        memory_path.write_text(
+            f"# Legal Harness — {meta.get('name') or project_name or src.name}\n\n"
+            f"> Maintained by native legal harness tools. Agent must consult this with project_facts before legal drafting/review.\n\n"
+            f"**Harness version:** {LEGAL_HARNESS_VERSION}  \n"
+            f"**Created:** {now}\n\n"
+            "## Active Protocol\n\n"
+            "- Start legal DOCX work with `lex_read(mode='review')`, `lex_read(mode='legal_structure')`, or `lex_diff(mode='summary')`.\n"
+            "- Generate/update `lex_convention_profile` before substantive edits.\n"
+            "- Use `legal_review_plan` for whole-document or multi-agent review.\n"
+            "- Record material edit verification with `edit_verification_record`.\n"
+            "- Snapshot material milestones with `lex_git`.\n",
+            encoding="utf-8",
+        )
+        created.append(str(memory_path))
+
+    return {"ok": True, "project_dir": str(src), "created": created, "harness_version": LEGAL_HARNESS_VERSION}
 
 
 def _read_project_facts(project_dir: str) -> dict:
@@ -1693,6 +1785,418 @@ def project_facts(
         "count": len(filtered),
         "total": len(facts),
         "memory_file": str(src / ".hermes-project" / "memories" / "project_facts.md"),
+    }
+
+
+# ── Legal Harness Primitives ─────────────────────────────────────────────
+
+def _generate_harness_id(prefix: str) -> str:
+    return prefix + "_" + __import__("secrets").token_hex(5)
+
+
+def _find_project_root_for_doc(document_path: str, project_dir: str | None = None) -> str:
+    if project_dir:
+        return str(Path(project_dir).expanduser().resolve())
+    doc = Path(document_path).expanduser().resolve()
+    for parent in [doc.parent, *doc.parents]:
+        if (parent / ".hermes-project").is_dir():
+            return str(parent)
+    return str(doc.parent)
+
+
+def _sync_legal_harness_memory(project_dir: str) -> None:
+    src = Path(project_dir)
+    memories_dir = src / ".hermes-project" / "memories"
+    memories_dir.mkdir(parents=True, exist_ok=True)
+    profiles = _read_project_json(project_dir, "convention-profiles.json", {"profiles": []}).get("profiles", [])
+    plans = _read_project_json(project_dir, "legal-review-plans.json", {"plans": []}).get("plans", [])
+    records = _read_project_json(project_dir, "edit-verification-records.json", {"records": []}).get("records", [])
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    lines = [
+        "# Legal Harness",
+        "",
+        "> Native legal harness state. Agent must consult this together with project_facts.",
+        "",
+        f"**Harness version:** {LEGAL_HARNESS_VERSION}",
+        f"**Updated:** {now}",
+        "",
+        "## Convention Profiles",
+        "",
+    ]
+    if profiles:
+        lines.append("| ID | Document | System | Terms | XRefs | Voice | Updated |")
+        lines.append("|----|----------|--------|-------|-------|-------|---------|")
+        for item in profiles[-20:]:
+            doc = Path(item.get("document_path", "")).name or "-"
+            system = item.get("likely_system", "-")
+            terms = item.get("defined_term_convention", {}).get("summary", "-")
+            xrefs = item.get("xref_convention", {}).get("summary", "-")
+            voice = item.get("drafting_voice", {}).get("summary", "-")
+            updated = str(item.get("updated_at", ""))[:10] or "-"
+            lines.append(f"| {item.get('id','-')} | {doc} | {system} | {terms} | {xrefs} | {voice} | {updated} |")
+    else:
+        lines.append("<!-- no convention profiles yet -->")
+    lines.extend(["", "## Active Review Plans", ""])
+    active_plans = [p for p in plans if p.get("status") not in {"completed", "archived"}]
+    if active_plans:
+        lines.append("| ID | Document | Scope | Status | Steps | Updated |")
+        lines.append("|----|----------|-------|--------|-------|---------|")
+        for plan in active_plans[-20:]:
+            doc = Path(plan.get("document_path", "")).name or "-"
+            lines.append(f"| {plan.get('id','-')} | {doc} | {plan.get('scope','-')} | {plan.get('status','-')} | {len(plan.get('steps', []))} | {str(plan.get('updated_at',''))[:10] or '-'} |")
+    else:
+        lines.append("<!-- no active review plans -->")
+    lines.extend(["", "## Recent Edit Verifications", ""])
+    if records:
+        lines.append("| ID | Document | Target | Status | Checks | Updated |")
+        lines.append("|----|----------|--------|--------|--------|---------|")
+        for rec in records[-30:]:
+            doc = Path(rec.get("document_path", "")).name or "-"
+            checks = ", ".join(rec.get("checks", [])[:4]) or "-"
+            lines.append(f"| {rec.get('id','-')} | {doc} | {rec.get('target','-')} | {rec.get('status','-')} | {checks} | {str(rec.get('updated_at',''))[:10] or '-'} |")
+    else:
+        lines.append("<!-- no edit verification records yet -->")
+    (memories_dir / "legal_harness.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _text_counts(text: str, needles: list[str]) -> int:
+    return sum(text.count(n) for n in needles)
+
+
+def lex_convention_profile(document_path: str, *, project_dir: str | None = None, action: str = "create") -> dict:
+    """Create/list/get a convention profile for a legal document."""
+    doc_path = str(Path(document_path).expanduser().resolve())
+    root = _find_project_root_for_doc(doc_path, project_dir)
+    _ensure_legal_harness_files(root)
+    store = _read_project_json(root, "convention-profiles.json", {"profiles": []})
+    profiles = store.setdefault("profiles", [])
+    if action == "list":
+        return {"ok": True, "profiles": profiles, "count": len(profiles)}
+    if action == "get":
+        for item in reversed(profiles):
+            if item.get("document_path") == doc_path:
+                return {"ok": True, "profile": item}
+        return {"ok": False, "error": "No convention profile for document"}
+    if action != "create":
+        return {"ok": False, "error": "action must be create, get, or list"}
+
+    from lexitool.markup import lex_read
+    stats = lex_read(doc_path, mode="stats")
+    structure = lex_read(doc_path, mode="legal_structure")
+    review = lex_read(doc_path, mode="review")
+    final_text = lex_read(doc_path, mode="full", show_tc="final", show_format=False, include_headers_footers=False)
+
+    term_summary = {"summary": "unknown", "sample_count": 0, "formats": {}}
+    try:
+        from docx import Document
+        from lexitool.defined_terms import term_format_audit
+        term_result = term_format_audit(Document(doc_path))
+        terms = term_result.get("terms", []) if isinstance(term_result, dict) else []
+        formats: dict[str, int] = {}
+        for term in terms[:200]:
+            fmt = term.get("format") or {}
+            key = "+".join(k for k in ("bold", "italic", "underline", "caps") if fmt.get(k)) or "plain"
+            formats[key] = formats.get(key, 0) + 1
+        if formats:
+            dominant = max(formats, key=formats.get)
+            term_summary = {"summary": dominant, "sample_count": len(terms), "formats": formats}
+    except Exception as exc:
+        term_summary = {"summary": "unavailable", "error": str(exc)}
+
+    xref_patterns = {
+        "第X条": len(re.findall(r"第[0-9一二三四五六七八九十百]+(?:\.[0-9]+)?条", final_text)),
+        "Clause X": len(re.findall(r"\bClause\s+\d+(?:\.\d+)*\b", final_text)),
+        "Section X": len(re.findall(r"\bSection\s+\d+(?:\.\d+)*\b", final_text)),
+        "Article X": len(re.findall(r"\bArticle\s+\d+(?:\.\d+)*\b", final_text)),
+    }
+    xref_summary = max(xref_patterns, key=xref_patterns.get) if any(xref_patterns.values()) else "unknown"
+    voice_counts = {
+        "shall/may": _text_counts(final_text, [" shall ", " may "]),
+        "应当/可以": _text_counts(final_text, ["应当", "可以"]),
+        "must": _text_counts(final_text, [" must "]),
+    }
+    voice_summary = max(voice_counts, key=voice_counts.get) if any(voice_counts.values()) else "unknown"
+    likely_system = "NAFMII/Chinese" if xref_summary == "第X条" or voice_summary == "应当/可以" else "APLMA/LMA/English" if xref_summary in {"Clause X", "Section X"} else "general"
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    profile = {
+        "id": _generate_harness_id("cp"),
+        "document_path": doc_path,
+        "project_dir": root,
+        "likely_system": likely_system,
+        "defined_term_convention": term_summary,
+        "xref_convention": {"summary": xref_summary, "patterns": xref_patterns},
+        "drafting_voice": {"summary": voice_summary, "counts": voice_counts},
+        "structure_preview": structure.splitlines()[:80],
+        "review_digest_preview": review.splitlines()[:80],
+        "stats": stats,
+        "created_at": now,
+        "updated_at": now,
+    }
+    profiles = [p for p in profiles if p.get("document_path") != doc_path]
+    profiles.append(profile)
+    store["profiles"] = profiles
+    store["updated_at"] = now
+    _write_project_json(root, "convention-profiles.json", store)
+    _sync_legal_harness_memory(root)
+    _append_journal_entry(root, f"**Convention profile updated:** `{Path(doc_path).name}` ({likely_system})", category="harness")
+    return {"ok": True, "profile": profile}
+
+
+def legal_review_plan(
+    document_path: str,
+    *,
+    project_dir: str | None = None,
+    action: str = "create",
+    plan_id: str | None = None,
+    scope: str = "full_document",
+    review_types: list[str] | None = None,
+    instructions: str = "",
+) -> dict:
+    """Create/list/get/update a deterministic legal review plan."""
+    doc_path = str(Path(document_path).expanduser().resolve())
+    root = _find_project_root_for_doc(doc_path, project_dir)
+    _ensure_legal_harness_files(root)
+    store = _read_project_json(root, "legal-review-plans.json", {"plans": []})
+    plans = store.setdefault("plans", [])
+    if action == "list":
+        return {"ok": True, "plans": plans, "count": len(plans)}
+    if action == "get":
+        for plan in plans:
+            if plan.get("id") == plan_id:
+                return {"ok": True, "plan": plan}
+        return {"ok": False, "error": "Plan not found"}
+    if action not in {"create", "update_status"}:
+        return {"ok": False, "error": "action must be create, list, get, or update_status"}
+    if action == "update_status":
+        for plan in plans:
+            if plan.get("id") == plan_id:
+                plan["status"] = scope
+                plan["updated_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                _write_project_json(root, "legal-review-plans.json", store)
+                _sync_legal_harness_memory(root)
+                return {"ok": True, "plan": plan}
+        return {"ok": False, "error": "Plan not found"}
+
+    from lexitool.markup import lex_read
+    review_types = review_types or ["content", "format", "xref", "facts", "delivery"]
+    review = lex_read(doc_path, mode="review")
+    outline = lex_read(doc_path, mode="legal_structure")
+    stats = lex_read(doc_path, mode="stats")
+    recommended = []
+    for line in review.splitlines():
+        m = re.search(r"lex_read paras=\[(\d+)\].*# tc=(\d+),\s*(.*)", line)
+        if m:
+            recommended.append({"para": int(m.group(1)), "tc_segments": int(m.group(2)), "tags": [t for t in m.group(3).split(",") if t]})
+    outline_paras = []
+    for line in outline.splitlines():
+        m = re.match(r"§(\d+)\s+\[([^\]]+)\]\s+(.*)", line)
+        if m:
+            outline_paras.append({"para": int(m.group(1)), "level": m.group(2), "title": m.group(3)})
+    steps = [
+        {"key": "profile", "title": "Generate/update convention profile", "tool": "lex_convention_profile", "status": "pending"},
+        {"key": "facts", "title": "Read and update project_facts for matter facts", "tool": "project_facts", "status": "pending"},
+        {"key": "structure", "title": "Review legal outline and clause map", "tool": "lex_read(mode=legal_structure)", "status": "pending"},
+    ]
+    for item in recommended[:30]:
+        steps.append({
+            "key": f"review_p{item['para']}",
+            "title": f"Deep review §{item['para']} ({', '.join(item['tags'])})",
+            "tool": "lex_read + legal judgment + lex_edit if needed + readback",
+            "status": "pending",
+            "para": item["para"],
+            "tags": item["tags"],
+            "tc_segments": item["tc_segments"],
+        })
+    for rt in review_types:
+        steps.append({"key": f"gate_{rt}", "title": f"{rt} review gate", "tool": "lex_proofread/lex_xref_audit/lex_gate_check", "status": "pending"})
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    plan = {
+        "id": _generate_harness_id("rp"),
+        "document_path": doc_path,
+        "project_dir": root,
+        "scope": scope,
+        "status": "planned",
+        "review_types": review_types,
+        "instructions": instructions,
+        "stats": stats,
+        "outline": outline_paras,
+        "hotspots": recommended,
+        "steps": steps,
+        "created_at": now,
+        "updated_at": now,
+    }
+    plans.append(plan)
+    store["updated_at"] = now
+    _write_project_json(root, "legal-review-plans.json", store)
+    _sync_legal_harness_memory(root)
+    _append_journal_entry(root, f"**Legal review plan created:** `{Path(doc_path).name}` ({len(steps)} steps)", category="harness")
+    return {"ok": True, "plan": plan}
+
+
+def edit_verification_record(
+    project_dir: str,
+    document_path: str,
+    *,
+    action: str = "add",
+    record_id: str | None = None,
+    target: str = "",
+    edit_summary: str = "",
+    before_text: str = "",
+    after_text: str = "",
+    checks: list[str] | None = None,
+    status: str = "passed",
+    issues: list[str] | None = None,
+) -> dict:
+    """Record/list/get edit verification records for material legal document edits."""
+    root = str(Path(project_dir).expanduser().resolve())
+    _ensure_legal_harness_files(root)
+    store = _read_project_json(root, "edit-verification-records.json", {"records": []})
+    records = store.setdefault("records", [])
+    if action == "list":
+        return {"ok": True, "records": records, "count": len(records)}
+    if action == "get":
+        for rec in records:
+            if rec.get("id") == record_id:
+                return {"ok": True, "record": rec}
+        return {"ok": False, "error": "Record not found"}
+    if action != "add":
+        return {"ok": False, "error": "action must be add, list, or get"}
+    if status not in {"passed", "failed", "partial", "not_applicable"}:
+        return {"ok": False, "error": "status must be passed, failed, partial, or not_applicable"}
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    rec = {
+        "id": _generate_harness_id("vr"),
+        "project_dir": root,
+        "document_path": str(Path(document_path).expanduser().resolve()),
+        "target": target,
+        "edit_summary": edit_summary,
+        "before_text": before_text,
+        "after_text": after_text,
+        "checks": checks or [],
+        "status": status,
+        "issues": issues or [],
+        "created_at": now,
+        "updated_at": now,
+    }
+    records.append(rec)
+    store["updated_at"] = now
+    _write_project_json(root, "edit-verification-records.json", store)
+    _sync_legal_harness_memory(root)
+    _append_journal_entry(root, f"**Edit verification {status}:** `{Path(document_path).name}` {target} — {edit_summary}", category="harness")
+    return {"ok": True, "record": rec}
+
+
+def legal_harness_migrate(*, db_path: str | None = None, project_dirs: list[str] | None = None) -> dict:
+    """Migrate registered projects to the current legal harness layout."""
+    migrated: list[dict] = []
+    errors: list[dict] = []
+    linked_sessions: list[dict] = []
+    ambiguous_sessions: list[dict] = []
+    now_ts = __import__("time").time()
+    projects: list[dict] = []
+    if project_dirs:
+        projects = [{"id": None, "name": Path(p).name, "client": "", "goal": "", "path": p} for p in project_dirs]
+    else:
+        try:
+            from hermes_state import SessionDB
+            db = SessionDB(db_path=Path(db_path)) if db_path else SessionDB()
+            projects = db.list_projects()
+        except Exception as exc:
+            return {"ok": False, "error": f"Could not read registered projects: {exc}"}
+    try:
+        from hermes_state import SessionDB
+        db_for_update = SessionDB(db_path=Path(db_path)) if db_path else SessionDB()
+    except Exception:
+        db_for_update = None
+    for project in projects:
+        path = project.get("path") or project.get("cwd") or ""
+        if not path:
+            errors.append({"project": project.get("name"), "error": "missing path"})
+            continue
+        p = Path(path)
+        if not p.exists():
+            errors.append({"project": project.get("name"), "path": path, "error": "path not found"})
+            continue
+        try:
+            result = _ensure_legal_harness_files(
+                str(p),
+                project_name=project.get("name") or p.name,
+                client=project.get("client") or "",
+                goal=project.get("goal") or "",
+            )
+            pid = project.get("id")
+            if db_for_update is not None and pid:
+                db_for_update.update_project(
+                    pid,
+                    harness_version=LEGAL_HARNESS_VERSION,
+                    last_harness_migration_at=now_ts,
+                )
+            migrated.append({"project_id": pid, "name": project.get("name"), "path": str(p), **result})
+        except Exception as exc:
+            errors.append({"project": project.get("name"), "path": path, "error": str(exc)})
+    if not project_dirs:
+        try:
+            import sqlite3
+            from hermes_state import DEFAULT_DB_PATH
+            live_db_path = Path(db_path) if db_path else DEFAULT_DB_PATH
+
+            def norm(value: str) -> str:
+                return re.sub(r"\s+", "", str(value or "")).lower()
+
+            matchers = []
+            for p in projects:
+                pid = p.get("id")
+                if not pid:
+                    continue
+                names = {
+                    norm(p.get("name", "")),
+                    norm(Path(p.get("path", "")).name),
+                }
+                names = {n for n in names if n}
+                if names:
+                    matchers.append((pid, p.get("name", ""), names))
+
+            conn = sqlite3.connect(str(live_db_path))
+            conn.row_factory = sqlite3.Row
+            try:
+                rows = conn.execute(
+                    "SELECT id, title FROM sessions "
+                    "WHERE (project_id IS NULL OR project_id = '') "
+                    "AND title IS NOT NULL AND title != ''"
+                ).fetchall()
+                for row in rows:
+                    title_n = norm(row["title"])
+                    matches = []
+                    for pid, pname, names in matchers:
+                        if any(title_n == n or title_n in n or n in title_n for n in names):
+                            matches.append((pid, pname))
+                    unique = {(pid, pname) for pid, pname in matches}
+                    if len(unique) == 1:
+                        pid, pname = next(iter(unique))
+                        conn.execute("UPDATE sessions SET project_id = ? WHERE id = ?", (pid, row["id"]))
+                        linked_sessions.append({"session_id": row["id"], "title": row["title"], "project_id": pid, "project_name": pname})
+                    elif len(unique) > 1:
+                        ambiguous_sessions.append({
+                            "session_id": row["id"],
+                            "title": row["title"],
+                            "candidates": [{"project_id": pid, "project_name": pname} for pid, pname in sorted(unique)],
+                        })
+                conn.commit()
+            finally:
+                conn.close()
+        except Exception as exc:
+            errors.append({"scope": "session_project_binding", "error": str(exc)})
+    return {
+        "ok": not errors,
+        "harness_version": LEGAL_HARNESS_VERSION,
+        "migrated_count": len(migrated),
+        "error_count": len(errors),
+        "linked_session_count": len(linked_sessions),
+        "ambiguous_session_count": len(ambiguous_sessions),
+        "migrated": migrated,
+        "linked_sessions": linked_sessions,
+        "ambiguous_sessions": ambiguous_sessions,
+        "errors": errors,
     }
 
 

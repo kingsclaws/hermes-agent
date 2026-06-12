@@ -667,6 +667,8 @@ def _build_child_system_prompt(
             "Mandatory workflow:\n"
             "- For whole-document review, start with `lex_read(mode='review')` or `lex_read(mode='legal_structure')`, then read targeted ranges in full.\n"
             "- For version comparison, start with `lex_diff(mode='summary')` before editing or producing redlines.\n"
+            "- Before substantive edits, consult or create `lex_convention_profile` so term formatting, xref style, numbering, and drafting voice match the host document.\n"
+            "- For whole-document/multi-issue review, follow `legal_review_plan` rather than improvising a keyword pass.\n"
             "- Read the assigned paragraph/table range with `lex_read` before editing.\n"
             "- Compare that range against the project facts, TS, instructions, and template convention.\n"
             "- Use native lex tools for edits; do not bypass with ad-hoc python-docx or shell scripts unless the task explicitly asks.\n"
@@ -674,6 +676,7 @@ def _build_child_system_prompt(
             "- Read the same range back after every material edit and verify the result.\n"
             "- For annotated templates, call `lex_template_audit` before deleting colored text, highlights, bracket notes, guide text, or checkbox alternatives. Only clean the phases explicitly selected by the task/workflow.\n"
             "- Treat `project_facts` as the live matter facts database. Update it whenever you discover, confirm, correct, or supersede project facts; consult it before drafting/reviewing provisions that depend on project facts.\n"
+            "- Record material edit readback checks with `edit_verification_record` when available.\n"
             "- Treat `lex_git` as the matter version-control tool: use status/snapshot for material milestones and worktrees/branches for alternative drafting approaches when available.\n"
             "- If verification fails or unresolved placeholders/internal notes/cross-references remain, stop and report the exact issue instead of continuing.\n"
         )

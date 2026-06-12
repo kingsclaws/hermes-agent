@@ -2960,6 +2960,169 @@ def _handle_project_facts(args: dict, **kwargs) -> str:
     return tool_result(result)
 
 
+# ── 17c. Legal harness primitives ────────────────────────────────────────────
+
+LEX_CONVENTION_PROFILE_SCHEMA = {
+    "name": "lex_convention_profile",
+    "description": (
+        "Create/read the native convention profile for a legal DOCX. Use before "
+        "substantive edits to capture defined-term formatting, cross-reference "
+        "style, drafting voice, legal structure, and review hotspots. This is "
+        "the harness-level replacement for prompt-only 'convention analysis'."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "document_path": {"type": "string", "description": "Path to the DOCX document."},
+            "project_dir": {"type": "string", "description": "Optional project root containing .hermes-project/."},
+            "action": {
+                "type": "string",
+                "enum": ["create", "get", "list"],
+                "description": "create=generate/update profile; get=latest for document; list=all project profiles. Default: create.",
+            },
+        },
+        "required": ["document_path"],
+    },
+}
+
+
+def _handle_lex_convention_profile(args: dict, **kwargs) -> str:
+    from hermes_cli.project_commands import lex_convention_profile
+
+    result = lex_convention_profile(
+        _resolve_path(args["document_path"]),
+        project_dir=_resolve_path(args["project_dir"]) if args.get("project_dir") else None,
+        action=args.get("action", "create"),
+    )
+    return tool_result(result) if result.get("ok") else tool_error(result.get("error", "convention profile failed"))
+
+
+LEGAL_REVIEW_PLAN_SCHEMA = {
+    "name": "legal_review_plan",
+    "description": (
+        "Create and maintain a deterministic legal review plan for a DOCX. "
+        "The plan turns lex_read(mode='review') hotspots, legal outline, and "
+        "review dimensions into explicit steps for lawyer-style paragraph-by-"
+        "paragraph review, rather than broad keyword replacement."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "document_path": {"type": "string", "description": "Path to the DOCX document."},
+            "project_dir": {"type": "string", "description": "Optional project root containing .hermes-project/."},
+            "action": {
+                "type": "string",
+                "enum": ["create", "list", "get", "update_status"],
+                "description": "Plan operation. Default: create.",
+            },
+            "plan_id": {"type": "string", "description": "Plan ID for get/update_status."},
+            "scope": {"type": "string", "description": "Review scope, or new status when action=update_status."},
+            "review_types": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Review dimensions: content, format, xref, facts, ts, delivery, translation.",
+            },
+            "instructions": {"type": "string", "description": "User/task-specific review instructions."},
+        },
+        "required": ["document_path"],
+    },
+}
+
+
+def _handle_legal_review_plan(args: dict, **kwargs) -> str:
+    from hermes_cli.project_commands import legal_review_plan
+
+    result = legal_review_plan(
+        _resolve_path(args["document_path"]),
+        project_dir=_resolve_path(args["project_dir"]) if args.get("project_dir") else None,
+        action=args.get("action", "create"),
+        plan_id=args.get("plan_id"),
+        scope=args.get("scope", "full_document"),
+        review_types=args.get("review_types"),
+        instructions=args.get("instructions", ""),
+    )
+    return tool_result(result) if result.get("ok") else tool_error(result.get("error", "legal review plan failed"))
+
+
+EDIT_VERIFICATION_RECORD_SCHEMA = {
+    "name": "edit_verification_record",
+    "description": (
+        "Record/list/get verification records for material legal DOCX edits. "
+        "Use after lex_edit readback to persist before/after, checks performed, "
+        "status, and remaining issues in .hermes-project so future sessions can "
+        "audit what was changed and verified."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "project_dir": {"type": "string", "description": "Project root containing .hermes-project/."},
+            "document_path": {"type": "string", "description": "Path to the edited DOCX document."},
+            "action": {
+                "type": "string",
+                "enum": ["add", "list", "get"],
+                "description": "Record operation. Default: add.",
+            },
+            "record_id": {"type": "string", "description": "Record ID for get."},
+            "target": {"type": "string", "description": "Edited target, e.g. §12 or table 1 R2C3."},
+            "edit_summary": {"type": "string", "description": "Short description of the edit and legal rationale."},
+            "before_text": {"type": "string", "description": "Relevant before/read context."},
+            "after_text": {"type": "string", "description": "Readback after edit."},
+            "checks": {"type": "array", "items": {"type": "string"}, "description": "Checks performed."},
+            "status": {"type": "string", "enum": ["passed", "failed", "partial", "not_applicable"], "description": "Verification status."},
+            "issues": {"type": "array", "items": {"type": "string"}, "description": "Remaining issues, if any."},
+        },
+        "required": ["project_dir", "document_path"],
+    },
+}
+
+
+def _handle_edit_verification_record(args: dict, **kwargs) -> str:
+    from hermes_cli.project_commands import edit_verification_record
+
+    result = edit_verification_record(
+        _resolve_path(args["project_dir"]),
+        _resolve_path(args["document_path"]),
+        action=args.get("action", "add"),
+        record_id=args.get("record_id"),
+        target=args.get("target", ""),
+        edit_summary=args.get("edit_summary", ""),
+        before_text=args.get("before_text", ""),
+        after_text=args.get("after_text", ""),
+        checks=args.get("checks"),
+        status=args.get("status", "passed"),
+        issues=args.get("issues"),
+    )
+    return tool_result(result) if result.get("ok") else tool_error(result.get("error", "edit verification record failed"))
+
+
+LEGAL_HARNESS_MIGRATE_SCHEMA = {
+    "name": "legal_harness_migrate",
+    "description": (
+        "Migrate registered legal projects to the current native harness layout. "
+        "Reads the Hermes project DB by default, creates missing .hermes-project "
+        "state/facts/convention/review/verification files, syncs memories, and "
+        "marks project rows with the current harness version."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "db_path": {"type": "string", "description": "Optional explicit state.db path. Defaults to current Hermes profile DB."},
+            "project_dirs": {"type": "array", "items": {"type": "string"}, "description": "Optional explicit project dirs instead of DB projects."},
+        },
+    },
+}
+
+
+def _handle_legal_harness_migrate(args: dict, **kwargs) -> str:
+    from hermes_cli.project_commands import legal_harness_migrate
+
+    result = legal_harness_migrate(
+        db_path=_resolve_path(args["db_path"]) if args.get("db_path") else None,
+        project_dirs=[_resolve_path(p) for p in args.get("project_dirs", [])] if args.get("project_dirs") else None,
+    )
+    return tool_result(result) if result.get("ok") else tool_error(result.get("error", "legal harness migration failed"), **result)
+
+
 # ── 18. refine_goal ─────────────────────────────────────────────────────────
 
 REFINE_GOAL_SCHEMA = {
@@ -3376,6 +3539,10 @@ _TOOLS = [
     ("update_project_state",   "lexitool", UPDATE_PROJECT_STATE_SCHEMA,   _handle_update_project_state),
     ("get_project_state",      "lexitool", GET_PROJECT_STATE_SCHEMA,      _handle_get_project_state),
     ("project_facts",          "lexitool", PROJECT_FACTS_SCHEMA,          _handle_project_facts),
+    ("lex_convention_profile", "lexitool", LEX_CONVENTION_PROFILE_SCHEMA, _handle_lex_convention_profile),
+    ("legal_review_plan",      "lexitool", LEGAL_REVIEW_PLAN_SCHEMA,      _handle_legal_review_plan),
+    ("edit_verification_record", "lexitool", EDIT_VERIFICATION_RECORD_SCHEMA, _handle_edit_verification_record),
+    ("legal_harness_migrate",  "lexitool", LEGAL_HARNESS_MIGRATE_SCHEMA,  _handle_legal_harness_migrate),
     # Goal
     ("refine_goal",            "lexitool", REFINE_GOAL_SCHEMA,            _handle_refine_goal),
     # Task Board

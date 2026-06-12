@@ -10,6 +10,12 @@ sys.path.insert(0, str((Path(__file__).resolve().parents[1] / "vendor" / "lexito
 
 from lexitool.diff import summary
 from lexitool.markup import lex_read
+from hermes_cli.project_commands import (
+    edit_verification_record,
+    legal_harness_migrate,
+    legal_review_plan,
+    lex_convention_profile,
+)
 from tools.lexitool_tool import _handle_edit
 
 
@@ -115,3 +121,44 @@ def test_replace_all_requires_confirmation_for_high_risk_bulk_legal_edits(tmp_pa
     })
 
     assert "LEGAL_BULK_REPLACE_REVIEW_REQUIRED" in result
+
+
+def test_legal_harness_primitives_persist_project_state(tmp_path):
+    project = tmp_path / "matter"
+    hp = project / ".hermes-project"
+    hp.mkdir(parents=True)
+    (hp / "project-meta.json").write_text(
+        '{"name":"测试项目","client":"客户","goal":"测试"}',
+        encoding="utf-8",
+    )
+    doc_path = project / "support.docx"
+    doc = Document()
+    doc.add_paragraph("支持函")
+    doc.add_paragraph("一、本公司承诺")
+    doc.add_paragraph("本函不构成担保或债务承担，但本公司承诺提供流动性支持。")
+    doc.save(doc_path)
+
+    migrated = legal_harness_migrate(project_dirs=[str(project)])
+    profile = lex_convention_profile(str(doc_path), project_dir=str(project))
+    plan = legal_review_plan(str(doc_path), project_dir=str(project))
+    record = edit_verification_record(
+        str(project),
+        str(doc_path),
+        target="§3",
+        edit_summary="确认非担保表述和支持义务并存",
+        before_text="本函不构成担保。",
+        after_text="本函不构成担保或债务承担，但本公司承诺提供流动性支持。",
+        checks=["lex_read readback", "liability/security", "obligations/support"],
+        status="passed",
+    )
+
+    assert migrated["migrated_count"] == 1
+    assert profile["ok"] is True
+    assert profile["profile"]["xref_convention"]["summary"] in {"unknown", "第X条"}
+    assert plan["ok"] is True
+    assert plan["plan"]["steps"]
+    assert record["ok"] is True
+    assert (hp / "convention-profiles.json").exists()
+    assert (hp / "legal-review-plans.json").exists()
+    assert (hp / "edit-verification-records.json").exists()
+    assert "Edit verification passed" in (hp / "project-context.md").read_text(encoding="utf-8")

@@ -55,6 +55,12 @@ verification-first:
   or `lex_read(mode='legal_structure')` plus targeted full reads. For version
   comparisons, start with `lex_diff(mode='summary')` before generating redlines
   or editing.
+- Before substantive edits to an existing legal document, create or consult
+  `lex_convention_profile` so defined-term formatting, cross-reference style,
+  numbering, and drafting voice match the host document.
+- For whole-document or multi-issue review, create or consult
+  `legal_review_plan` and work through its steps instead of improvising a
+  keyword-replacement pass.
 - For existing documents, work in bounded paragraph/table ranges. For each
   range: `lex_read` the range, decide whether the project facts require edits,
   edit with native lex tools, then read the same range back and verify.
@@ -69,6 +75,10 @@ verification-first:
   initialize/status/snapshot material milestones; use worktrees/branches for
   alternative drafting approaches or parallel agent work instead of overwriting
   a working version blindly.
+- After material legal document edits, record the readback verification with
+  `edit_verification_record` when available, especially if the edit affects
+  parties, amounts, dates, defined terms, conditions, liability, cross-references,
+  tables, or comments.
 - Treat `project_facts` as the live matter facts database. Whenever you discover,
   confirm, correct, or supersede a project fact (party names, roles, amounts,
   dates, security, CPs, documents, open issues), update `project_facts` promptly

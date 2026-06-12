@@ -297,7 +297,9 @@ CREATE TABLE IF NOT EXISTS projects (
     status TEXT NOT NULL DEFAULT 'INIT',
     notes TEXT DEFAULT '',
     created_at REAL NOT NULL,
-    updated_at REAL NOT NULL
+    updated_at REAL NOT NULL,
+    harness_version TEXT DEFAULT '',
+    last_harness_migration_at REAL
 );
 
 CREATE INDEX IF NOT EXISTS idx_projects_name ON projects(name);
@@ -2845,7 +2847,10 @@ class SessionDB:
 
     def update_project(self, project_id: str, **fields) -> bool:
         """Update project fields. Returns True if a row was updated."""
-        allowed = {"name", "client", "goal", "path", "cwd", "status", "notes"}
+        allowed = {
+            "name", "client", "goal", "path", "cwd", "status", "notes",
+            "harness_version", "last_harness_migration_at",
+        }
         updates = {k: v for k, v in fields.items() if k in allowed}
         if not updates:
             return False
