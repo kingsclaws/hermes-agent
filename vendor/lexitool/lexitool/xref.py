@@ -1019,6 +1019,36 @@ _HEADING_STYLES = frozenset({
     "1", "2", "3", "4", "5", "6", "7", "8", "9",  # standard Word heading style IDs
 })
 
+# ── Extended audit patterns ─────────────────────────────────────────────────────
+
+# Empty clause refs: "第条" without a number, often from botched edits
+_EMPTY_CLAUSE_REF_RE = re.compile(r'第\s*条')
+
+# Schedule/attachment refs missing a number: "附件(抵押物清单)" instead of "附件1(抵押物清单)"
+_MISSING_SCHEDULE_NUM_RE = re.compile(
+    r'附件\s*[（(]\s*(?:抵押|合同|协议|清单|资产|标的|保证|担保|承诺)'
+)
+
+# Forward refs that need target validation: "定义见第X条", "详见第X条", "定义见下文"
+_FORWARD_REF_RE = re.compile(
+    r'(?:定义|内容|具体|详见|参见|见|参照|参考)'
+    r'(?:见|详见|参照|参见)?'
+    r'(?:第(\d+(?:\.\d+)*)条|下文)'
+)
+# Simpler: "见第X条" and "定义见第X条"
+_SEE_CLAUSE_RE = re.compile(r'(?:见|参见|详见|参照)\s*第(\d+(?:\.\d+)*)条')
+_SEE_BELOW_RE = re.compile(r'(?:定义|内容|具体|详见|参见|见|描述)见下文')
+
+# JT / law firm notes in square brackets: "[竞天注：...]" "[JT注：...]" "[金杜注：...]"
+_JT_NOTE_RE = re.compile(r'\[(?:竞天|JT|金杜|jd|jt)\s*[注Note][^\]]*\]', re.IGNORECASE)
+
+# Draft placeholder brackets: "[]" used as fill-in-the-blank in initial drafts
+# Catches isolated [] and bracketed options like [有限责任公司]/[股份有限公司]
+_DRAFT_PLACEHOLDER_RE = re.compile(r'\[\]|\[[^\]]*\][/／]\[[^\]]*\]')
+
+# Clause ref with placeholder brackets: "第[]条" — missing clause number
+_EMPTY_CLAUSE_BRACKET_RE = re.compile(r'第\s*\[\s*\]\s*条')
+
 
 def _build_broad_clause_index(paras: list) -> dict[str, int]:
     """Build clause-number → paragraph-index map from all heading styles.
@@ -1120,25 +1150,29 @@ def xref_audit(doc_path: str) -> dict:
     Section/Clause/Article patterns) and checks whether the referenced
     clause actually exists in the document's heading structure.
 
+    Also detects:
+    - Empty clause refs (第条 without a number) from botched edits
+    - Schedule refs missing numbers (附件(描述) instead of 附件1(描述))
+    - Forward refs (见第X条) — validates the target exists
+    - "See below" refs (定义见下文) — flagged for manual review
+    - Bookmark integrity — mismatched bookmarkStart/End tags
+    - Law firm notes ([竞天注：...], [JT注：...]) — pre-send cleanup items
+
     Returns:
         {
             "ok": True,
-            "clauses_indexed": N,       # total clauses found in headings
-            "total_references": T,      # total references found
-            "valid_refs": [...],        # references that resolve to a clause
-            "dead_refs": [...],         # references to non-existing clauses
-            "unreferenced_clauses": [cn, ...],  # clauses never referenced
+            "clauses_indexed": N,
+            "total_references": T,
+            "valid_refs": [...],
+            "dead_refs": [...],
+            "unreferenced_clauses": [cn, ...],
+            "empty_clause_refs": [...],
+            "missing_schedule_nums": [...],
+            "broken_forward_refs": [...],
+            "see_below_refs": [...],
+            "bookmark_issues": [...],
+            "jt_notes": [...],
             "summary": "..."
-        }
-
-    Each reference entry:
-        {
-            "para": int,                # paragraph number (1-indexed)
-            "ref_text": "第3.1条",      # the matched reference text
-            "clause_num": "3.1",       # the referenced clause number
-            "status": "valid" | "dead",
-            "target_para": int | null,  # paragraph of target clause (if valid)
-            "context": "...",           # surrounding text (~80 chars)
         }
     """
     doc_xml, _other, _order = _read_docx(doc_path)
@@ -1151,12 +1185,30 @@ def xref_audit(doc_path: str) -> dict:
 
     valid_refs: list[dict] = []
     dead_refs: list[dict] = []
+    empty_clause_refs: list[dict] = []
+    missing_schedule_nums: list[dict] = []
+    broken_forward_refs: list[dict] = []
+    see_below_refs: list[dict] = []
+    jt_notes: list[dict] = []
+    draft_placeholders: list[dict] = []
+
+    def _ctx(full_text, m):
+        ctx_start = max(0, m.start() - 30)
+        ctx_end = min(len(full_text), m.end() + 50)
+        context = full_text[ctx_start:ctx_end].replace("\t", " ")
+        if ctx_start > 0:
+            context = "…" + context
+        if ctx_end < len(full_text):
+            context += "…"
+        return context
 
     for pi, p in enumerate(paras):
         full_text = "".join(txt for _, txt in _get_direct_runs(p))
         if not full_text.strip():
+            # Still check for bookmark issues on empty paras
             continue
 
+        # ── Clause reference audit (original patterns) ──
         for pattern, ref_type in _XREF_AUDIT_PATTERNS:
             for m in pattern.finditer(full_text):
                 raw_cn = m.group(1)
@@ -1167,20 +1219,11 @@ def xref_audit(doc_path: str) -> dict:
 
                 referenced_clauses.add(cn)
 
-                # Extract context (~80 chars around the match)
-                ctx_start = max(0, m.start() - 30)
-                ctx_end = min(len(full_text), m.end() + 50)
-                context = full_text[ctx_start:ctx_end].replace("\t", " ")
-                if ctx_start > 0:
-                    context = "…" + context
-                if ctx_end < len(full_text):
-                    context += "…"
-
                 entry = {
                     "para": pi + 1,
                     "ref_text": m.group(0),
                     "clause_num": cn,
-                    "context": context,
+                    "context": _ctx(full_text, m),
                 }
 
                 if cn in clause_to_pidx:
@@ -1192,13 +1235,136 @@ def xref_audit(doc_path: str) -> dict:
                     entry["target_para"] = None
                     dead_refs.append(entry)
 
+        # ── Empty clause refs: "第条" without a number ──
+        for m in _EMPTY_CLAUSE_REF_RE.finditer(full_text):
+            empty_clause_refs.append({
+                "para": pi + 1,
+                "ref_text": m.group(0),
+                "context": _ctx(full_text, m),
+                "reason": "Clause reference missing number — likely from botched edit",
+            })
+
+        # ── Missing schedule numbers: "附件(描述)" without "附件N(描述)" ──
+        for m in _MISSING_SCHEDULE_NUM_RE.finditer(full_text):
+            missing_schedule_nums.append({
+                "para": pi + 1,
+                "ref_text": m.group(0),
+                "context": _ctx(full_text, m),
+                "reason": "Schedule reference missing number — should be e.g. 附件1(抵押物清单)",
+            })
+
+        # ── Forward refs: "见第X条" — validate the target clause exists ──
+        for m in _SEE_CLAUSE_RE.finditer(full_text):
+            target_cn = m.group(1)
+            if target_cn not in clause_to_pidx:
+                broken_forward_refs.append({
+                    "para": pi + 1,
+                    "ref_text": m.group(0),
+                    "target_clause": target_cn,
+                    "context": _ctx(full_text, m),
+                    "reason": f"Forward reference to clause {target_cn} which does not exist",
+                })
+
+        # ── "See below" refs: "定义见下文" — flag for manual review ──
+        for m in _SEE_BELOW_RE.finditer(full_text):
+            see_below_refs.append({
+                "para": pi + 1,
+                "ref_text": m.group(0),
+                "context": _ctx(full_text, m),
+                "reason": "See-below reference — verify target definition exists later in document",
+            })
+
+        # ── JT / law firm notes: "[竞天注：...]" ──
+        for m in _JT_NOTE_RE.finditer(full_text):
+            jt_notes.append({
+                "para": pi + 1,
+                "ref_text": m.group(0),
+                "context": _ctx(full_text, m),
+                "reason": "Law firm internal note — should be removed before sending to counterparty",
+            })
+
+        # ── Empty clause bracket refs: "第[]条" — missing number ──
+        for m in _EMPTY_CLAUSE_BRACKET_RE.finditer(full_text):
+            empty_clause_refs.append({
+                "para": pi + 1,
+                "ref_text": m.group(0),
+                "context": _ctx(full_text, m),
+                "reason": "Clause reference with placeholder brackets — number must be filled",
+            })
+
+        # ── Draft placeholder brackets: "[]" or "[X]/[Y]" alternatives ──
+        for m in _DRAFT_PLACEHOLDER_RE.finditer(full_text):
+            draft_placeholders.append({
+                "para": pi + 1,
+                "ref_text": m.group(0),
+                "context": _ctx(full_text, m),
+                "reason": "Draft placeholder — must be filled or resolved before finalizing",
+            })
+
+    # ── Bookmark integrity check ──
+    bookmark_issues: list[dict] = []
+    bm_start_ids: set[str] = set()
+    bm_end_ids: set[str] = set()
+    bm_name_by_id: dict[str, str] = {}
+
+    for pi, p in enumerate(paras):
+        for bm in p.iter(f"{W}bookmarkStart"):
+            bm_id = bm.get(f"{W}id", "")
+            bm_name = bm.get(f"{W}name", "")
+            if bm_id:
+                bm_start_ids.add(bm_id)
+                bm_name_by_id[bm_id] = bm_name
+        for bm in p.iter(f"{W}bookmarkEnd"):
+            bm_id = bm.get(f"{W}id", "")
+            if bm_id:
+                bm_end_ids.add(bm_id)
+
+    unmatched_starts = bm_start_ids - bm_end_ids
+    unmatched_ends = bm_end_ids - bm_start_ids
+
+    for bm_id in sorted(unmatched_starts):
+        bookmark_issues.append({
+            "type": "unmatched_start",
+            "bookmark_id": bm_id,
+            "bookmark_name": bm_name_by_id.get(bm_id, ""),
+            "reason": "bookmarkStart without matching bookmarkEnd — may corrupt document",
+        })
+    for bm_id in sorted(unmatched_ends):
+        bookmark_issues.append({
+            "type": "unmatched_end",
+            "bookmark_id": bm_id,
+            "reason": "bookmarkEnd without matching bookmarkStart — may corrupt document",
+        })
+
     unreferenced = sorted(
         [cn for cn in clause_to_pidx if cn not in referenced_clauses],
         key=lambda x: tuple(int(p) for p in x.split(".")),
     )
 
     total = len(valid_refs) + len(dead_refs)
-    all_ok = len(dead_refs) == 0
+    issues = (
+        len(dead_refs) + len(empty_clause_refs) + len(missing_schedule_nums)
+        + len(broken_forward_refs) + len(bookmark_issues) + len(jt_notes)
+        + len(draft_placeholders)
+    )
+    all_ok = issues == 0
+
+    summary_parts = [f"{total} references: {len(valid_refs)} valid, {len(dead_refs)} dead"]
+    if empty_clause_refs:
+        summary_parts.append(f"{len(empty_clause_refs)} empty clause refs")
+    if missing_schedule_nums:
+        summary_parts.append(f"{len(missing_schedule_nums)} schedule refs missing number")
+    if broken_forward_refs:
+        summary_parts.append(f"{len(broken_forward_refs)} broken forward refs")
+    if see_below_refs:
+        summary_parts.append(f"{len(see_below_refs)} see-below refs to review")
+    if bookmark_issues:
+        summary_parts.append(f"{len(bookmark_issues)} bookmark issues")
+    if jt_notes:
+        summary_parts.append(f"{len(jt_notes)} JT/internal notes to remove")
+    if draft_placeholders:
+        summary_parts.append(f"{len(draft_placeholders)} draft placeholders to resolve")
+    summary_parts.append(f"{len(unreferenced)} clauses unreferenced")
 
     return {
         "ok": all_ok,
@@ -1207,12 +1373,14 @@ def xref_audit(doc_path: str) -> dict:
         "valid_refs": valid_refs,
         "dead_refs": dead_refs,
         "unreferenced_clauses": unreferenced,
-        "summary": (
-            f"{total} references found: "
-            f"{len(valid_refs)} valid, "
-            f"{len(dead_refs)} dead, "
-            f"{len(unreferenced)} clauses unreferenced"
-        ),
+        "empty_clause_refs": empty_clause_refs,
+        "missing_schedule_nums": missing_schedule_nums,
+        "broken_forward_refs": broken_forward_refs,
+        "see_below_refs": see_below_refs,
+        "bookmark_issues": bookmark_issues,
+        "jt_notes": jt_notes,
+        "draft_placeholders": draft_placeholders,
+        "summary": ", ".join(summary_parts),
     }
 
 
