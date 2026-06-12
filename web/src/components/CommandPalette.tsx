@@ -45,7 +45,7 @@ interface CommandPaletteProps {
   onExecute: (command: string) => void;
 }
 
-export function CommandPalette({ gw, sessionId, onExecute }: CommandPaletteProps) {
+export function CommandPalette({ onExecute }: CommandPaletteProps) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [selected, setSelected] = useState(0);

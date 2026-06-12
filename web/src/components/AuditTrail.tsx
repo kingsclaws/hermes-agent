@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { Clock, User, FileText, PenLine, Download, Upload, CheckCircle } from "lucide-react";
+import { Clock, FileText, PenLine, Download, Upload, CheckCircle } from "lucide-react";
 import { api, type AuditEvent } from "@/lib/api";
 import { Spinner } from "@nous-research/ui/ui/components/spinner";
 import { Badge } from "@nous-research/ui/ui/components/badge";
@@ -33,10 +33,10 @@ export function AuditTrail({ projectId, filePath }: Props) {
       .finally(() => setLoading(false));
   }, [projectId, filePath]);
 
-  const signingTones: Record<string, "success" | "warning" | "outline" | "info"> = {
+  const signingTones: Record<string, "success" | "warning" | "outline"> = {
     signed: "success",
     "partially-signed": "warning",
-    sent: "info",
+    sent: "outline",
     unsigned: "outline",
   };
 

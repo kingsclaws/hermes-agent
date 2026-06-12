@@ -19,8 +19,8 @@ export function DocumentLinkPicker({ projectId, selected, onApply, onClose }: Pr
   const [picked, setPicked] = useState<Set<string>>(new Set(selected));
 
   useEffect(() => {
-    api.fetchFiles(projectId)
-      .then((r) => setFiles(r?.files ?? []))
+    api.fetchProjectFiles(projectId)
+      .then((r) => setFiles((r?.files ?? []).map((f) => f.path)))
       .catch(() => setFiles([]))
       .finally(() => setLoading(false));
   }, [projectId]);

@@ -23,7 +23,7 @@ interface ApprovalModalProps {
  * from the gateway and renders an interactive dialog. The backend BLOCKS
  * until the frontend responds — every second counts for UX.
  */
-export function ApprovalModal({ gw, sessionId }: ApprovalModalProps) {
+export function ApprovalModal({ gw }: ApprovalModalProps) {
   const [pending, setPending] = useState<{
     type: string;
     requestId?: string;

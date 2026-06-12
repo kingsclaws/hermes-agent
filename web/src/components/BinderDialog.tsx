@@ -74,11 +74,8 @@ export function BinderDialog({ projectId, files, onClose }: Props) {
             </p>
             <div className="flex gap-2">
               <Button
-                onClick={async () => {
-                  try {
-                    const url = await api.downloadProjectFile(projectId, outputUrl);
-                    window.open(url, "_blank");
-                  } catch {}
+                onClick={() => {
+                  api.downloadProjectFile(projectId, outputUrl);
                 }}
                 prefix={<Download className="h-3.5 w-3.5" />}
                 size="sm"
