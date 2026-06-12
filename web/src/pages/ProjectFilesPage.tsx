@@ -18,7 +18,6 @@ import {
   Home,
   AlertCircle,
   Download,
-  GitBranch,
   History,
   Search,
   FileSearch,
@@ -40,8 +39,6 @@ import { useToast } from "@nous-research/ui/hooks/use-toast";
 import { Toast } from "@nous-research/ui/ui/components/toast";
 import { PluginSlot } from "@/plugins";
 import { VersionHistory } from "@/components/VersionHistory";
-import { DocumentPreview } from "@/components/DocumentPreview";
-import { DocumentMetadataEditor } from "@/components/DocumentMetadataEditor";
 import { FileDetailPanel } from "@/components/FileDetailPanel";
 import { DiffViewer } from "@/components/DiffViewer";
 import { BinderDialog } from "@/components/BinderDialog";
@@ -61,10 +58,6 @@ export default function ProjectFilesPage() {
   const [versionOpen, setVersionOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [searchResults, setSearchResults] = useState<Array<{ path: string; name: string; matches: string[]; size: number }>>([]);
-  const [searching, setSearching] = useState(false);
-  const [previewFilePath, setPreviewFilePath] = useState<string | null>(null);
-  const [previewFileName, setPreviewFileName] = useState("");
-  const [editMetaPath, setEditMetaPath] = useState<string | null>(null);
   const [inventory, setInventory] = useState<Record<string, DocumentMeta>>({});
   const [detailPath, setDetailPath] = useState<string | null>(null);
   const [detailName, setDetailName] = useState("");
@@ -160,7 +153,6 @@ export default function ProjectFilesPage() {
 
   const handleSearch = async () => {
     if (!projectId || !searchQuery.trim()) return;
-    setSearching(true);
     try {
       const res = await api.searchDocuments(projectId, searchQuery.trim(), 30, {
         status: searchFilters.status || undefined,
@@ -169,8 +161,6 @@ export default function ProjectFilesPage() {
       setSearchResults(res.results ?? []);
     } catch {
       // errors surfaced inline
-    } finally {
-      setSearching(false);
     }
   };
 
@@ -194,11 +184,11 @@ export default function ProjectFilesPage() {
   const getDocStatusBadge = (filePath: string) => {
     const meta = inventory[filePath];
     if (!meta?.status && !meta?.signing_status) return null;
-    const tones: Record<string, { tone: "outline" | "warning" | "success" | "info"; label: string }> = {
+    const tones: Record<string, { tone: "outline" | "warning" | "success"; label: string }> = {
       draft: { tone: "outline", label: "Draft" },
       review: { tone: "warning", label: "In Review" },
       final: { tone: "success", label: "Final" },
-      signed: { tone: "info", label: "Signed" },
+      signed: { tone: "success", label: "Signed" },
       archived: { tone: "outline", label: "Archived" },
     };
     const t = meta.status ? (tones[meta.status] ?? { tone: "outline" as const, label: meta.status }) : null;
@@ -206,7 +196,7 @@ export default function ProjectFilesPage() {
     return (
       <span className="flex items-center gap-1 flex-shrink-0">
         {t && <Badge tone={t.tone} className="text-xs">{t.label}</Badge>}
-        {signing && <Badge tone={signing === "signed" ? "success" : signing === "partially-signed" ? "warning" : "info"} className="text-[10px]">{signing}</Badge>}
+        {signing && <Badge tone={signing === "signed" ? "success" : signing === "partially-signed" ? "warning" : "outline"} className="text-[10px]">{signing}</Badge>}
       </span>
     );
   };
@@ -446,8 +436,8 @@ export default function ProjectFilesPage() {
                   type="button"
                   className="flex items-start gap-3 px-2 py-1.5 rounded text-left hover:bg-muted/5 text-xs"
                   onClick={() => {
-                    setPreviewFilePath(r.path);
-                    setPreviewFileName(r.name);
+                    setDetailPath(r.path);
+                    setDetailName(r.name);
                     loadFiles();
                   }}
                 >
@@ -603,8 +593,8 @@ export default function ProjectFilesPage() {
                       className="h-7 w-7"
                       onClick={(e) => {
                         e.stopPropagation();
-                        setPreviewFilePath(f.path);
-                        setPreviewFileName(f.name);
+                        setDetailPath(f.path);
+                        setDetailName(f.name);
                       }}
                       title="Preview"
                     >
@@ -616,7 +606,8 @@ export default function ProjectFilesPage() {
                       className="h-7 w-7"
                       onClick={(e) => {
                         e.stopPropagation();
-                        setEditMetaPath(f.path);
+                        setDetailPath(f.path);
+                        setDetailName(f.name);
                       }}
                       title="Edit metadata"
                     >

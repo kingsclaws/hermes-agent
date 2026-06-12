@@ -15,7 +15,7 @@ import {
   FileText,
 } from "lucide-react";
 import { api, type DashboardResponse, type Checklist, type ChecklistItem, type CpEntry, type TaskEntry } from "@/lib/api";
-import { timeAgo, cn } from "@/lib/utils";
+import { cn } from "@/lib/utils";
 import { Button } from "@nous-research/ui/ui/components/button";
 import { Badge } from "@nous-research/ui/ui/components/badge";
 import { Spinner } from "@nous-research/ui/ui/components/spinner";

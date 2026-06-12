@@ -8,7 +8,6 @@ import {
   GitCommit,
   Plus,
   RefreshCw,
-  ChevronRight,
   Clock,
   Circle,
   AlertTriangle,
@@ -85,8 +84,6 @@ export function VersionHistory({ projectId, className }: VersionHistoryProps) {
       </div>
     );
   }
-
-  const currentBranch = branches.find((b) => b.current);
 
   return (
     <div className={cn("flex flex-col gap-3", className)}>

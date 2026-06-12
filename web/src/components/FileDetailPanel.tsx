@@ -1,5 +1,5 @@
-import { useState, useEffect, type Dispatch, type SetStateAction } from "react";
-import { X, FileText, Tag, History, Link, ChevronDown } from "lucide-react";
+import { useState, useEffect } from "react";
+import { X, FileText, Tag, History, Link } from "lucide-react";
 import { api, type DocumentMeta, type FileRef } from "@/lib/api";
 import { Button } from "@nous-research/ui/ui/components/button";
 import { Badge } from "@nous-research/ui/ui/components/badge";
@@ -178,7 +178,7 @@ export function FileDetailPanel({
                   >
                     <div className="flex items-center gap-1.5 mb-0.5">
                       <Badge
-                        tone={ref.type === "checklist_item" ? "info" : "warning"}
+                        tone={ref.type === "checklist_item" ? "outline" : "warning"}
                         className="text-[10px]"
                       >
                         {ref.type === "checklist_item" ? "Checklist" : "CP"}

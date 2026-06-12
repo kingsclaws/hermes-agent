@@ -1,5 +1,5 @@
 import { cn } from "@/lib/utils";
-import { Circle, CheckCircle2 } from "lucide-react";
+import { CheckCircle2 } from "lucide-react";
 
 interface PhaseTrackerProps {
   phases: string[];

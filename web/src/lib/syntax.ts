@@ -144,7 +144,6 @@ export function highlightCode(code: string, lang: string): string {
       if (groups > 1) {
         // Multi-group pattern: mark each capture group separately
         let gi = 1;
-        let baseCls = cls;
         for (const clsPart of cls.split(" ")) {
           if (gi > groups) break;
           if (m[gi] !== undefined) {

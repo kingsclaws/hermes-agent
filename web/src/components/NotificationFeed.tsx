@@ -2,7 +2,6 @@ import { GatewayClient } from "@/lib/gatewayClient";
 import { cn } from "@/lib/utils";
 import {
   AlertCircle,
-  Bell,
   CheckCircle2,
   FileWarning,
   Info,
