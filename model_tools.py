@@ -212,6 +212,58 @@ TOOLSET_REQUIREMENTS: Dict[str, dict] = registry.get_toolset_requirements()
 # Used by code_execution_tool to know which tools are available in this session.
 _last_resolved_tool_names: List[str] = []
 
+_LEGAL_DOC_MUTATION_TOOLS = {
+    "lex_edit",
+    "lex_template_fill",
+    "lex_format",
+    "lex_list",
+    "lex_ref",
+    "lex_section",
+    "lex_doc",
+    "lex_clause",
+    "lex_tc",
+    "lex_comment",
+}
+
+_LEX_READ_ONLY_OPS = {
+    "lex_tc": {"list"},
+    "lex_comment": {"list"},
+    "lex_ref": {"list", "audit", "resolve", "term_format_audit"},
+    "lex_clause": {"extract", "compare"},
+    "lex_doc": {"stats", "inspect", "read"},
+}
+
+
+def _is_legal_doc_mutation_tool(function_name: str, function_args: dict) -> bool:
+    if function_name not in _LEGAL_DOC_MUTATION_TOOLS:
+        return False
+    read_only_ops = _LEX_READ_ONLY_OPS.get(function_name)
+    if read_only_ops is not None:
+        op = str(function_args.get("op") or function_args.get("action") or "").strip()
+        if op in read_only_ops:
+            return False
+    return True
+
+
+def _append_legal_doc_next_step_guidance(function_name: str, function_args: dict, result: str) -> str:
+    if not _is_legal_doc_mutation_tool(function_name, function_args):
+        return result
+    try:
+        payload = json.loads(result)
+    except Exception:
+        return result
+    if not isinstance(payload, dict) or payload.get("error"):
+        return result
+    payload.setdefault("legal_document_next_step_required", {
+        "requirement": (
+            "Before any further non-verification tool call, verify this legal "
+            "document edit with lex_read on the edited range/document, or use "
+            "lex_proofread/lex_template_audit/lex_xref_audit as appropriate."
+        ),
+        "recommended_tools": ["lex_read", "lex_proofread", "lex_template_audit", "lex_xref_audit"],
+    })
+    return json.dumps(payload, ensure_ascii=False)
+
 
 # =============================================================================
 # Legacy toolset name mapping  (old _tools-suffixed names -> tool name lists)
@@ -885,6 +937,8 @@ def handle_function_call(
                     break
         except Exception as _hook_err:
             logger.debug("transform_tool_result hook error: %s", _hook_err)
+
+        result = _append_legal_doc_next_step_guidance(function_name, function_args, result)
 
         return result
 

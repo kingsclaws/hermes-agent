@@ -55,11 +55,120 @@ logger = logging.getLogger(__name__)
 # Mirrors the constant in ``run_agent`` for tests/imports that look here.
 _MAX_TOOL_WORKERS = 8
 
+_LEGAL_DOC_MUTATION_TOOLS = {
+    "lex_edit",
+    "lex_template_fill",
+    "lex_format",
+    "lex_list",
+    "lex_ref",
+    "lex_section",
+    "lex_doc",
+    "lex_clause",
+    "lex_tc",
+    "lex_comment",
+}
+
+_LEGAL_DOC_VERIFICATION_TOOLS = {
+    "lex_read",
+    "lex_stats",
+    "lex_table_list",
+    "lex_template_audit",
+    "lex_proofread",
+    "lex_xref_audit",
+    "lex_gate_check",
+}
+
+_LEX_READ_ONLY_OPS = {
+    "lex_tc": {"list"},
+    "lex_comment": {"list"},
+    "lex_ref": {"list", "audit", "resolve", "term_format_audit"},
+    "lex_clause": {"extract", "compare"},
+    "lex_doc": {"stats", "inspect", "read"},
+}
+
 
 def _ra():
     """Lazy reference to ``run_agent`` so patches like ``run_agent._set_interrupt`` work."""
     import run_agent
     return run_agent
+
+
+def _json_tool_error(message: str, **extra: Any) -> str:
+    payload = {"error": message}
+    payload.update(extra)
+    return json.dumps(payload, ensure_ascii=False)
+
+
+def _tool_op(args: dict) -> str:
+    return str(args.get("op") or args.get("action") or "").strip()
+
+
+def _is_legal_doc_mutation_tool(tool_name: str, args: dict) -> bool:
+    if tool_name not in _LEGAL_DOC_MUTATION_TOOLS:
+        return False
+    read_only_ops = _LEX_READ_ONLY_OPS.get(tool_name)
+    if read_only_ops is not None and _tool_op(args) in read_only_ops:
+        return False
+    return True
+
+
+def _is_legal_doc_verification_tool(tool_name: str) -> bool:
+    return tool_name in _LEGAL_DOC_VERIFICATION_TOOLS
+
+
+def _legal_doc_path(tool_name: str, args: dict) -> str:
+    if tool_name == "lex_template_fill" and args.get("output"):
+        return str(args.get("output") or "")
+    for key in ("path", "document_path", "docx_path", "project_dir"):
+        val = args.get(key)
+        if val:
+            return str(val)
+    return ""
+
+
+def _pending_legal_doc_verification(agent) -> dict | None:
+    pending = getattr(agent, "_lex_pending_verification", None)
+    return pending if isinstance(pending, dict) and pending else None
+
+
+def _legal_doc_preflight_block(agent, tool_name: str, args: dict) -> str | None:
+    pending = _pending_legal_doc_verification(agent)
+    if not pending:
+        return None
+    if _is_legal_doc_verification_tool(tool_name):
+        return None
+    path = pending.get("path") or "the edited document"
+    return _json_tool_error(
+        (
+            "LEGAL_DOC_VERIFY_REQUIRED: The previous legal document edit must "
+            "be verified before any further non-verification tool call. Call "
+            "lex_read on the edited range/document, or lex_proofread/"
+            "lex_template_audit/lex_xref_audit as appropriate, then continue."
+        ),
+        code="LEGAL_DOC_VERIFY_REQUIRED",
+        pending=pending,
+        suggested_tools=[
+            {"name": "lex_read", "args": {"path": path}},
+            {"name": "lex_proofread", "args": {"path": path, "review_type": "content"}},
+        ],
+    )
+
+
+def _legal_doc_post_tool(agent, tool_name: str, args: dict, result: Any, is_error: bool) -> None:
+    if is_error:
+        return
+    if _is_legal_doc_verification_tool(tool_name):
+        if _pending_legal_doc_verification(agent):
+            agent._lex_pending_verification = None
+        return
+    if _is_legal_doc_mutation_tool(tool_name, args):
+        agent._lex_pending_verification = {
+            "tool": tool_name,
+            "op": _tool_op(args),
+            "path": _legal_doc_path(tool_name, args),
+            "requirement": "Run lex_read or a legal verification tool before continuing.",
+            "timestamp": time.time(),
+        }
 
 
 def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effective_task_id: str, api_call_count: int = 0) -> None:
@@ -139,8 +248,40 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
             if not guardrail_decision.allows_execution:
                 block_result = agent._guardrail_block_result(guardrail_decision)
                 blocked_by_guardrail = True
+            else:
+                legal_block = _legal_doc_preflight_block(agent, function_name, function_args)
+                if legal_block is not None:
+                    block_result = legal_block
+                    blocked_by_guardrail = True
 
         parsed_calls.append((tool_call, function_name, function_args, block_result, blocked_by_guardrail))
+
+    if num_tools > 1:
+        legal_mutation_names = [
+            name for _, name, args, block_result, _ in parsed_calls
+            if block_result is None and _is_legal_doc_mutation_tool(name, args)
+        ]
+        if legal_mutation_names:
+            blocked_calls = []
+            for tc, name, args, block_result, blocked_by_guardrail in parsed_calls:
+                if block_result is not None:
+                    blocked_calls.append((tc, name, args, block_result, blocked_by_guardrail))
+                    continue
+                if _is_legal_doc_mutation_tool(name, args):
+                    blocked_calls.append((
+                        tc,
+                        name,
+                        args,
+                        _json_tool_error(
+                            "LEGAL_DOC_SEQUENTIAL_REQUIRED: Legal document write tools must run one at a time so each edit can be read back and verified before the next action.",
+                            code="LEGAL_DOC_SEQUENTIAL_REQUIRED",
+                            tool=name,
+                        ),
+                        True,
+                    ))
+                else:
+                    blocked_calls.append((tc, name, args, block_result, blocked_by_guardrail))
+            parsed_calls = blocked_calls
 
     # ── Logging / callbacks ──────────────────────────────────────────
     tool_names_str = ", ".join(name for _, name, _, _, _ in parsed_calls)
@@ -382,6 +523,10 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
                     )
                 except Exception as _ver_err:
                     logging.debug("file-mutation verifier record failed: %s", _ver_err)
+                try:
+                    _legal_doc_post_tool(agent, function_name, function_args, function_result, is_error)
+                except Exception as _lex_guard_err:
+                    logging.debug("legal document verifier state update failed: %s", _lex_guard_err)
 
             if not blocked and agent.tool_progress_callback:
                 try:
@@ -512,6 +657,10 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
             guardrail_decision = agent._tool_guardrails.before_call(function_name, function_args)
             if not guardrail_decision.allows_execution:
                 _guardrail_block_decision = guardrail_decision
+            else:
+                legal_block = _legal_doc_preflight_block(agent, function_name, function_args)
+                if legal_block is not None:
+                    _block_msg = legal_block
 
         _execution_blocked = _block_msg is not None or _guardrail_block_decision is not None
 
@@ -839,6 +988,10 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
                 )
             except Exception as _ver_err:
                 logging.debug("file-mutation verifier record failed: %s", _ver_err)
+            try:
+                _legal_doc_post_tool(agent, function_name, function_args, function_result, _is_error_result)
+            except Exception as _lex_guard_err:
+                logging.debug("legal document verifier state update failed: %s", _lex_guard_err)
 
         if not _execution_blocked and agent.tool_progress_callback:
             try:
