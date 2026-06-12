@@ -61,7 +61,10 @@ LEGAL_ORCHESTRATE_SCHEMA = {
     "description": (
         "Native legal workflow orchestrator. Routes legal drafting and review tasks "
         "to the correct subagent role, enforces structured reviewer outputs, and "
-        "coordinates multi-agent review bundles in code instead of relying on prompt-only choreography."
+        "coordinates multi-agent review bundles in code instead of relying on prompt-only choreography. "
+        "Use this for lawyer-style document work: read structure/review digest, "
+        "build a clause/issue map, revise bounded ranges, verify content and "
+        "formatting, maintain project_facts, and snapshot/deliver through lex_git."
     ),
     "parameters": {
         "type": "object",
@@ -336,12 +339,13 @@ def _iterative_draft_contract(document_path: Optional[str], start_para: int, end
         f"You are assigned ONLY paragraphs §{start_para}-§{end_para}. "
         "Do not edit paragraphs outside this range.\n"
         "You must work in this order:\n"
-        "1. Read ONLY your assigned range with lex_read(paras=[...]).\n"
+        "1. Read ONLY your assigned range with lex_read(paras=[...]); if you need orientation, first inspect lex_read(mode='review')/legal_structure from the parent context.\n"
         "2. Compare that range against the term sheet, project context, and user instructions.\n"
-        "3. For each paragraph/table cell that needs changes, use native lex_edit/lex_table_list only.\n"
-        "4. After edits, read back the same paragraph range with lex_read.\n"
-        "5. Verify that no placeholder, bracket option, wrong party, amount/date, or unexplained template note remains in the range.\n"
-        "6. If no edit is needed, explicitly say so and explain why.\n"
+        "3. Decide as a lawyer whether content, defined terms, parties, amounts, dates, conditions, liability, cross-references, comments, and formatting need changes.\n"
+        "4. For each paragraph/table cell that needs changes, use native lex_edit/lex_table_list only.\n"
+        "5. After edits, read back the same paragraph range with lex_read.\n"
+        "6. Verify that no placeholder, bracket option, wrong party, amount/date, broken definition, unresolved comment, cross-reference issue, or unexplained template note remains in the range.\n"
+        "7. If no edit is needed, explicitly say so and explain why.\n"
         "Do not use terminal/python/docx/lxml workarounds.\n\n"
         "## Output Contract\n"
         "Return ONLY valid JSON. No markdown fences. Use this schema exactly:\n"

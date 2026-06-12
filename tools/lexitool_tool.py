@@ -58,7 +58,9 @@ LEX_READ_SCHEMA = {
     "description": (
         "Read a .docx file and return its content as annotated text with inline "
         "format markup. This is the PRIMARY tool for understanding document content. "
-        "Always call this FIRST before editing.\n\n"
+        "Always call this FIRST before editing. For legal review/revision, prefer "
+        "mode='review' for a whole-document dashboard, mode='legal_structure' for "
+        "the legal outline, then full targeted paragraph reads before each edit.\n\n"
         "Format tags you will see in output:\n"
         "  [b]bold text[/b]  [i]italic[/i]  [u]underline[/u]  [s]strikethrough[/s]\n"
         "  [font:宋体,12pt]text[/font]  [color:#FF0000]text[/color]\n"
@@ -68,7 +70,8 @@ LEX_READ_SCHEMA = {
         "  [bookmark:name]text[/bookmark]  [page-break]  [section-break:next]\n"
         "  [spacing:1.5]  [indent:2ch]  [align:center]\n\n"
         "Paragraphs are prefixed with §N (1-indexed). Use these § numbers "
-        "as targets for lex_edit."
+        "as targets for lex_edit. Do not use shell/python-docx to read Word files "
+        "when this tool is available."
     ),
     "parameters": {
         "type": "object",
@@ -228,6 +231,12 @@ LEX_EDIT_SCHEMA = {
     "description": (
         "Atomically edit text in a .docx file. Supports paragraph-level, "
         "table-level, and block-level operations with optional Track Changes.\n\n"
+        "Legal drafting rule: edit only after reading the relevant § range with "
+        "lex_read. Prefer narrow paragraph/table-cell edits. Avoid broad keyword "
+        "replacement unless the task is explicitly mechanical and the affected "
+        "ranges have been reviewed. After every material edit, read back the same "
+        "range and verify content, formatting, parties, amounts, dates, defined "
+        "terms, placeholders, cross-references, and comments.\n\n"
         "## Paragraph-level ops (require 'target')\n"
         "Target syntax:\n"
         "  §3           = entire paragraph 3\n"
@@ -288,7 +297,20 @@ LEX_EDIT_SCHEMA = {
             "targets": {
                 "type": "array",
                 "items": {"type": "integer"},
-                "description": "List of paragraph numbers (1-indexed §N) for replace_all batch operation.",
+                "description": (
+                    "List of paragraph numbers (1-indexed §N) for replace_all. "
+                    "These must come from prior lex_read review; do not use this "
+                    "as whole-document keyword replacement."
+                ),
+            },
+            "bulk_confirmed": {
+                "type": "boolean",
+                "description": (
+                    "Required true for high-risk replace_all operations (many "
+                    "targets or short/generic old_text). Means the agent has "
+                    "reviewed the affected ranges and the user/task explicitly "
+                    "authorizes mechanical bulk replacement."
+                ),
             },
             "new_text": {
                 "type": "string",
@@ -576,6 +598,16 @@ def _handle_edit(args: dict, **kwargs) -> str:
             return tool_error("'targets' is required for replace_all (list of paragraph numbers)")
         if not old_text:
             return tool_error("'old_text' is required for replace_all")
+        high_risk_bulk = len(targets) > 8 or len(str(old_text).strip()) < 4
+        if high_risk_bulk and not args.get("bulk_confirmed", False):
+            return tool_error(
+                "LEGAL_BULK_REPLACE_REVIEW_REQUIRED: replace_all across many "
+                "paragraphs or with a short/generic old_text is high-risk for "
+                "legal documents. First use lex_read(mode='review') and targeted "
+                "lex_read(paras=[...]) to confirm every affected paragraph, then "
+                "retry with bulk_confirmed=true only if this is an explicitly "
+                "authorized mechanical replacement."
+            )
         try:
             from lexitool.edit_ops import replace_text_all
             para_indices = [int(t) - 1 for t in targets]  # convert 1-indexed to 0-indexed
@@ -2559,10 +2591,13 @@ LEX_GIT_SCHEMA = {
     "name": "lex_git",
     "description": (
         "Version-control a legal project directory with a constrained git "
-        "interface. Use this before/after material document edits: initialize "
-        "a project repo, snapshot drafting milestones, inspect status/logs, "
-        "tag deliveries, and create/list/remove worktrees for parallel "
-        "alternative versions. This tool does NOT expose arbitrary git args."
+        "interface. Treat this as the native legal matter version-control tool, "
+        "not a coding-only utility. Use it before/after material document edits: "
+        "initialize a project repo, inspect status/logs, snapshot drafting "
+        "milestones, tag deliveries, and create/list/remove worktrees for "
+        "parallel reviewers or alternative drafting approaches. Use worktrees "
+        "when exploring competing legal positions so the main working draft is "
+        "not overwritten. This tool does NOT expose arbitrary git args."
     ),
     "parameters": {
         "type": "object",
@@ -2579,7 +2614,12 @@ LEX_GIT_SCHEMA = {
                     "create_worktree", "list_worktrees",
                     "remove_worktree", "prune_worktrees",
                 ],
-                "description": "Constrained git operation to run.",
+                "description": (
+                    "Constrained git operation. Typical legal sequence: "
+                    "ensure_repo -> status -> snapshot before major revision -> "
+                    "create_worktree/revision_branch for alternatives -> snapshot "
+                    "after verified edits -> deliver_tag for client delivery."
+                ),
             },
             "message": {
                 "type": "string",

@@ -51,17 +51,24 @@ verification-first:
 
 - Before drafting or revising, read the document structure and relevant project
   sources; do not start with broad blind replacements.
+- For a legal document already in Word form, start with `lex_read(mode='review')`
+  or `lex_read(mode='legal_structure')` plus targeted full reads. For version
+  comparisons, start with `lex_diff(mode='summary')` before generating redlines
+  or editing.
 - For existing documents, work in bounded paragraph/table ranges. For each
   range: `lex_read` the range, decide whether the project facts require edits,
   edit with native lex tools, then read the same range back and verify.
 - Do not batch-edit an entire contract unless the user explicitly asks for a
-  mechanical global operation and the tool supports verification.
+  mechanical global operation, the affected paragraphs have been reviewed, and
+  the tool supports verification. Legal drafting/review is not keyword replace.
 - For annotated templates, call `lex_template_audit` first and inspect the
   manifest. Do not delete colored text, highlights, bracket notes, guide
   paragraphs, or checkbox alternatives by default; only remove them after the
   manifest shows what they are and the task/workflow selects that phase.
-- For material drafting milestones, use `lex_git` to initialize/status/snapshot
-  the legal project when available.
+- Treat legal projects as versioned matter workspaces. Use `lex_git` to
+  initialize/status/snapshot material milestones; use worktrees/branches for
+  alternative drafting approaches or parallel agent work instead of overwriting
+  a working version blindly.
 - Treat `project_facts` as the live matter facts database. Whenever you discover,
   confirm, correct, or supersede a project fact (party names, roles, amounts,
   dates, security, CPs, documents, open issues), update `project_facts` promptly

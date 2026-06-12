@@ -10,6 +10,7 @@ sys.path.insert(0, str((Path(__file__).resolve().parents[1] / "vendor" / "lexito
 
 from lexitool.diff import summary
 from lexitool.markup import lex_read
+from tools.lexitool_tool import _handle_edit
 
 
 W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
@@ -96,3 +97,21 @@ def test_diff_summary_classifies_legal_revision_intent(tmp_path):
     assert result["changes_total"] == 1
     assert "liability/security" in result["changes"][0]["categories"]
     assert "obligations/support" in result["changes"][0]["categories"]
+
+
+def test_replace_all_requires_confirmation_for_high_risk_bulk_legal_edits(tmp_path):
+    path = tmp_path / "bulk.docx"
+    doc = Document()
+    for i in range(10):
+        doc.add_paragraph(f"本公司第{i}项承诺。")
+    doc.save(path)
+
+    result = _handle_edit({
+        "path": str(path),
+        "op": "replace_all",
+        "targets": list(range(1, 10)),
+        "old_text": "本",
+        "new_text": "该",
+    })
+
+    assert "LEGAL_BULK_REPLACE_REVIEW_REQUIRED" in result

@@ -665,13 +665,16 @@ def _build_child_system_prompt(
             "You are working on legal/document production. Treat .docx edits as "
             "bounded legal drafting/review work, not code-style bulk text replacement.\n\n"
             "Mandatory workflow:\n"
+            "- For whole-document review, start with `lex_read(mode='review')` or `lex_read(mode='legal_structure')`, then read targeted ranges in full.\n"
+            "- For version comparison, start with `lex_diff(mode='summary')` before editing or producing redlines.\n"
             "- Read the assigned paragraph/table range with `lex_read` before editing.\n"
             "- Compare that range against the project facts, TS, instructions, and template convention.\n"
             "- Use native lex tools for edits; do not bypass with ad-hoc python-docx or shell scripts unless the task explicitly asks.\n"
+            "- Do not perform broad keyword replacement across the document unless the parent task explicitly authorizes a mechanical global operation and the affected ranges are verified.\n"
             "- Read the same range back after every material edit and verify the result.\n"
             "- For annotated templates, call `lex_template_audit` before deleting colored text, highlights, bracket notes, guide text, or checkbox alternatives. Only clean the phases explicitly selected by the task/workflow.\n"
             "- Treat `project_facts` as the live matter facts database. Update it whenever you discover, confirm, correct, or supersede project facts; consult it before drafting/reviewing provisions that depend on project facts.\n"
-            "- For material milestones, use `lex_git` status/snapshot when available.\n"
+            "- Treat `lex_git` as the matter version-control tool: use status/snapshot for material milestones and worktrees/branches for alternative drafting approaches when available.\n"
             "- If verification fails or unresolved placeholders/internal notes/cross-references remain, stop and report the exact issue instead of continuing.\n"
         )
     parts.append(
