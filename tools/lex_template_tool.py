@@ -96,7 +96,7 @@ LEX_TEMPLATE_AUDIT_SCHEMA = {
             "convention": {
                 "type": "string",
                 "description": (
-                    "Optional template convention hint. One of: naifmii, generic. "
+                    "Optional template convention hint. One of: nafmii, generic. "
                     "If omitted, auto-detected from document content."
                 ),
             },
@@ -108,11 +108,13 @@ LEX_TEMPLATE_AUDIT_SCHEMA = {
 LEX_TEMPLATE_FILL_SCHEMA = {
     "name": "lex_template_fill",
     "description": (
-        "Batch-fill a structured template in up to 7 phases: fill blanks, select "
-        "checkboxes, handle optional clauses, delete colored notes, delete bracketed "
-        "annotations, delete usage guide, strip highlights. Driven entirely by the "
-        "audit manifest — works with any template convention. Operates on OOXML "
-        "directly. Returns a before/after verification report."
+        "Batch-fill a structured template from a lex_template_audit manifest. "
+        "By default this runs only non-destructive phases (fill blanks and "
+        "select checkboxes). Destructive cleanup phases — optional clause "
+        "deletion, colored-note deletion, bracketed annotation deletion, guide "
+        "deletion, and highlight stripping — must be explicitly requested in "
+        "phases after the manifest has been reviewed. Operates on OOXML "
+        "directly and returns a before/after verification report."
     ),
     "parameters": {
         "type": "object",
@@ -142,7 +144,9 @@ LEX_TEMPLATE_FILL_SCHEMA = {
                 "type": "array",
                 "items": {"type": "string"},
                 "description": (
-                    "Phases to run. Default: all. "
+                    "Phases to run. Default: non-destructive fill_blanks and "
+                    "select_checkboxes only. Explicitly request cleanup phases "
+                    "after reviewing the audit manifest. "
                     "Options: fill_blanks, select_checkboxes, optional_clauses, "
                     "delete_colored_notes, delete_annotations, delete_guide, "
                     "strip_highlights."
@@ -705,7 +709,7 @@ _PHASES = {
     "strip_highlights": _phase_strip_highlights,
 }
 
-_DEFAULT_PHASES = list(_PHASES.keys())
+_DEFAULT_PHASES = ["fill_blanks", "select_checkboxes"]
 
 
 # ── Fill handler ───────────────────────────────────────────────────────────────

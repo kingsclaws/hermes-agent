@@ -2524,6 +2524,180 @@ def _handle_gate_check(args: dict, **kwargs) -> str:
     return tool_result(result)
 
 
+# ── 15b. lex_git ──────────────────────────────────────────────────────────────
+
+LEX_GIT_SCHEMA = {
+    "name": "lex_git",
+    "description": (
+        "Version-control a legal project directory with a constrained git "
+        "interface. Use this before/after material document edits: initialize "
+        "a project repo, snapshot drafting milestones, inspect status/logs, "
+        "tag deliveries, and create/list/remove worktrees for parallel "
+        "alternative versions. This tool does NOT expose arbitrary git args."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "project_dir": {
+                "type": "string",
+                "description": "Path to the legal project root directory.",
+            },
+            "action": {
+                "type": "string",
+                "enum": [
+                    "ensure_repo", "status", "snapshot", "log",
+                    "deliver_tag", "revision_branch",
+                    "create_worktree", "list_worktrees",
+                    "remove_worktree", "prune_worktrees",
+                ],
+                "description": "Constrained git operation to run.",
+            },
+            "message": {
+                "type": "string",
+                "description": "Commit/tag message for snapshot or deliver_tag.",
+            },
+            "author": {
+                "type": "string",
+                "description": "Author name for snapshot commits. Default: hermes-agent.",
+            },
+            "tag": {
+                "type": "string",
+                "description": "Optional annotated tag to apply to a snapshot commit.",
+            },
+            "version": {
+                "type": "string",
+                "description": "Delivery version identifier for deliver_tag, e.g. v1 or v2-final.",
+            },
+            "name": {
+                "type": "string",
+                "description": "Branch or worktree name for revision/worktree actions.",
+            },
+            "initial_branch": {
+                "type": "string",
+                "description": "Initial branch for ensure_repo. Default: master.",
+            },
+            "base_branch": {
+                "type": "string",
+                "description": "Base branch/commit for create_worktree.",
+            },
+            "create": {
+                "type": "boolean",
+                "description": "For revision_branch: create branch if true. Default: true.",
+            },
+            "switch": {
+                "type": "boolean",
+                "description": "For revision_branch: switch to branch if true. Default: true.",
+            },
+            "force": {
+                "type": "boolean",
+                "description": "For remove_worktree: force removal. Default: false.",
+            },
+            "allow_empty": {
+                "type": "boolean",
+                "description": "For snapshot: allow empty commit. Default: false.",
+            },
+            "push": {
+                "type": "boolean",
+                "description": "For deliver_tag: push tag to origin. Default: false.",
+            },
+            "n": {
+                "type": "integer",
+                "description": "Number of commits for log. Default: 10.",
+            },
+        },
+        "required": ["project_dir", "action"],
+    },
+}
+
+
+def _git_result_payload(res) -> dict:
+    return {
+        "ok": bool(getattr(res, "ok", False)),
+        "message": getattr(res, "message", ""),
+        "data": getattr(res, "data", {}) or {},
+        "commit_hash": getattr(res, "commit_hash", ""),
+        "tag": getattr(res, "tag", ""),
+        "branch": getattr(res, "branch", ""),
+    }
+
+
+def _handle_git(args: dict, **kwargs) -> str:
+    from lexitool import git_ops
+
+    project_dir = _resolve_path(args["project_dir"])
+    action = args.get("action")
+
+    if action == "ensure_repo":
+        res = git_ops.ensure_repo(
+            project_dir,
+            initial_branch=args.get("initial_branch") or "master",
+        )
+    elif action == "status":
+        res = git_ops.status(project_dir)
+    elif action == "snapshot":
+        message = args.get("message")
+        if not message:
+            return tool_error("'message' is required for lex_git snapshot")
+        res = git_ops.snapshot(
+            project_dir,
+            message,
+            author=args.get("author") or "hermes-agent",
+            tag=args.get("tag") or None,
+            allow_empty=bool(args.get("allow_empty", False)),
+        )
+    elif action == "log":
+        res = git_ops.log(project_dir, n=int(args.get("n", 10)))
+    elif action == "deliver_tag":
+        version = args.get("version")
+        if not version:
+            return tool_error("'version' is required for lex_git deliver_tag")
+        res = git_ops.deliver_tag(
+            project_dir,
+            version,
+            message=args.get("message") or None,
+            push=bool(args.get("push", False)),
+        )
+    elif action == "revision_branch":
+        name = args.get("name")
+        if not name:
+            return tool_error("'name' is required for lex_git revision_branch")
+        res = git_ops.revision_branch(
+            project_dir,
+            name,
+            create=bool(args.get("create", True)),
+            switch=bool(args.get("switch", True)),
+        )
+    elif action == "create_worktree":
+        name = args.get("name")
+        if not name:
+            return tool_error("'name' is required for lex_git create_worktree")
+        res = git_ops.create_worktree(
+            project_dir,
+            name,
+            base_branch=args.get("base_branch") or None,
+        )
+    elif action == "list_worktrees":
+        res = git_ops.list_worktrees(project_dir)
+    elif action == "remove_worktree":
+        name = args.get("name")
+        if not name:
+            return tool_error("'name' is required for lex_git remove_worktree")
+        res = git_ops.remove_worktree(
+            project_dir,
+            name,
+            force=bool(args.get("force", False)),
+        )
+    elif action == "prune_worktrees":
+        res = git_ops.prune_worktrees(project_dir)
+    else:
+        return tool_error(f"Unknown lex_git action: {action}")
+
+    payload = _git_result_payload(res)
+    payload["action"] = action
+    payload["project_dir"] = project_dir
+    return tool_result(payload)
+
+
 # ── 16. update_project_state ──────────────────────────────────────────────────
 
 UPDATE_PROJECT_STATE_SCHEMA = {
@@ -3036,6 +3210,7 @@ _TOOLS = [
     ("lex_deliver",       "lexitool", LEX_DELIVER_SCHEMA,       _handle_deliver),
     # Gate Check
     ("lex_gate_check",         "lexitool", LEX_GATE_CHECK_SCHEMA,         _handle_gate_check),
+    ("lex_git",                "lexitool", LEX_GIT_SCHEMA,                _handle_git),
     # Project State Evolution
     ("update_project_state",   "lexitool", UPDATE_PROJECT_STATE_SCHEMA,   _handle_update_project_state),
     ("get_project_state",      "lexitool", GET_PROJECT_STATE_SCHEMA,      _handle_get_project_state),

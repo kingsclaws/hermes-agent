@@ -636,6 +636,7 @@ def _build_child_system_prompt(
     role: str = "leaf",
     max_spawn_depth: int = 2,
     child_depth: int = 1,
+    toolsets: Optional[List[str]] = None,
 ) -> str:
     """Build a focused system prompt for a child agent.
 
@@ -657,6 +658,20 @@ def _build_child_system_prompt(
             "\nWORKSPACE PATH:\n"
             f"{workspace_path}\n"
             "Use this exact path for local repository/workdir operations unless the task explicitly says otherwise."
+        )
+    if _is_legal_document_child(toolsets):
+        parts.append(
+            "\n## Legal Document Production Protocol\n"
+            "You are working on legal/document production. Treat .docx edits as "
+            "bounded legal drafting/review work, not code-style bulk text replacement.\n\n"
+            "Mandatory workflow:\n"
+            "- Read the assigned paragraph/table range with `lex_read` before editing.\n"
+            "- Compare that range against the project facts, TS, instructions, and template convention.\n"
+            "- Use native lex tools for edits; do not bypass with ad-hoc python-docx or shell scripts unless the task explicitly asks.\n"
+            "- Read the same range back after every material edit and verify the result.\n"
+            "- For annotated templates, call `lex_template_audit` before deleting colored text, highlights, bracket notes, guide text, or checkbox alternatives. Only clean the phases explicitly selected by the task/workflow.\n"
+            "- For material milestones, use `lex_git` status/snapshot when available.\n"
+            "- If verification fails or unresolved placeholders/internal notes/cross-references remain, stop and report the exact issue instead of continuing.\n"
         )
     parts.append(
         "\nComplete this task using the tools available to you. "
@@ -702,6 +717,19 @@ def _build_child_system_prompt(
             f"is capped at max_spawn_depth={max_spawn_depth}. {child_note}"
         )
     return "\n".join(parts)
+
+
+def _is_legal_document_child(toolsets: Optional[List[str]]) -> bool:
+    if not toolsets:
+        return False
+    legal_toolsets = {
+        "lexitool",
+        "lex-docx",
+        "lex-docx-worker",
+        "lex-docx-coordinator",
+        "legal_orchestration",
+    }
+    return any(str(ts) in legal_toolsets for ts in toolsets)
 
 
 def _resolve_workspace_hint(parent_agent) -> Optional[str]:
@@ -1108,6 +1136,7 @@ def _build_child_agent(
         role=effective_role,
         max_spawn_depth=max_spawn,
         child_depth=child_depth,
+        toolsets=child_toolsets,
     )
     # Extract parent's API key so subagents inherit auth (e.g. Nous Portal).
     parent_api_key = getattr(parent_agent, "api_key", None)

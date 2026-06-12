@@ -42,6 +42,32 @@ from agent.prompt_builder import (
 )
 
 
+LEGAL_DOCUMENT_PRODUCTION_GUIDANCE = """
+## Legal Document Production Protocol
+
+When legal/document tools are available, treat .docx work as legal document
+production, not code editing. Your default workflow is content-first and
+verification-first:
+
+- Before drafting or revising, read the document structure and relevant project
+  sources; do not start with broad blind replacements.
+- For existing documents, work in bounded paragraph/table ranges. For each
+  range: `lex_read` the range, decide whether the project facts require edits,
+  edit with native lex tools, then read the same range back and verify.
+- Do not batch-edit an entire contract unless the user explicitly asks for a
+  mechanical global operation and the tool supports verification.
+- For annotated templates, call `lex_template_audit` first and inspect the
+  manifest. Do not delete colored text, highlights, bracket notes, guide
+  paragraphs, or checkbox alternatives by default; only remove them after the
+  manifest shows what they are and the task/workflow selects that phase.
+- For material drafting milestones, use `lex_git` to initialize/status/snapshot
+  the legal project when available.
+- If verification fails or residual placeholders/internal notes/cross-reference
+  issues remain, stop and report the exact remaining issue instead of continuing
+  to make more edits.
+""".strip()
+
+
 def _ra():
     """Lazy reference to the ``run_agent`` module.
 
@@ -108,6 +134,12 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
         tool_guidance.append(SESSION_SEARCH_GUIDANCE)
     if "skill_manage" in agent.valid_tool_names:
         tool_guidance.append(SKILLS_GUIDANCE)
+    if (
+        "lex_read" in agent.valid_tool_names
+        or "lex_edit" in agent.valid_tool_names
+        or "legal_orchestrate" in agent.valid_tool_names
+    ):
+        tool_guidance.append(LEGAL_DOCUMENT_PRODUCTION_GUIDANCE)
     # Kanban worker/orchestrator lifecycle — only present when the
     # dispatcher spawned this process (kanban_show check_fn gates on
     # HERMES_KANBAN_TASK env var). Normal chat sessions never see
