@@ -405,6 +405,24 @@ cp -r harness/projects/_template/ <新项目目录>/
 # Coordinator 首次启动时会读取 BOOTSTRAP.md 并生成 CONTEXT.md
 ```
 
+## 法律项目版本控制
+
+每个法律项目目录是一个独立的 git repo，使用以下约定：
+
+| 操作 | 命令 | 说明 |
+|------|------|------|
+| 初始化 | `git init && git add -A && git commit -m "baseline"` | 初次设置 |
+| 修订前切分支 | `git checkout -b rev/<文档>/<轮次>` | 修改前必须切分支 |
+| 修改后提交 | `git add -A && git commit -m "revise: ..."` | 每轮修改后提交 |
+| 交付打 tag | `git tag -a deliver/<version>-<date> -m "..."` | 交付里程碑 |
+| 备选方案 | `git worktree add .worktrees/<name> <branch>` | 并行准备多个谈判立场 |
+
+工作树（worktree）路径：`<项目>/.worktrees/<name>/`
+
+HPSwarm Agent 在不同 worktree 中可并行工作，但不可同时编辑同一 .docx 文件（二进制，无法合并）。
+
+相关模块：`vendor/lexitool/lexitool/git_ops.py` — 提供 `ensure_repo()`, `snapshot()`, `deliver_tag()`, `revision_branch()`, `create_worktree()` 等编程接口。
+
 ## 修改工具时注意事项
 
 1. **不要修改 `tools/registry.py`** — 这是上游基础设施，修改会导致合并冲突

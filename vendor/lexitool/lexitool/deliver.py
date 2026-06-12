@@ -70,6 +70,7 @@ def package(
     author: Optional[str] = None,
     include_redlines: bool = True,
     require_gates: bool = True,
+    git_tag: bool = True,
 ) -> dict:
     """Package project deliverables into a timestamped delivery folder.
 
@@ -80,6 +81,8 @@ def package(
         include_redlines: Whether to run cross-document comparisons (default: True).
         require_gates:  If True, runs gate_check(strict=True) and refuses to package
                         if any gates fail. Default: True (gates REQUIRED for delivery).
+        git_tag:        If True, creates a git deliver/<version>-<date> tag after
+                        successful packaging. Requires git repo in project_dir.
 
     Returns:
         {
@@ -89,6 +92,7 @@ def package(
             "redlines_generated": N,
             "cross_ref_result": {...} or None,
             "gate_result": {...} or None,
+            "git_tag": "deliver/v1-20260612" or None,
         }
     """
     src = Path(project_dir)
@@ -164,6 +168,32 @@ def package(
     manifest_text = _format_manifest(project_name, meta, manifest, today, cross_ref_result)
     (delivery_dir / "MANIFEST.md").write_text(manifest_text, encoding="utf-8")
 
+    # ── Git tag (auto-commit + delivery tag) ──
+    git_tag_result = None
+    if git_tag:
+        try:
+            from lexitool.git_ops import ensure_repo, snapshot, deliver_tag as git_deliver_tag, status as git_status
+
+            # Ensure repo exists (safe to call on already-initialized repos)
+            repo_result = ensure_repo(project_dir)
+            if repo_result.ok:
+                # Commit any uncommitted changes before tagging
+                st = git_status(project_dir)
+                if st.data.get("dirty", False):
+                    snapshot(
+                        project_dir,
+                        f"deliver: {project_name} packaged {today} — {author or 'hermes-agent'}",
+                        author=author or "hermes-agent",
+                    )
+
+                # Tag the delivery
+                tag_result = git_deliver_tag(project_dir, f"v{len(manifest)}", message=f"Delivery: {project_name} — {today}")
+                git_tag_result = tag_result.tag if tag_result.ok else None
+        except ImportError:
+            logger.debug("git_ops not available, skipping git tag")
+        except Exception as e:
+            logger.warning("Git tag failed (non-fatal): %s", e)
+
     return {
         "ok": True,
         "delivery_path": str(delivery_dir),
@@ -173,6 +203,7 @@ def package(
         "redlines_generated": redlines_generated,
         "cross_ref_result": cross_ref_result,
         "gate_result": gate_result,
+        "git_tag": git_tag_result,
     }
 
 

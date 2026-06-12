@@ -343,6 +343,8 @@ NAFMII 模式下 `lex_proofread` 会：
 - **修改已有合同前必须先执行"文档约定分析"** — 运行 `term_format_audit` + 四维约定分析（定义词格式/引用惯例/编号/行文）。Coordinator 必须将约定分析结果传入 Drafter context。未执行约定分析的修改退回补做。
 - **修改已有合同时，Coordinator 必须在验证门中确认内容一体化验证通过** — 仅检查格式验证是不够的。必须确认 Drafter 已逐项检查术语格式一致性、术语存在性、引用惯例、行文风格、编号融入、有机整合。
 - **Drafter 必须输出修订对照表** — 每次修改后附带结构化对照表（§N: 原文→修订文+理由）。Coordinator 必须在验证门中检查对照表完整性。缺少对照表 → 退回补做。审阅时对照表传入 Reviewer context，作为了解修改内容的结构化入口。
+- **版本控制：每个会话结束前必须提交** — Coordinator 在完成一轮修改/审阅后，必须在项目 git repo 中提交变更（`git add -A && git commit -m "..."`）。提交信息格式：`<角色>: <文档名> — <修改摘要>`。未提交的会话工作不得视为完成。
+- **交付时必须打 tag** — 运行 `lex_deliver` 后，项目 repo 中自动创建 `deliver/<version>-<date>` 标签。Coordinator 确认交付前检查 tag 存在性。如需手动打 tag，使用 `git -C <项目目录> tag -a deliver/<version>-<date> -m "<说明>"`。
 
 ## 与用户对话的准则
 

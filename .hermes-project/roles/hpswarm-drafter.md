@@ -28,19 +28,70 @@
 5. **强制验证** — 修改后必须执行完整的"编辑后强制验证协议"（见下方），不可仅做简单确认
 6. **约定先行** — 修改已有合同前必须先执行"文档约定分析"（见下方），了解宿主文档的定义词格式、交叉引用惯例、编号体系和行文风格。不可在不知约定的情况下直接插入条款
 7. **对照输出** — 每次修改完成后必须输出"修订对照表"（见下方模板），逐段列出 §N: 原文 → 修订文 + 修改理由。对照表是 Reviewer 和 Coordinator 了解"改了什么"的唯一结构化入口，不可跳过
+8. **版本控制** — 修改已有文档前必须创建修订分支（见下方"版本控制约定"）。每次完成一轮修改后提交 commit，确保任何时间点都可回滚到修改前的状态。
+
+## 版本控制约定
+
+### 开始修改前
+
+```bash
+# 1. 确认项目目录是 git repo
+git -C <项目目录> rev-parse --git-dir  # 确认
+
+# 2. 创建修订分支
+git -C <项目目录> checkout -b rev/<文档名>/<轮次>
+# 例: rev/support-letter/v2-citic-review
+```
+
+### 修改完成后
+
+```bash
+# 3. 提交修订
+git -C <项目目录> add -A
+git -C <项目目录> commit -m "revise: <文档名> — <修改摘要>"
+```
+
+### 命名约定
+
+| 分支类型 | 格式 | 示例 |
+|---------|------|------|
+| 修订分支 | `rev/<doc>/<round>` | `rev/support-letter/v2-counterparty-review` |
+| 备选方案 | `alt/<doc>/<scenario>` | `alt/guarantee/aggressive-liability` |
+| 定稿分支 | `final/<doc>/<version>` | `final/loan-agreement/v3-signing` |
+
+### 并行备选方案（worktree）
+
+当需要同时准备多个谈判立场时，使用 git worktree：
+
+```bash
+# 在主工作树继续工作
+git -C <项目目录> checkout -b rev/support-letter/main-track
+
+# 同时创建 worktree 准备备选方案
+git -C <项目目录> worktree add .worktrees/alt-conservative alt/support-letter/conservative
+git -C <项目目录> worktree add .worktrees/alt-aggressive  alt/support-letter/aggressive
+
+# Agent 分别在各自 worktree 中工作
+# 路径：<项目目录>/.worktrees/alt-conservative/交易文件/...
+# 路径：<项目目录>/.worktrees/alt-aggressive/交易文件/...
+```
+
+**重要限制**：.docx 是二进制文件，**不可在两个 worktree 中同时编辑同一文件**——无法合并。Worktree 用于准备同一文档的替代版本（副本），不是并行协作用于同一文件。
 
 ## 常见任务模式
 
-### 修改已有合同（约定先行）
+### 修改已有合同（约定先行 + 版本控制）
 
-在修改/增补已有合同前，**必须先执行文档约定分析**：
+在修改/增补已有合同前，**必须先执行文档约定分析 + 创建修订分支**：
 
 ```
-0. lex_ref(path, op="term_format_audit") → 获取宿主文档定义术语格式
-1. lex_read(path, mode="structure") → 了解文档整体结构
-2. lex_read(path, paras=[...], show_format=true) → 抽样阅读3-4个同类条款
-3. 完成"文档约定分析"报告（见下方）
-4. 基于约定分析结果起草/修改 → 强制验证协议（含内容一体化验证）
+-1. git -C <项目目录> checkout -b rev/<文档名>/<本轮目的>  ← 版本控制：切分支
+ 0. lex_ref(path, op="term_format_audit") → 获取宿主文档定义术语格式
+ 1. lex_read(path, mode="structure") → 了解文档整体结构
+ 2. lex_read(path, paras=[...], show_format=true) → 抽样阅读3-4个同类条款
+ 3. 完成"文档约定分析"报告（见下方）
+ 4. 基于约定分析结果起草/修改 → 强制验证协议（含内容一体化验证）
+ 5. git -C <项目目录> add -A && git commit -m "revise: ..."  ← 版本控制：提交
 ```
 
 ### 新建文档

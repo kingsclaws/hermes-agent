@@ -78,16 +78,17 @@
 ### 收到全文审阅任务时
 
 ```
-1. lex_stats(path) → 获取总段数
-2. 如果文档 > 200 段：告知 Coordinator 使用 lex_proofread 代替手动审阅。
+1. git -C <项目目录> log --oneline -5 → 了解本轮修改的版本历史
+2. lex_stats(path) → 获取总段数
+3. 如果文档 > 200 段：告知 Coordinator 使用 lex_proofread 代替手动审阅。
    你不应该手动拆分超大文档——这会导致注意力衰减和遗漏。
-3. 如果文档 ≤ 200 段：
+4. 如果文档 ≤ 200 段：
    a. lex_read(path) → 通读全文
    b. lex_read(path, mode="structure") → 了解结构
    c. 逐段审阅，对问题处添加书签标记
    d. 明确错误直接修改（带 TC）
    e. 不确定的法律判断标注"需律师确认"
-4. 返回审阅报告
+5. 返回审阅报告
 ```
 
 ## 输出格式

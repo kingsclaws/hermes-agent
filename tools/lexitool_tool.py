@@ -2455,6 +2455,10 @@ LEX_DELIVER_SCHEMA = {
                 "type": "boolean",
                 "description": "If true, runs lex_gate_check(strict=true) before packaging. Delivery is blocked if any gates fail. Default: true (gates REQUIRED for delivery).",
             },
+            "git_tag": {
+                "type": "boolean",
+                "description": "If true, creates a git deliver tag after successful packaging. Requires git repo in project_dir. Default: true.",
+            },
         },
         "required": ["project_dir"],
     },
@@ -2470,6 +2474,7 @@ def _handle_deliver(args: dict, **kwargs) -> str:
         output_dir=_resolve_path(args.get("output_dir")) if args.get("output_dir") else None,
         author=args.get("author"),
         require_gates=args.get("require_gates", True),
+        git_tag=args.get("git_tag", True),
     )
     return tool_result(result)
 
