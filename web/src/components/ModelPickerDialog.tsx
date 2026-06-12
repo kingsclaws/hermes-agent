@@ -5,7 +5,7 @@ import { Spinner } from "@nous-research/ui/ui/components/spinner";
 import { Input } from "@nous-research/ui/ui/components/input";
 import { Label } from "@nous-research/ui/ui/components/label";
 import type { GatewayClient } from "@/lib/gatewayClient";
-import { Check, Search, X } from "lucide-react";
+import { Check, Search, X, Eye, Brain, Zap } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { cn, themedBody } from "@/lib/utils";
@@ -452,12 +452,39 @@ function ModelColumn({
                 className={`h-3 w-3 shrink-0 ${active ? "text-primary" : "text-transparent"}`}
               />
               <span className="flex-1 truncate">{m}</span>
+              <ModelCapabilities model={m} />
               {isCurrent && <CurrentTag />}
             </ListItem>
           );
         })
       )}
     </div>
+  );
+}
+
+function ModelCapabilities({ model }: { model: string }) {
+  const m = model.toLowerCase();
+  const caps: string[] = [];
+  if (/vision|gpt-4o|claude-3|gemini.*pro.*vision|sonnet|opus|haiku/.test(m)) caps.push("vision");
+  if (/reasoning|o1|o3|deepseek.*r1|op[st]us/.test(m)) caps.push("reasoning");
+  if (/128k|200k|1m/.test(m) || /gpt-4o|claude-3|sonnet/.test(m)) caps.push("128K+");
+  else if (/32k/.test(m)) caps.push("32K");
+  if (caps.length === 0) return null;
+
+  const icons: Record<string, React.ReactNode> = {
+    vision: <Eye className="h-2.5 w-2.5" />,
+    reasoning: <Brain className="h-2.5 w-2.5" />,
+  };
+
+  return (
+    <span className="flex items-center gap-1 ml-1 shrink-0">
+      {caps.map((c) => (
+        <span key={c} className="flex items-center gap-0.5 text-text-tertiary text-[10px]" title={c}>
+          {icons[c] ?? <Zap className="h-2.5 w-2.5" />}
+          {c === "128K+" || c === "32K" ? c : null}
+        </span>
+      ))}
+    </span>
   );
 }
 

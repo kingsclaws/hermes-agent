@@ -32,6 +32,7 @@ PROJECT_ROOT = Path(__file__).parent.parent.resolve()
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+
 from hermes_cli import __version__, __release_date__
 from hermes_cli.config import (
     cfg_get,
@@ -2779,6 +2780,1540 @@ async def delete_project(project_id: str):
     except Exception as e:
         _log.exception("DELETE /api/projects failed")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ---------------------------------------------------------------------------
+# Project file browsing / upload / download endpoints
+# ---------------------------------------------------------------------------
+
+import mimetypes as _mimetypes
+
+
+def _resolve_project_path(project_id: str) -> Path | None:
+    """Resolve a project_id back to its directory on disk."""
+    projects = _scan_projects_dir()
+    project = next((p for p in projects if p["id"] == project_id), None)
+    if not project:
+        return None
+    return Path(project["directory"])
+
+
+def _safe_project_rel(project_dir: Path, rel: str) -> Path | None:
+    """Resolve a relative path within the project directory safely.
+
+    Returns None if the result escapes the project directory (path traversal).
+    """
+    sanitised = rel.lstrip("/").replace("\\", "/")
+    resolved = (project_dir / sanitised).resolve()
+    if not resolved.is_relative_to(project_dir.resolve()):
+        return None
+    return resolved
+
+
+def _scan_project_files(base_dir: Path, rel_path: str = "") -> list[dict]:
+    """List files and directories at the given relative path within base_dir."""
+    target = base_dir.resolve()
+    if rel_path:
+        safe = _safe_project_rel(base_dir, rel_path)
+        if safe is None:
+            return []
+        target = safe
+
+    if not target.is_dir():
+        return []
+
+    entries: list[dict] = []
+    try:
+        for child in sorted(target.iterdir()):
+            try:
+                st = child.stat()
+                entries.append({
+                    "name": child.name,
+                    "path": str(child.relative_to(base_dir)),
+                    "size": st.st_size if child.is_file() else 0,
+                    "modified": time.strftime(
+                        "%Y-%m-%dT%H:%M:%SZ", time.gmtime(st.st_mtime),
+                    ),
+                    "is_dir": child.is_dir(),
+                })
+            except OSError:
+                continue
+    except OSError:
+        pass
+
+    # Directories first, then files, both alphabetically
+    entries.sort(key=lambda e: (not e["is_dir"], e["name"].lower()))
+    return entries
+
+
+@app.get("/api/projects/{project_id}/files")
+async def list_project_files(project_id: str, path: str = ""):
+    """List files and directories within a project."""
+    project_dir = _resolve_project_path(project_id)
+    if project_dir is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    # Reject path traversal attempts
+    if path:
+        safe = _safe_project_rel(project_dir, path)
+        if safe is None:
+            raise HTTPException(status_code=403, detail="Path traversal rejected")
+
+    files = _scan_project_files(project_dir, path)
+    current_path = path or ""
+
+    return {
+        "files": files,
+        "current_path": current_path,
+        "project_id": project_id,
+        "project_name": project_dir.name,
+    }
+
+
+@app.post("/api/projects/{project_id}/files")
+async def upload_project_files(
+    project_id: str,
+    request: Request,
+    path: str = "",
+):
+    """Upload one or more files into a project directory."""
+    project_dir = _resolve_project_path(project_id)
+    if project_dir is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    # Resolve target directory
+    target_dir = project_dir
+    if path:
+        safe = _safe_project_rel(project_dir, path)
+        if safe is None:
+            raise HTTPException(status_code=403, detail="Path traversal rejected")
+        target_dir = safe
+
+    # Ensure target directory exists
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        form = await request.form()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid multipart form data")
+
+    uploaded: list[dict] = []
+    errors: list[dict] = []
+
+    MAX_SIZE = 50 * 1024 * 1024  # 50 MB
+    MAX_FILES = 10
+
+    upload_fields = form.getlist("files")
+    if len(upload_fields) > MAX_FILES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Too many files — maximum {MAX_FILES} per request",
+        )
+
+    for field in upload_fields:
+        if not hasattr(field, "filename"):
+            errors.append({"filename": "(unknown)", "error": "Not a file"})
+            continue
+
+        filename = field.filename or "unnamed"
+        # Read into memory to check size (FastAPI/Starlette streams to temp files
+        # for large uploads, but we enforce a hard cap)
+        content = await field.read()
+        if len(content) > MAX_SIZE:
+            errors.append({
+                "filename": filename,
+                "error": f"File exceeds {MAX_SIZE // (1024*1024)} MB limit",
+            })
+            continue
+
+        dest = target_dir / filename
+        try:
+            dest.write_bytes(content)
+            uploaded.append({"name": filename, "size": len(content)})
+        except OSError as e:
+            errors.append({"filename": filename, "error": str(e)})
+
+    return {"uploaded": uploaded, "errors": errors}
+
+
+@app.get("/api/projects/{project_id}/files/download")
+async def download_project_file(project_id: str, path: str = ""):
+    """Download a file from a project directory."""
+    project_dir = _resolve_project_path(project_id)
+    if project_dir is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    if not path:
+        raise HTTPException(status_code=400, detail="path query parameter required")
+
+    safe = _safe_project_rel(project_dir, path)
+    if safe is None:
+        raise HTTPException(status_code=403, detail="Path traversal rejected")
+
+    if not safe.is_file():
+        raise HTTPException(status_code=404, detail="File not found")
+
+    mime_type, _ = _mimetypes.guess_type(str(safe))
+    if not mime_type:
+        mime_type = "application/octet-stream"
+
+    return FileResponse(
+        safe,
+        media_type=mime_type,
+        filename=safe.name,
+        headers={"Content-Disposition": f'attachment; filename="{safe.name}"'},
+    )
+
+
+@app.delete("/api/projects/{project_id}/files")
+async def delete_project_file(project_id: str, path: str = ""):
+    """Delete a file or empty directory from a project."""
+    project_dir = _resolve_project_path(project_id)
+    if project_dir is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    if not path:
+        raise HTTPException(status_code=400, detail="path query parameter required")
+
+    safe = _safe_project_rel(project_dir, path)
+    if safe is None:
+        raise HTTPException(status_code=403, detail="Path traversal rejected")
+
+    if not safe.exists():
+        raise HTTPException(status_code=404, detail="File not found")
+
+    try:
+        if safe.is_dir():
+            if any(safe.iterdir()):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Directory is not empty — remove contents first",
+                )
+            safe.rmdir()
+        else:
+            safe.unlink()
+    except HTTPException:
+        raise
+    except OSError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    return {"ok": True, "path": path}
+
+
+# ---------------------------------------------------------------------------
+# Project version management endpoints (git)
+# — reuse lexitool.git_ops functions directly
+# ---------------------------------------------------------------------------
+
+import shlex as _shlex
+
+
+@app.get("/api/projects/{project_id}/versions")
+async def list_project_versions(project_id: str, n: int = 20):
+    """List recent git commits for a project."""
+    project_dir = _resolve_project_path(project_id)
+    if project_dir is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    try:
+        from lexitool import git_ops
+    except ImportError:
+        raise HTTPException(status_code=500, detail="lexitool.git_ops unavailable")
+
+    result = git_ops.log(str(project_dir), n=n)
+    status_result = git_ops.status(str(project_dir))
+
+    return {
+        "project_id": project_id,
+        "branch": result.branch,
+        "head": result.commit_hash,
+        "dirty": status_result.data.get("dirty", False),
+        "changed_files": status_result.data.get("changed_files", []),
+        "commits": [
+            {
+                "hash": c.split()[0],
+                "date": c.split()[1] if len(c.split()) > 1 else "",
+                "message": " ".join(c.split()[2:]) if len(c.split()) > 2 else "",
+                "full": c,
+            }
+            for c in result.data.get("commits", [])
+        ],
+    }
+
+
+@app.post("/api/projects/{project_id}/versions")
+async def create_project_snapshot(project_id: str, request: Request):
+    """Create a git snapshot (commit) of the current project state."""
+    project_dir = _resolve_project_path(project_id)
+    if project_dir is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+
+    message = body.get("message", "").strip()
+    author = body.get("author", "hermes-agent")
+    tag = body.get("tag")
+    allow_empty = body.get("allow_empty", False)
+
+    if not message:
+        raise HTTPException(status_code=400, detail="message is required")
+
+    try:
+        from lexitool import git_ops
+    except ImportError:
+        raise HTTPException(status_code=500, detail="lexitool.git_ops unavailable")
+
+    result = git_ops.snapshot(
+        str(project_dir), message, author=author, tag=tag, allow_empty=allow_empty,
+    )
+
+    if not result.ok:
+        raise HTTPException(status_code=400, detail=result.message)
+
+    return {
+        "ok": True,
+        "message": result.message,
+        "commit_hash": result.commit_hash,
+        "tag": result.tag,
+        "branch": result.branch,
+        "no_changes": result.data.get("no_changes", False),
+    }
+
+
+@app.get("/api/projects/{project_id}/versions/{commit_sha}")
+async def get_project_version_detail(project_id: str, commit_sha: str):
+    """Get details for a specific commit."""
+    project_dir = _resolve_project_path(project_id)
+    if project_dir is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    try:
+        import subprocess as _sp
+    except ImportError:
+        pass
+
+    # git show for the commit
+    try:
+        p = _sp.run(
+            ["git", "-C", str(project_dir), "show", "--stat", "--format=%H%n%h%n%an%n%ad%n%s%n%b", commit_sha],
+            capture_output=True, text=True, timeout=10,
+        )
+        if p.returncode != 0:
+            raise HTTPException(status_code=404, detail=f"Commit not found: {commit_sha}")
+    except _sp.TimeoutExpired:
+        raise HTTPException(status_code=500, detail="git show timed out")
+
+    lines = p.stdout.strip().split("\n")
+    # parse the show output
+    hash_full = lines[0] if len(lines) > 0 else ""
+    hash_short = lines[1] if len(lines) > 1 else ""
+    author = lines[2] if len(lines) > 2 else ""
+    date = lines[3] if len(lines) > 3 else ""
+    subject = lines[4] if len(lines) > 4 else ""
+
+    # files changed (after the blank line)
+    body_start = 6  # skip the empty line after subject
+    changed_files = []
+    for line in lines[body_start:]:
+        if not line.strip():
+            break
+        # stat lines look like: " path/to/file | 12 +++"
+        if "|" in line:
+            changed_files.append(line.strip())
+
+    return {
+        "project_id": project_id,
+        "hash_full": hash_full,
+        "hash_short": hash_short,
+        "author": author,
+        "date": date,
+        "subject": subject,
+        "changed_files": changed_files,
+    }
+
+
+@app.get("/api/projects/{project_id}/branches")
+async def list_project_branches(project_id: str):
+    """List git branches for a project."""
+    project_dir = _resolve_project_path(project_id)
+    if project_dir is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    import subprocess as _sp
+
+    try:
+        p = _sp.run(
+            ["git", "-C", str(project_dir), "branch", "--format=%(refname:short)%(HEAD)%(objectname:short)"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if p.returncode != 0:
+            raise HTTPException(status_code=400, detail="git branch failed")
+    except _sp.TimeoutExpired:
+        raise HTTPException(status_code=500, detail="git branch timed out")
+
+    branches = []
+    for line in p.stdout.strip().split("\n"):
+        if not line.strip():
+            continue
+        # format: branchname*<hash> or branchname <hash>
+        current = line.startswith("*")
+        name = line.lstrip("*").strip()
+        # split hash off the end (7 hex chars)
+        parts = name.rsplit(None, 1)
+        branch_name = parts[0] if len(parts) == 2 else name
+        branch_hash = parts[1] if len(parts) == 2 else ""
+        branches.append({
+            "name": branch_name,
+            "current": line.startswith("*"),
+            "hash": branch_hash,
+        })
+
+    return {
+        "project_id": project_id,
+        "branches": branches,
+    }
+
+
+@app.post("/api/projects/{project_id}/branches")
+async def create_project_branch(project_id: str, request: Request):
+    """Create a new git branch (and optionally switch to it)."""
+    project_dir = _resolve_project_path(project_id)
+    if project_dir is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+
+    name = body.get("name", "").strip()
+    switch = body.get("switch", True)
+
+    if not name:
+        raise HTTPException(status_code=400, detail="name is required")
+
+    try:
+        from lexitool import git_ops
+    except ImportError:
+        raise HTTPException(status_code=500, detail="lexitool.git_ops unavailable")
+
+    result = git_ops.revision_branch(str(project_dir), name, create=True, switch=switch)
+
+    if not result.ok:
+        raise HTTPException(status_code=400, detail=result.message)
+
+    return {
+        "ok": True,
+        "branch": result.branch,
+        "commit_hash": result.commit_hash,
+        "message": result.message,
+    }
+
+
+@app.get("/api/projects/{project_id}/worktrees")
+async def list_project_worktrees(project_id: str):
+    """List all git worktrees for a project."""
+    project_dir = _resolve_project_path(project_id)
+    if project_dir is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    try:
+        from lexitool import git_ops
+    except ImportError:
+        raise HTTPException(status_code=500, detail="lexitool.git_ops unavailable")
+
+    result = git_ops.list_worktrees(str(project_dir))
+
+    if not result.ok:
+        raise HTTPException(status_code=400, detail=result.message)
+
+    return {
+        "project_id": project_id,
+        "worktrees": result.data.get("worktrees", []),
+        "current_branch": result.branch,
+    }
+
+
+@app.post("/api/projects/{project_id}/worktrees")
+async def create_project_worktree(project_id: str, request: Request):
+    """Create a new git worktree for parallel work."""
+    project_dir = _resolve_project_path(project_id)
+    if project_dir is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+
+    name = body.get("name", "").strip()
+    base_branch = body.get("base_branch") or None
+
+    if not name:
+        raise HTTPException(status_code=400, detail="name is required")
+
+    try:
+        from lexitool import git_ops
+    except ImportError:
+        raise HTTPException(status_code=500, detail="lexitool.git_ops unavailable")
+
+    result = git_ops.create_worktree(str(project_dir), name, base_branch=base_branch)
+
+    if not result.ok:
+        raise HTTPException(status_code=400, detail=result.message)
+
+    return {
+        "ok": True,
+        "worktree_path": result.data.get("worktree_path", ""),
+        "branch": result.branch,
+        "message": result.message,
+    }
+
+
+@app.delete("/api/projects/{project_id}/worktrees/{name}")
+async def remove_project_worktree(project_id: str, name: str, force: bool = False):
+    """Remove a git worktree."""
+    project_dir = _resolve_project_path(project_id)
+    if project_dir is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    try:
+        from lexitool import git_ops
+    except ImportError:
+        raise HTTPException(status_code=500, detail="lexitool.git_ops unavailable")
+
+    result = git_ops.remove_worktree(str(project_dir), name, force=force)
+
+    if not result.ok:
+        raise HTTPException(status_code=400, detail=result.message)
+
+    return {"ok": True, "message": result.message}
+
+
+@app.post("/api/projects/{project_id}/diff")
+async def diff_project_files(project_id: str, request: Request):
+    """Compare two document versions (paragraph-level summary or side-by-side diff)."""
+    project_dir = _resolve_project_path(project_id)
+    if project_dir is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+
+    original = body.get("original", "").strip()
+    revised = body.get("revised", "").strip()
+    mode = body.get("mode", "summary")
+
+    if not original or not revised:
+        raise HTTPException(status_code=400, detail="original and revised paths are required")
+
+    # Resolve paths securely
+    orig_safe = _safe_project_rel(project_dir, original)
+    rev_safe = _safe_project_rel(project_dir, revised)
+
+    if orig_safe is None or rev_safe is None:
+        raise HTTPException(status_code=403, detail="Path traversal rejected")
+
+    if not orig_safe.is_file():
+        raise HTTPException(status_code=404, detail=f"Original file not found: {original}")
+    if not rev_safe.is_file():
+        raise HTTPException(status_code=404, detail=f"Revised file not found: {revised}")
+
+    try:
+        from lexitool import diff
+    except ImportError:
+        raise HTTPException(status_code=500, detail="lexitool.diff unavailable")
+
+    try:
+        result = diff.summary(str(orig_safe), str(rev_safe))
+        result["original"] = original
+        result["revised"] = revised
+
+        if mode == "sidebyside":
+            result["pairs"] = _build_diff_pairs(str(orig_safe), str(rev_safe))
+
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Diff failed: {e}")
+
+
+def _build_diff_pairs(orig_path: str, rev_path: str) -> list[dict]:
+    """Build side-by-side paragraph pairs for diff view."""
+    import difflib
+    from lexitool.diff import _read_final_paragraphs
+
+    old_paras = _read_final_paragraphs(orig_path)
+    new_paras = _read_final_paragraphs(rev_path)
+    old_texts = [p["text"] for p in old_paras]
+    new_texts = [p["text"] for p in new_paras]
+    matcher = difflib.SequenceMatcher(None, old_texts, new_texts, autojunk=False)
+
+    pairs: list[dict] = []
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "equal":
+            for k in range(i1, i2):
+                pairs.append({
+                    "side": "both",
+                    "type": "unchanged",
+                    "old_para": old_paras[k]["para"],
+                    "new_para": new_paras[j1 + (k - i1)]["para"],
+                    "old_text": old_texts[k],
+                    "new_text": new_texts[j1 + (k - i1)],
+                })
+        elif tag == "delete":
+            for k in range(i1, i2):
+                pairs.append({
+                    "side": "left",
+                    "type": "removed",
+                    "old_para": old_paras[k]["para"],
+                    "new_para": None,
+                    "old_text": old_texts[k],
+                    "new_text": "",
+                })
+        elif tag == "insert":
+            for k in range(j1, j2):
+                pairs.append({
+                    "side": "right",
+                    "type": "added",
+                    "old_para": None,
+                    "new_para": new_paras[k]["para"],
+                    "old_text": "",
+                    "new_text": new_texts[k],
+                })
+        elif tag == "replace":
+            max_len = max(i2 - i1, j2 - j1)
+            for k in range(max_len):
+                o_idx = i1 + k if k < (i2 - i1) else None
+                n_idx = j1 + k if k < (j2 - j1) else None
+                pairs.append({
+                    "side": "both",
+                    "type": "modified",
+                    "old_para": old_paras[o_idx]["para"] if o_idx is not None else None,
+                    "new_para": new_paras[n_idx]["para"] if n_idx is not None else None,
+                    "old_text": old_texts[o_idx] if o_idx is not None else "",
+                    "new_text": new_texts[n_idx] if n_idx is not None else "",
+                })
+
+    return pairs
+
+
+# ---------------------------------------------------------------------------
+# Document-aware file endpoints (Phase B)
+# — reuses lexitool.doc_stats, python-docx for preview, inventory JSON
+# ---------------------------------------------------------------------------
+
+_INVENTORY_FILE = ".hermes-project/inventory.json"
+
+import subprocess as _subprocess
+
+
+def _read_inventory(project_dir: Path) -> dict:
+    """Read or initialise the project document inventory."""
+    inv_path = project_dir / _INVENTORY_FILE
+    if inv_path.is_file():
+        try:
+            return json.loads(inv_path.read_text())
+        except Exception:
+            pass
+    return {"documents": {}}
+
+
+def _write_inventory(project_dir: Path, inventory: dict):
+    """Persist the project document inventory."""
+    inv_path = project_dir / _INVENTORY_FILE
+    inv_path.parent.mkdir(parents=True, exist_ok=True)
+    inv_path.write_text(json.dumps(inventory, indent=2, ensure_ascii=False))
+
+
+def _extract_docx_text(docx_path: Path, max_paras: int = 20) -> list[str]:
+    """Extract first N paragraphs of text from a .docx file."""
+    try:
+        from docx import Document
+    except ImportError:
+        return []
+    try:
+        doc = Document(str(docx_path))
+        paras = []
+        for p in doc.paragraphs:
+            text = p.text.strip()
+            if text:
+                paras.append(text)
+            if len(paras) >= max_paras:
+                break
+        return paras
+    except Exception:
+        return []
+
+
+def _search_docx_text(project_dir: Path, query: str, max_results: int = 30) -> list[dict]:
+    """Full-text search across .docx files in a project directory."""
+    results: list[dict] = []
+    qlower = query.lower()
+    try:
+        from docx import Document
+    except ImportError:
+        return results
+
+    for docx_path in project_dir.rglob("*.docx"):
+        if results.__len__() >= max_results:
+            break
+        # Skip worktrees to avoid duplicates
+        if ".worktrees" in str(docx_path):
+            continue
+        try:
+            rel = str(docx_path.relative_to(project_dir))
+        except Exception:
+            rel = docx_path.name
+        try:
+            doc = Document(str(docx_path))
+            matched_paras: list[str] = []
+            for p in doc.paragraphs:
+                text = p.text.strip()
+                if text and qlower in text.lower():
+                    matched_paras.append(text[:200])
+                if matched_paras.__len__() >= 3:
+                    break
+            if matched_paras:
+                results.append({
+                    "path": rel,
+                    "name": docx_path.name,
+                    "matches": matched_paras,
+                    "size": docx_path.stat().st_size,
+                })
+        except Exception:
+            continue
+
+    # Also search .txt and .md files
+    for txt_path in project_dir.rglob("*"):
+        if results.__len__() >= max_results:
+            break
+        if ".worktrees" in str(txt_path):
+            continue
+        if txt_path.suffix.lower() not in (".txt", ".md"):
+            continue
+        try:
+            text = txt_path.read_text(errors="ignore")
+            if qlower in text.lower():
+                lines = text.split("\n")
+                matched_lines = [l[:200] for l in lines if qlower in l.lower()][:3]
+                rel = str(txt_path.relative_to(project_dir))
+                results.append({
+                    "path": rel,
+                    "name": txt_path.name,
+                    "matches": matched_lines,
+                    "size": txt_path.stat().st_size,
+                })
+        except Exception:
+            continue
+
+    return results
+
+
+@app.get("/api/projects/{project_id}/files/analyze")
+async def analyze_project_file(project_id: str, path: str):
+    """Analyze a document (.docx) — paragraph counts, fonts, tables, TC stats."""
+    project_dir = _resolve_project_path(project_id)
+    if project_dir is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    safe = _safe_project_rel(project_dir, path)
+    if safe is None:
+        raise HTTPException(status_code=403, detail="Path traversal rejected")
+    if not safe.is_file():
+        raise HTTPException(status_code=404, detail="File not found")
+
+    ext = safe.suffix.lower()
+    result: dict = {"path": path, "name": safe.name, "ext": ext}
+
+    if ext == ".docx":
+        try:
+            from lexitool import doc_stats as _ds
+        except ImportError:
+            raise HTTPException(status_code=500, detail="lexitool unavailable")
+        try:
+            stats = _ds.doc_stats(str(safe))
+            result["stats"] = stats
+        except Exception as e:
+            result["error"] = str(e)
+    elif ext in (".pdf",):
+        result["stats"] = {"paragraphs": "N/A (PDF)", "message": "PDF analysis not yet available"}
+    else:
+        # Generic file stats
+        try:
+            text = safe.read_text(errors="ignore")
+            lines = text.split("\n")
+            result["stats"] = {
+                "lines": len(lines),
+                "chars": len(text),
+                "size": safe.stat().st_size,
+            }
+        except Exception as e:
+            result["error"] = str(e)
+
+    return result
+
+
+@app.get("/api/projects/{project_id}/files/preview")
+async def preview_project_file(project_id: str, path: str, paras: int = 20):
+    """Preview the first N paragraphs of a document."""
+    project_dir = _resolve_project_path(project_id)
+    if project_dir is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    safe = _safe_project_rel(project_dir, path)
+    if safe is None:
+        raise HTTPException(status_code=403, detail="Path traversal rejected")
+    if not safe.is_file():
+        raise HTTPException(status_code=404, detail="File not found")
+
+    ext = safe.suffix.lower()
+    result: dict = {"path": path, "name": safe.name, "ext": ext, "preview": []}
+
+    if ext == ".docx":
+        result["preview"] = _extract_docx_text(safe, max_paras=paras)
+    elif ext in (".txt", ".md"):
+        try:
+            lines = safe.read_text(errors="ignore").split("\n")
+            result["preview"] = [l for l in lines[:paras] if l.strip()]
+        except Exception as e:
+            result["error"] = str(e)
+
+    return result
+
+
+@app.patch("/api/projects/{project_id}/files/meta")
+async def update_file_metadata(project_id: str, request: Request):
+    """Update document metadata (status, tags, notes)."""
+    project_dir = _resolve_project_path(project_id)
+    if project_dir is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+
+    path = body.get("path", "").strip()
+    if not path:
+        raise HTTPException(status_code=400, detail="path is required")
+
+    safe = _safe_project_rel(project_dir, path)
+    if safe is None:
+        raise HTTPException(status_code=403, detail="Path traversal rejected")
+
+    inventory = _read_inventory(project_dir)
+    entry = inventory.setdefault("documents", {}).setdefault(path, {})
+    entry.setdefault("name", safe.name)
+
+    for key in ("status", "tags", "notes", "version", "signing_status"):
+        if key in body:
+            entry[key] = body[key]
+
+    from datetime import datetime as _dt, timezone as _tz
+
+    entry["updated"] = _dt.now(_tz.utc).isoformat()
+    _write_inventory(project_dir, inventory)
+
+    return {"ok": True, "path": path, "meta": entry}
+
+
+@app.post("/api/projects/{project_id}/files/audit")
+async def add_file_audit_event(project_id: str, request: Request):
+    """Log an audit event for a file (user action)."""
+    project_dir = _resolve_project_path(project_id)
+    if project_dir is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+
+    path = body.get("path", "").strip()
+    action = body.get("action", "").strip()
+    user = body.get("user", "system").strip()
+    detail = body.get("detail", "").strip()
+
+    if not path or not action:
+        raise HTTPException(status_code=400, detail="path and action are required")
+
+    safe = _safe_project_rel(project_dir, path)
+    if safe is None:
+        raise HTTPException(status_code=403, detail="Path traversal rejected")
+
+    from datetime import datetime as _dt, timezone as _tz
+
+    inventory = _read_inventory(project_dir)
+    entry = inventory.setdefault("documents", {}).setdefault(path, {"name": safe.name})
+
+    audit_log = entry.setdefault("audit_log", [])
+    event = {
+        "timestamp": _dt.now(_tz.utc).isoformat(),
+        "user": user,
+        "action": action,
+        "detail": detail,
+    }
+    audit_log.append(event)
+    entry["updated"] = event["timestamp"]
+    _write_inventory(project_dir, inventory)
+
+    return {"ok": True, "path": path, "event": event}
+
+
+@app.get("/api/projects/{project_id}/files/audit")
+async def get_file_audit_trail(project_id: str, path: str = ""):
+    """Get the audit trail for a file."""
+    project_dir = _resolve_project_path(project_id)
+    if project_dir is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    rel = _safe_project_rel(project_dir, path)
+    if rel is None:
+        raise HTTPException(status_code=403, detail="Path traversal rejected")
+
+    inventory = _read_inventory(project_dir)
+    entry = inventory.get("documents", {}).get(path, {})
+
+    return {
+        "project_id": project_id,
+        "path": path,
+        "signing_status": entry.get("signing_status", "unsigned"),
+        "audit_log": entry.get("audit_log", []),
+    }
+
+
+@app.get("/api/projects/{project_id}/inventory")
+async def get_project_inventory(project_id: str):
+    """Get the structured document inventory for a project."""
+    project_dir = _resolve_project_path(project_id)
+    if project_dir is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    inventory = _read_inventory(project_dir)
+
+    # Enrich with file-system info (size, modified) for each document
+    for rel_path, entry in inventory.get("documents", {}).items():
+        doc_path = project_dir / rel_path
+        if doc_path.is_file():
+            entry["size"] = doc_path.stat().st_size
+            from datetime import datetime as _dt, timezone as _tz
+
+            entry["modified"] = _dt.fromtimestamp(
+                doc_path.stat().st_mtime, tz=_tz.utc
+            ).isoformat()
+            if "name" not in entry:
+                entry["name"] = doc_path.name
+
+    return {"project_id": project_id, "inventory": inventory}
+
+
+@app.get("/api/projects/{project_id}/documents/search")
+async def search_project_documents(
+    project_id: str,
+    q: str = "",
+    max_results: int = 30,
+    status: str = "",
+    file_type: str = "",
+    date_from: str = "",
+    date_to: str = "",
+):
+    """Full-text search across project documents with optional filters."""
+    project_dir = _resolve_project_path(project_id)
+    if project_dir is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    if not q.strip():
+        return {"project_id": project_id, "query": q, "results": [], "filters": {
+            "status": status, "file_type": file_type, "date_from": date_from, "date_to": date_to,
+        }}
+
+    results = _search_docx_text(project_dir, q.strip(), max_results=max_results)
+
+    # Apply metadata filters
+    inventory = _read_inventory(project_dir).get("documents", {})
+    if status or file_type:
+        results = [
+            r for r in results
+            if (not status or inventory.get(r.get("path", ""), {}).get("status", "").lower() == status.lower())
+            and (not file_type or r.get("path", "").lower().endswith(f".{file_type.lower()}"))
+        ]
+
+    if date_from or date_to:
+        def _parse_ts(ts_str: str):
+            try:
+                from datetime import datetime as _dt
+                return _dt.fromisoformat(ts_str)
+            except Exception:
+                return None
+
+        dt_from = _parse_ts(f"{date_from}T00:00:00") if date_from else None
+        dt_to = _parse_ts(f"{date_to}T23:59:59") if date_to else None
+
+        filtered: list[dict] = []
+        for r in results:
+            meta = inventory.get(r.get("path", ""), {})
+            updated = meta.get("updated", "")
+            if updated:
+                try:
+                    from datetime import datetime as _dt
+                    ts = _dt.fromisoformat(updated)
+                    if dt_from and ts < dt_from:
+                        continue
+                    if dt_to and ts > dt_to:
+                        continue
+                except Exception:
+                    pass
+            filtered.append(r)
+        results = filtered
+
+    return {
+        "project_id": project_id,
+        "query": q,
+        "results": results,
+        "total": results.__len__(),
+        "filters": {
+            "status": status, "file_type": file_type,
+            "date_from": date_from, "date_to": date_to,
+        },
+    }
+
+
+@app.get("/api/projects/{project_id}/files/refs")
+async def get_file_references(project_id: str, path: str = ""):
+    """Reverse lookup: find all checklist items and CPs that reference a given file."""
+    project_dir = _resolve_project_path(project_id)
+    if project_dir is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    rel = _safe_project_rel(project_dir, path)
+    refs: list[dict] = []
+
+    for cl in _read_project_json(project_dir, "checklists.json", []):
+        for it in cl.get("items", []):
+            if rel in (it.get("document_refs") or []):
+                refs.append({
+                    "type": "checklist_item",
+                    "checklist_id": cl.get("id"),
+                    "checklist_name": cl.get("name"),
+                    "item_id": it.get("id"),
+                    "item_text": it.get("text"),
+                })
+
+    for cp in _read_project_json(project_dir, "cps.json", []):
+        if rel in (cp.get("document_refs") or []):
+            refs.append({
+                "type": "cp",
+                "cp_id": cp.get("id"),
+                "cp_description": cp.get("description"),
+                "cp_status": cp.get("status"),
+            })
+
+    return {"project_id": project_id, "path": rel, "refs": refs}
+
+
+@app.post("/api/projects/{project_id}/binder")
+async def create_project_binder(project_id: str, request: Request):
+    """Merge multiple DOCX files into a single binder document."""
+    project_dir = _resolve_project_path(project_id)
+    if project_dir is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+
+    files = body.get("files") or []
+    if not files or len(files) < 1:
+        raise HTTPException(status_code=400, detail="files array with at least 1 path is required")
+
+    title = body.get("title", "Binder").strip()
+    output_name = body.get("output_name", f"binder_{_uuid.uuid4().hex[:8]}.docx").strip()
+
+    # Resolve all paths
+    resolved: list[Path] = []
+    for f in files:
+        safe = _safe_project_rel(project_dir, str(f))
+        if safe is None:
+            raise HTTPException(status_code=403, detail=f"Path traversal rejected: {f}")
+        if not safe.is_file():
+            raise HTTPException(status_code=404, detail=f"File not found: {f}")
+        resolved.append(safe)
+
+    output_path = project_dir / ".hermes-project" / "binders"
+    output_path.mkdir(parents=True, exist_ok=True)
+    output_file = output_path / output_name
+
+    try:
+        from docx import Document
+    except ImportError:
+        raise HTTPException(status_code=500, detail="python-docx unavailable")
+
+    try:
+        merged = Document()
+
+        # Copy styles from first document as base
+        first = Document(str(resolved[0]))
+
+        # Copy sections (page layout) from first doc
+        for section in first.sections:
+            pass  # new doc already has one section
+
+        # Set title
+        if merged.paragraphs:
+            merged.paragraphs[0].text = title
+            merged.paragraphs[0].style = merged.styles["Heading 1"]
+        else:
+            p = merged.add_paragraph(title, style="Heading 1")
+
+        merged.add_paragraph("")  # spacing
+
+        page_count = 0
+        for idx, file_path in enumerate(resolved):
+            doc = Document(str(file_path))
+
+            if idx > 0:
+                merged.add_page_break()
+
+            # Add file section header
+            h = merged.add_paragraph()
+            h.style = merged.styles["Heading 2"]
+            h.text = f"Document {idx + 1}: {file_path.name}"
+
+            for para in doc.paragraphs:
+                p = merged.add_paragraph()
+                p.style = para.style
+                for run in para.runs:
+                    r = p.add_run(run.text)
+                    if run.bold: r.bold = True
+                    if run.italic: r.italic = True
+                    if run.underline: r.underline = True
+                    if run.font.name: r.font.name = run.font.name
+                    if run.font.size: r.font.size = run.font.size
+
+            # Copy tables
+            for table in doc.tables:
+                t = merged.add_table(rows=len(table.rows), cols=len(table.columns))
+                t.style = table.style
+                for ri, row in enumerate(table.rows):
+                    for ci, cell in enumerate(row.cells):
+                        t.cell(ri, ci).text = cell.text
+
+            page_count += 1
+
+        merged.save(str(output_file))
+
+        return {
+            "ok": True,
+            "output": str(output_file.relative_to(project_dir)),
+            "page_count": page_count,
+            "files_merged": len(resolved),
+            "size": output_file.stat().st_size,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Binder creation failed: {e}")
+
+
+# ---------------------------------------------------------------------------
+# Project lifecycle dashboard endpoints (Phase C)
+# — phase tracking, checklists, CPs, tasks stored in .hermes-project/ JSON
+# ---------------------------------------------------------------------------
+
+import uuid as _uuid
+
+_PHASES = [
+    "init", "drafting", "review", "execution", "cp", "closing", "registration",
+]
+
+
+def _read_project_json(project_dir: Path, filename: str, default=None):
+    """Read a JSON file from .hermes-project/, returning *default* on failure."""
+    path = project_dir / ".hermes-project" / filename
+    try:
+        return json.loads(path.read_text())
+    except Exception:
+        return default if default is not None else {}
+
+
+def _write_project_json(project_dir: Path, filename: str, data):
+    """Atomically write a JSON file to .hermes-project/."""
+    path = project_dir / ".hermes-project" / filename
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False))
+    tmp.replace(path)
+
+
+# ── Dashboard (aggregated summary) ─────────────────────────────────────────
+
+
+@app.get("/api/projects/{project_id}/dashboard")
+async def get_project_dashboard(project_id: str):
+    """Aggregated project summary — phase, docs, checklists, CPs, tasks, git status."""
+    project_dir = _resolve_project_path(project_id)
+    if project_dir is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    from datetime import datetime as _dt, timezone as _tz
+
+    # Phase state
+    phase_state = _read_project_json(project_dir, "phase-state.json", {
+        "phase": "init", "phase_index": 0, "phase_history": [],
+    })
+
+    # Checklists
+    checklists = _read_project_json(project_dir, "checklists.json", [])
+
+    # CPs
+    cps = _read_project_json(project_dir, "cps.json", [])
+
+    # Tasks
+    tasks = _read_project_json(project_dir, "tasks.json", [])
+
+    # Inventory / doc counts
+    inventory = _read_inventory(project_dir)
+    doc_count = len(inventory.get("documents", {}))
+    docs_by_status: dict[str, int] = {}
+    for entry in inventory.get("documents", {}).values():
+        s = entry.get("status", "unknown")
+        docs_by_status[s] = docs_by_status.get(s, 0) + 1
+
+    # Git status (if available)
+    git_info: dict = {}
+    try:
+        from lexitool import git_ops
+        gs = git_ops.status(str(project_dir))
+        gl = git_ops.log(str(project_dir), n=5)
+        git_info = {
+            "dirty": gs.data.get("dirty", False),
+            "changed_files": gs.data.get("changed_files", []),
+            "branch": gl.branch,
+            "head": gl.commit_hash,
+            "recent_commits": [
+                {"hash": c.split()[0], "message": " ".join(c.split()[2:])}
+                for c in gl.data.get("commits", [])[:5]
+            ],
+        }
+    except Exception:
+        pass
+
+    # Checklist progress
+    total_items = sum(len(cl.get("items", [])) for cl in checklists)
+    checked_items = sum(
+        sum(1 for it in cl.get("items", []) if it.get("checked"))
+        for cl in checklists
+    )
+
+    # CP progress
+    cp_done = sum(1 for cp in cps if cp.get("status") in ("met", "waived"))
+    cp_total = len(cps)
+
+    # Task progress
+    task_done = sum(1 for t in tasks if t.get("status") == "done")
+    task_total = len(tasks)
+
+    return {
+        "project_id": project_id,
+        "phase": phase_state,
+        "phases": _PHASES,
+        "documents": {
+            "total": doc_count,
+            "by_status": docs_by_status,
+        },
+        "checklists": {
+            "items_checked": checked_items,
+            "items_total": total_items,
+            "lists": len(checklists),
+        },
+        "cps": {
+            "done": cp_done,
+            "total": cp_total,
+        },
+        "tasks": {
+            "done": task_done,
+            "total": task_total,
+        },
+        "git": git_info,
+    }
+
+
+# ── Phases ─────────────────────────────────────────────────────────────────
+
+
+@app.get("/api/projects/{project_id}/phases")
+async def get_project_phases(project_id: str):
+    """Get current phase and phase history."""
+    project_dir = _resolve_project_path(project_id)
+    if project_dir is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    phase_state = _read_project_json(project_dir, "phase-state.json", {
+        "phase": "init", "phase_index": 0, "phase_history": [],
+    })
+
+    return {
+        "project_id": project_id,
+        "phases": _PHASES,
+        "current_phase": phase_state.get("phase", "init"),
+        "current_index": phase_state.get("phase_index", 0),
+        "phase_history": phase_state.get("phase_history", []),
+    }
+
+
+@app.patch("/api/projects/{project_id}/phases")
+async def advance_project_phase(project_id: str, request: Request):
+    """Advance to the next project phase."""
+    project_dir = _resolve_project_path(project_id)
+    if project_dir is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    from datetime import datetime as _dt, timezone as _tz
+
+    phase_state = _read_project_json(project_dir, "phase-state.json", {
+        "phase": "init", "phase_index": 0, "phase_history": [],
+    })
+
+    current_idx = phase_state.get("phase_index", 0)
+    if current_idx + 1 >= len(_PHASES):
+        raise HTTPException(status_code=400, detail="Already at final phase")
+
+    # Record completion of current phase
+    phase_history = phase_state.get("phase_history", [])
+    phase_history.append({
+        "phase": _PHASES[current_idx],
+        "completed": _dt.now(_tz.utc).isoformat(),
+    })
+
+    new_idx = current_idx + 1
+    new_state = {
+        "phase": _PHASES[new_idx],
+        "phase_index": new_idx,
+        "phase_history": phase_history,
+    }
+    _write_project_json(project_dir, "phase-state.json", new_state)
+
+    return {
+        "ok": True,
+        "previous_phase": _PHASES[current_idx],
+        "current_phase": _PHASES[new_idx],
+        "phase_index": new_idx,
+    }
+
+
+# ── Checklists ─────────────────────────────────────────────────────────────
+
+
+@app.get("/api/projects/{project_id}/checklists")
+async def get_project_checklists(project_id: str):
+    """List all checklists for a project."""
+    project_dir = _resolve_project_path(project_id)
+    if project_dir is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    checklists = _read_project_json(project_dir, "checklists.json", [])
+    return {"project_id": project_id, "checklists": checklists}
+
+
+@app.post("/api/projects/{project_id}/checklists")
+async def create_project_checklist(project_id: str, request: Request):
+    """Create a new checklist."""
+    project_dir = _resolve_project_path(project_id)
+    if project_dir is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+
+    name = body.get("name", "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="name is required")
+
+    items_raw = body.get("items", [])
+    items = [
+        {"id": str(_uuid.uuid4())[:8], "text": (it.get("text", "") if isinstance(it, dict) else str(it)).strip(), "checked": False, "document_refs": (it.get("document_refs", []) if isinstance(it, dict) else [])}
+        for it in items_raw
+    ]
+
+    checklists = _read_project_json(project_dir, "checklists.json", [])
+    new_cl = {
+        "id": str(_uuid.uuid4())[:8],
+        "name": name,
+        "items": items,
+    }
+    checklists.append(new_cl)
+    _write_project_json(project_dir, "checklists.json", checklists)
+
+    return {"ok": True, "checklist": new_cl}
+
+
+@app.patch("/api/projects/{project_id}/checklists/{checklist_id}/items/{item_id}")
+async def toggle_checklist_item(project_id: str, checklist_id: str, item_id: str, request: Request):
+    """Toggle a checklist item's checked state or update document references."""
+    project_dir = _resolve_project_path(project_id)
+    if project_dir is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+
+    checklists = _read_project_json(project_dir, "checklists.json", [])
+    for cl in checklists:
+        if cl.get("id") == checklist_id:
+            for it in cl.get("items", []):
+                if it.get("id") == item_id:
+                    if "checked" in body:
+                        it["checked"] = body["checked"]
+                    if "document_refs" in body:
+                        it["document_refs"] = body["document_refs"]
+                    _write_project_json(project_dir, "checklists.json", checklists)
+                    return {"ok": True, "item": it}
+            raise HTTPException(status_code=404, detail="Checklist item not found")
+    raise HTTPException(status_code=404, detail="Checklist not found")
+
+
+# ── Conditions Precedent ────────────────────────────────────────────────────
+
+
+@app.get("/api/projects/{project_id}/cps")
+async def get_project_cps(project_id: str):
+    """List conditions precedent for a project."""
+    project_dir = _resolve_project_path(project_id)
+    if project_dir is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    cps = _read_project_json(project_dir, "cps.json", [])
+    return {"project_id": project_id, "cps": cps}
+
+
+@app.post("/api/projects/{project_id}/cps")
+async def create_project_cp(project_id: str, request: Request):
+    """Create a new condition precedent."""
+    project_dir = _resolve_project_path(project_id)
+    if project_dir is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+
+    description = body.get("description", "").strip()
+    if not description:
+        raise HTTPException(status_code=400, detail="description is required")
+
+    cps = _read_project_json(project_dir, "cps.json", [])
+    new_cp = {
+        "id": str(_uuid.uuid4())[:8],
+        "description": description,
+        "status": body.get("status", "pending"),
+        "due_date": body.get("due_date", ""),
+        "notes": body.get("notes", ""),
+        "document_refs": body.get("document_refs", []),
+    }
+    cps.append(new_cp)
+    _write_project_json(project_dir, "cps.json", cps)
+
+    return {"ok": True, "cp": new_cp}
+
+
+@app.patch("/api/projects/{project_id}/cps/{cp_id}")
+async def update_project_cp(project_id: str, cp_id: str, request: Request):
+    """Update a condition precedent's status or notes."""
+    project_dir = _resolve_project_path(project_id)
+    if project_dir is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+
+    cps = _read_project_json(project_dir, "cps.json", [])
+    for cp in cps:
+        if cp.get("id") == cp_id:
+            for key in ("status", "notes", "due_date", "description", "document_refs"):
+                if key in body:
+                    cp[key] = body[key]
+            _write_project_json(project_dir, "cps.json", cps)
+            return {"ok": True, "cp": cp}
+    raise HTTPException(status_code=404, detail="CP not found")
+
+
+# ── Tasks ───────────────────────────────────────────────────────────────────
+
+
+@app.get("/api/projects/{project_id}/tasks")
+async def get_project_tasks(project_id: str):
+    """List project tasks."""
+    project_dir = _resolve_project_path(project_id)
+    if project_dir is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    tasks = _read_project_json(project_dir, "tasks.json", [])
+    return {"project_id": project_id, "tasks": tasks}
+
+
+@app.post("/api/projects/{project_id}/tasks")
+async def create_project_task(project_id: str, request: Request):
+    """Create a new project task."""
+    project_dir = _resolve_project_path(project_id)
+    if project_dir is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+
+    title = body.get("title", "").strip()
+    if not title:
+        raise HTTPException(status_code=400, detail="title is required")
+
+    tasks = _read_project_json(project_dir, "tasks.json", [])
+    new_task = {
+        "id": str(_uuid.uuid4())[:8],
+        "title": title,
+        "status": body.get("status", "todo"),
+        "assignee": body.get("assignee", ""),
+        "due_date": body.get("due_date", ""),
+        "notes": body.get("notes", ""),
+    }
+    tasks.append(new_task)
+    _write_project_json(project_dir, "tasks.json", tasks)
+
+    return {"ok": True, "task": new_task}
+
+
+@app.patch("/api/projects/{project_id}/tasks/{task_id}")
+async def update_project_task(project_id: str, task_id: str, request: Request):
+    """Update a project task."""
+    project_dir = _resolve_project_path(project_id)
+    if project_dir is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+
+    tasks = _read_project_json(project_dir, "tasks.json", [])
+    for task in tasks:
+        if task.get("id") == task_id:
+            for key in ("title", "status", "assignee", "due_date", "notes"):
+                if key in body:
+                    task[key] = body[key]
+            _write_project_json(project_dir, "tasks.json", tasks)
+            return {"ok": True, "task": task}
+    raise HTTPException(status_code=404, detail="Task not found")
 
 
 # ---------------------------------------------------------------------------

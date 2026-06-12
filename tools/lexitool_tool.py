@@ -27,14 +27,6 @@ from tools.registry import invalidate_check_fn_cache, registry, tool_error, tool
 
 logger = logging.getLogger(__name__)
 
-# Prefer the repo-vendored lexitool during development and image builds so
-# native tool changes in this fork are immediately visible. Fall back to the
-# user-installed/symlinked package for older installations.
-_REPO_LEXITOOL_PARENT = Path(__file__).resolve().parents[1] / "vendor" / "lexitool"
-_USER_LEXITOOL_PARENT = Path("/root/.hermes/tools")
-for _lex_parent in (_USER_LEXITOOL_PARENT, _REPO_LEXITOOL_PARENT):
-    if (_lex_parent / "lexitool").exists() and str(_lex_parent) not in sys.path:
-        sys.path.insert(0, str(_lex_parent))
 
 
 def _check_lexitool():

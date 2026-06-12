@@ -521,6 +521,259 @@ export const api = {
       `/api/projects/${encodeURIComponent(id)}`,
       { method: "DELETE" },
     ),
+
+  // Project files
+  fetchProjectFiles: (projectId: string, path?: string) => {
+    const qs = path ? `?path=${encodeURIComponent(path)}` : "";
+    return fetchJSON<FilesResponse>(
+      `/api/projects/${encodeURIComponent(projectId)}/files${qs}`,
+    );
+  },
+  uploadProjectFiles: async (
+    projectId: string,
+    files: File[],
+    path?: string,
+  ): Promise<UploadResponse> => {
+    const formData = new FormData();
+    for (const f of files) {
+      formData.append("files", f);
+    }
+    const headers = new Headers();
+    const token = window.__HERMES_SESSION_TOKEN__;
+    if (token) {
+      headers.set("X-Hermes-Session-Token", token);
+    }
+    const qs = path ? `?path=${encodeURIComponent(path)}` : "";
+    const res = await fetch(
+      `${BASE}/api/projects/${encodeURIComponent(projectId)}/files${qs}`,
+      { method: "POST", headers, body: formData, credentials: "include" },
+    );
+    if (!res.ok) {
+      const text = await res.text().catch(() => res.statusText);
+      throw new Error(`${res.status}: ${text}`);
+    }
+    return res.json();
+  },
+  downloadProjectFile: (projectId: string, path: string) => {
+    const qs = `?path=${encodeURIComponent(path)}`;
+    // Navigate the browser to the download endpoint — triggers a file save dialog.
+    // Construct the full URL manually so the browser handles the download natively.
+    const token = window.__HERMES_SESSION_TOKEN__;
+    const url = `${BASE}/api/projects/${encodeURIComponent(projectId)}/files/download${qs}`;
+    if (token) {
+      // Use a hidden anchor with the session token as a query param so the
+      // browser's download manager can follow it.
+      const sep = url.includes("?") ? "&" : "?";
+      const anchor = document.createElement("a");
+      anchor.href = `${url}${sep}token=${encodeURIComponent(token)}`;
+      anchor.download = "";
+      anchor.click();
+    } else {
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = "";
+      anchor.click();
+    }
+  },
+  deleteProjectFile: (projectId: string, path: string) => {
+    const qs = `?path=${encodeURIComponent(path)}`;
+    return fetchJSON<{ ok: boolean; path: string }>(
+      `/api/projects/${encodeURIComponent(projectId)}/files${qs}`,
+      { method: "DELETE" },
+    );
+  },
+
+  // Project version management (git)
+  fetchVersions: (projectId: string, n?: number) => {
+    const qs = n ? `?n=${n}` : "";
+    return fetchJSON<VersionsResponse>(
+      `/api/projects/${encodeURIComponent(projectId)}/versions${qs}`,
+    );
+  },
+  createSnapshot: (projectId: string, body: CreateSnapshotRequest) =>
+    fetchJSON<SnapshotResponse>(
+      `/api/projects/${encodeURIComponent(projectId)}/versions`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      },
+    ),
+  getVersionDetail: (projectId: string, sha: string) =>
+    fetchJSON<VersionDetail>(
+      `/api/projects/${encodeURIComponent(projectId)}/versions/${encodeURIComponent(sha)}`,
+    ),
+  fetchBranches: (projectId: string) =>
+    fetchJSON<BranchesResponse>(
+      `/api/projects/${encodeURIComponent(projectId)}/branches`,
+    ),
+  createBranch: (projectId: string, body: { name: string; switch?: boolean }) =>
+    fetchJSON<BranchCreateResponse>(
+      `/api/projects/${encodeURIComponent(projectId)}/branches`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      },
+    ),
+  fetchWorktrees: (projectId: string) =>
+    fetchJSON<WorktreesResponse>(
+      `/api/projects/${encodeURIComponent(projectId)}/worktrees`,
+    ),
+  createWorktree: (projectId: string, body: { name: string; base_branch?: string }) =>
+    fetchJSON<WorktreeCreateResponse>(
+      `/api/projects/${encodeURIComponent(projectId)}/worktrees`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      },
+    ),
+  deleteWorktree: (projectId: string, name: string, force?: boolean) => {
+    const qs = force ? "?force=true" : "";
+    return fetchJSON<{ ok: boolean; message: string }>(
+      `/api/projects/${encodeURIComponent(projectId)}/worktrees/${encodeURIComponent(name)}${qs}`,
+      { method: "DELETE" },
+    );
+  },
+  diffFiles: (projectId: string, original: string, revised: string, mode?: string) =>
+    fetchJSON<DiffResponse>(
+      `/api/projects/${encodeURIComponent(projectId)}/diff`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ original, revised, mode: mode || "sidebyside" }),
+      },
+    ),
+
+  // ── Document-aware (Phase B) ──
+
+  analyzeFile: (projectId: string, path: string) =>
+    fetchJSON<AnalyzeResponse>(
+      `/api/projects/${encodeURIComponent(projectId)}/files/analyze?path=${encodeURIComponent(path)}`,
+    ),
+
+  previewFile: (projectId: string, path: string, paras?: number) =>
+    fetchJSON<PreviewResponse>(
+      `/api/projects/${encodeURIComponent(projectId)}/files/preview?path=${encodeURIComponent(path)}${paras ? `&paras=${paras}` : ""}`,
+    ),
+
+  updateFileMeta: (projectId: string, body: UpdateMetaRequest) =>
+    fetchJSON<{ ok: boolean; path: string; meta: DocumentMeta }>(
+      `/api/projects/${encodeURIComponent(projectId)}/files/meta`,
+      {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      },
+    ),
+
+  fetchInventory: (projectId: string) =>
+    fetchJSON<InventoryResponse>(
+      `/api/projects/${encodeURIComponent(projectId)}/inventory`,
+    ),
+
+  searchDocuments: (projectId: string, q: string, maxResults?: number, filters?: SearchFilters) => {
+    const params = new URLSearchParams({ q, max_results: String(maxResults || 30) });
+    if (filters?.status) params.set("status", filters.status);
+    if (filters?.file_type) params.set("file_type", filters.file_type);
+    if (filters?.date_from) params.set("date_from", filters.date_from);
+    if (filters?.date_to) params.set("date_to", filters.date_to);
+    return fetchJSON<SearchResponse>(
+      `/api/projects/${encodeURIComponent(projectId)}/documents/search?${params.toString()}`,
+    );
+  },
+
+  fetchFileRefs: (projectId: string, path: string) =>
+    fetchJSON<FileRefsResponse>(
+      `/api/projects/${encodeURIComponent(projectId)}/files/refs?path=${encodeURIComponent(path)}`,
+    ),
+
+  createBinder: (projectId: string, files: string[], title?: string, outputName?: string) =>
+    fetchJSON<BinderResponse>(
+      `/api/projects/${encodeURIComponent(projectId)}/binder`,
+      { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ files, title: title || "Binder", output_name: outputName }) },
+    ),
+
+  fetchFileAudit: (projectId: string, path: string) =>
+    fetchJSON<FileAuditResponse>(
+      `/api/projects/${encodeURIComponent(projectId)}/files/audit?path=${encodeURIComponent(path)}`,
+    ),
+
+  addFileAuditEvent: (projectId: string, path: string, action: string, user?: string, detail?: string) =>
+    fetchJSON<{ ok: boolean; path: string; event: AuditEvent }>(
+      `/api/projects/${encodeURIComponent(projectId)}/files/audit`,
+      { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ path, action, user: user || "webui", detail: detail || "" }) },
+    ),
+
+  // ── Project lifecycle (Phase C) ──
+
+  fetchDashboard: (projectId: string) =>
+    fetchJSON<DashboardResponse>(
+      `/api/projects/${encodeURIComponent(projectId)}/dashboard`,
+    ),
+
+  fetchPhases: (projectId: string) =>
+    fetchJSON<PhasesResponse>(
+      `/api/projects/${encodeURIComponent(projectId)}/phases`,
+    ),
+
+  advancePhase: (projectId: string) =>
+    fetchJSON<{ ok: boolean; previous_phase: string; current_phase: string; phase_index: number }>(
+      `/api/projects/${encodeURIComponent(projectId)}/phases`,
+      { method: "PATCH", headers: { "Content-Type": "application/json" }, body: "{}" },
+    ),
+
+  fetchChecklists: (projectId: string) =>
+    fetchJSON<ChecklistsResponse>(
+      `/api/projects/${encodeURIComponent(projectId)}/checklists`,
+    ),
+
+  createChecklist: (projectId: string, body: { name: string; items?: Array<{ text: string }> }) =>
+    fetchJSON<{ ok: boolean; checklist: Checklist }>(
+      `/api/projects/${encodeURIComponent(projectId)}/checklists`,
+      { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) },
+    ),
+
+  toggleChecklistItem: (projectId: string, checklistId: string, itemId: string, checked: boolean, document_refs?: string[]) =>
+    fetchJSON<{ ok: boolean; item: ChecklistItem }>(
+      `/api/projects/${encodeURIComponent(projectId)}/checklists/${checklistId}/items/${itemId}`,
+      { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ checked, ...(document_refs !== undefined ? { document_refs } : {}) }) },
+    ),
+
+  fetchCPs: (projectId: string) =>
+    fetchJSON<CPsResponse>(
+      `/api/projects/${encodeURIComponent(projectId)}/cps`,
+    ),
+
+  createCP: (projectId: string, body: { description: string; status?: string; due_date?: string; notes?: string }) =>
+    fetchJSON<{ ok: boolean; cp: CpEntry }>(
+      `/api/projects/${encodeURIComponent(projectId)}/cps`,
+      { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) },
+    ),
+
+  updateCP: (projectId: string, cpId: string, body: Partial<CpEntry>) =>
+    fetchJSON<{ ok: boolean; cp: CpEntry }>(
+      `/api/projects/${encodeURIComponent(projectId)}/cps/${cpId}`,
+      { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) },
+    ),
+
+  fetchTasks: (projectId: string) =>
+    fetchJSON<TasksResponse>(
+      `/api/projects/${encodeURIComponent(projectId)}/tasks`,
+    ),
+
+  createTask: (projectId: string, body: { title: string; status?: string; assignee?: string; due_date?: string; notes?: string }) =>
+    fetchJSON<{ ok: boolean; task: TaskEntry }>(
+      `/api/projects/${encodeURIComponent(projectId)}/tasks`,
+      { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) },
+    ),
+
+  updateTask: (projectId: string, taskId: string, body: Partial<TaskEntry>) =>
+    fetchJSON<{ ok: boolean; task: TaskEntry }>(
+      `/api/projects/${encodeURIComponent(projectId)}/tasks/${taskId}`,
+      { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) },
+    ),
 };
 
 /** Identity payload returned by ``GET /api/auth/me`` (Phase 7).
@@ -660,6 +913,352 @@ export interface ProjectCreateResponse {
   total_chars_extracted: number;
   entities_detected: Record<string, string[]>;
   error?: string;
+}
+
+export interface FileEntry {
+  name: string;
+  path: string;
+  size: number;
+  modified: string;
+  is_dir: boolean;
+}
+
+export interface FilesResponse {
+  files: FileEntry[];
+  current_path: string;
+  project_id: string;
+  project_name: string;
+}
+
+export interface UploadResponse {
+  uploaded: Array<{ name: string; size: number }>;
+  errors: Array<{ filename: string; error: string }>;
+}
+
+// ── Version management types ──────────────────────────────────────────────
+
+export interface CommitEntry {
+  hash: string;
+  date: string;
+  message: string;
+  full: string;
+}
+
+export interface VersionsResponse {
+  project_id: string;
+  branch: string;
+  head: string;
+  dirty: boolean;
+  changed_files: string[];
+  commits: CommitEntry[];
+}
+
+export interface CreateSnapshotRequest {
+  message: string;
+  author?: string;
+  tag?: string;
+  allow_empty?: boolean;
+}
+
+export interface SnapshotResponse {
+  ok: boolean;
+  message: string;
+  commit_hash: string;
+  tag: string;
+  branch: string;
+  no_changes: boolean;
+}
+
+export interface VersionDetail {
+  project_id: string;
+  hash_full: string;
+  hash_short: string;
+  author: string;
+  date: string;
+  subject: string;
+  changed_files: string[];
+}
+
+export interface BranchInfo {
+  name: string;
+  current: boolean;
+  hash: string;
+}
+
+export interface BranchesResponse {
+  project_id: string;
+  branches: BranchInfo[];
+}
+
+export interface BranchCreateResponse {
+  ok: boolean;
+  branch: string;
+  commit_hash: string;
+  message: string;
+}
+
+export interface WorktreeInfo {
+  path: string;
+  branch: string;
+  hash: string;
+}
+
+export interface WorktreesResponse {
+  project_id: string;
+  worktrees: WorktreeInfo[];
+  current_branch: string;
+}
+
+export interface WorktreeCreateResponse {
+  ok: boolean;
+  worktree_path: string;
+  branch: string;
+  message: string;
+}
+
+export interface DiffParagraph {
+  index: number;
+  status: "same" | "added" | "deleted" | "changed";
+  original?: string;
+  revised?: string;
+  category?: string;
+}
+
+export interface DiffResponse {
+  original: string;
+  revised: string;
+  summary: string;
+  changed_count: number;
+  details: DiffParagraph[];
+  tc_stats?: { insertions: number; deletions: number };
+  categories?: Record<string, number>;
+}
+
+// ── Document-aware types (Phase B) ─────────────────────────────────────────
+
+export interface DocumentStats {
+  paragraphs?: number;
+  tables?: number;
+  fonts?: Array<[string, number]>;
+  tc_count?: number;
+  comment_count?: number;
+  lines?: number;
+  chars?: number;
+  size?: number;
+  message?: string;
+}
+
+export interface AnalyzeResponse {
+  path: string;
+  name: string;
+  ext: string;
+  stats?: DocumentStats;
+  error?: string;
+}
+
+export interface PreviewResponse {
+  path: string;
+  name: string;
+  ext: string;
+  preview: string[];
+  error?: string;
+}
+
+export interface DocumentMeta {
+  name?: string;
+  status?: string;     // draft | review | final | signed | archived
+  signing_status?: string; // unsigned | sent | partially-signed | signed
+  tags?: string[];
+  notes?: string;
+  version?: string;
+  size?: number;
+  modified?: string;
+  updated?: string;
+}
+
+export interface UpdateMetaRequest {
+  path: string;
+  status?: string;
+  tags?: string[];
+  notes?: string;
+  version?: string;
+}
+
+export interface InventoryResponse {
+  project_id: string;
+  inventory: {
+    documents: Record<string, DocumentMeta>;
+  };
+}
+
+export interface SearchMatch {
+  path: string;
+  name: string;
+  matches: string[];
+  size: number;
+}
+
+export interface SearchResponse {
+  project_id: string;
+  query: string;
+  results: SearchMatch[];
+  total: number;
+}
+
+export interface FileRef {
+  type: "checklist_item" | "cp";
+  checklist_id?: string;
+  checklist_name?: string;
+  item_id?: string;
+  item_text?: string;
+  cp_id?: string;
+  cp_description?: string;
+  cp_status?: string;
+}
+
+export interface FileRefsResponse {
+  project_id: string;
+  path: string;
+  refs: FileRef[];
+}
+
+export interface DiffPair {
+  side: "left" | "right" | "both";
+  type: "unchanged" | "added" | "removed" | "modified";
+  old_para: number | null;
+  new_para: number | null;
+  old_text: string;
+  new_text: string;
+}
+
+export interface DiffResponse {
+  ok?: boolean;
+  original: string;
+  revised: string;
+  changes_count?: number;
+  pairs?: DiffPair[];
+  summary_text?: string;
+}
+
+export interface BinderResponse {
+  ok: boolean;
+  output: string;
+  page_count?: number;
+  files_merged: number;
+  size: number;
+}
+
+export interface AuditEvent {
+  timestamp: string;
+  user: string;
+  action: string;
+  detail: string;
+}
+
+export interface FileAuditResponse {
+  project_id: string;
+  path: string;
+  signing_status: string;
+  audit_log: AuditEvent[];
+}
+
+export interface SearchFilters {
+  status?: string;
+  file_type?: string;
+  date_from?: string;
+  date_to?: string;
+}
+
+// ── Project lifecycle types (Phase C) ──────────────────────────────────────
+
+export interface PhaseState {
+  phase: string;
+  phase_index: number;
+  phase_history: Array<{ phase: string; completed: string }>;
+}
+
+export interface DashboardResponse {
+  project_id: string;
+  phase: PhaseState;
+  phases: string[];
+  documents: {
+    total: number;
+    by_status: Record<string, number>;
+  };
+  checklists: {
+    items_checked: number;
+    items_total: number;
+    lists: number;
+  };
+  cps: {
+    done: number;
+    total: number;
+  };
+  tasks: {
+    done: number;
+    total: number;
+  };
+  git: {
+    dirty?: boolean;
+    changed_files?: string[];
+    branch?: string;
+    head?: string;
+    recent_commits?: Array<{ hash: string; message: string }>;
+  };
+}
+
+export interface PhasesResponse {
+  project_id: string;
+  phases: string[];
+  current_phase: string;
+  current_index: number;
+  phase_history: Array<{ phase: string; completed: string }>;
+}
+
+export interface ChecklistItem {
+  id: string;
+  text: string;
+  checked: boolean;
+  document_refs?: string[];
+}
+
+export interface Checklist {
+  id: string;
+  name: string;
+  items: ChecklistItem[];
+}
+
+export interface ChecklistsResponse {
+  project_id: string;
+  checklists: Checklist[];
+}
+
+export interface CpEntry {
+  id: string;
+  description: string;
+  status: string;
+  due_date: string;
+  notes: string;
+  document_refs?: string[];
+}
+
+export interface CPsResponse {
+  project_id: string;
+  cps: CpEntry[];
+}
+
+export interface TaskEntry {
+  id: string;
+  title: string;
+  status: string;
+  assignee: string;
+  due_date: string;
+  notes: string;
+}
+
+export interface TasksResponse {
+  project_id: string;
+  tasks: TaskEntry[];
 }
 
 export interface PaginatedSessions {

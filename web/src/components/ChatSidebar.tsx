@@ -30,6 +30,7 @@ import { Card } from "@nous-research/ui/ui/components/card";
 import { ModelPickerDialog } from "@/components/ModelPickerDialog";
 import { LegalWorkflowPanel } from "@/components/LegalWorkflowPanel";
 import { ToolCall, type ToolEntry } from "@/components/ToolCall";
+import { ContextIndicator } from "@/components/ContextIndicator";
 import { GatewayClient, type ConnectionState } from "@/lib/gatewayClient";
 import { HERMES_BASE_PATH, buildWsAuthParam } from "@/lib/api";
 
@@ -348,6 +349,8 @@ export function ChatSidebar({
 
         <Badge tone={STATE_TONE[state]}>{STATE_LABEL[state]}</Badge>
       </Card>
+
+      <ContextIndicator gw={gw} className="px-1" />
 
       {banner && (
         <Card className="flex items-start gap-2 border-destructive/40 bg-destructive/5 px-3 py-2 text-xs">

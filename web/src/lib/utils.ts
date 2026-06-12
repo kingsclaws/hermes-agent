@@ -14,6 +14,15 @@ export const themedBody = "font-mondwest normal-case";
 /** Mondwest brand chrome — uppercase section headers and nav labels. */
 export const themedChrome = "font-mondwest text-display";
 
+/** Human-readable file size from bytes. */
+export function formatFileSize(bytes: number): string {
+  if (bytes === 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  const i = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
+  const size = bytes / Math.pow(1024, i);
+  return `${size.toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
+}
+
 /** Relative time from a Unix epoch timestamp (seconds). */
 export function timeAgo(ts: number): string {
   const delta = Date.now() / 1000 - ts;

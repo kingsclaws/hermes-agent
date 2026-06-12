@@ -10,7 +10,9 @@ import {
   Target,
   ChevronRight,
   X,
+  FolderOpen,
 } from "lucide-react";
+import { useNavigate } from "react-router-dom";
 import { api, type ProjectInfo } from "@/lib/api";
 import { timeAgo } from "@/lib/utils";
 import { Toast } from "@nous-research/ui/ui/components/toast";
@@ -48,6 +50,7 @@ export default function ProjectsPage() {
   const [form, setForm] = useState<CreateForm>(EMPTY_FORM);
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const navigate = useNavigate();
 
   const { toast, showToast } = useToast();
   const projectDelete = useConfirmDelete({
@@ -192,7 +195,11 @@ export default function ProjectsPage() {
       ) : (
         <div className="grid gap-3">
           {filtered.map((proj) => (
-            <Card key={proj.id} className="hover:bg-card-hover transition-colors">
+            <Card
+              key={proj.id}
+              className="hover:bg-card-hover transition-colors cursor-pointer"
+              onClick={() => navigate(`/projects/${encodeURIComponent(proj.id)}`)}
+            >
               <CardContent className="p-4">
                 <div className="flex items-start justify-between gap-4">
                   <div className="flex-1 min-w-0">
@@ -239,7 +246,22 @@ export default function ProjectsPage() {
                     <Button
                       ghost
                       size="sm"
-                      onClick={() => projectDelete.requestDelete(proj.id)}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        navigate(`/projects/${encodeURIComponent(proj.id)}`);
+                      }}
+                      aria-label={`Browse ${proj.name} files`}
+                      title="Browse files"
+                    >
+                      <FolderOpen className="h-4 w-4 text-text-secondary hover:text-primary" />
+                    </Button>
+                    <Button
+                      ghost
+                      size="sm"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        projectDelete.requestDelete(proj.id);
+                      }}
                       aria-label={`Delete ${proj.name}`}
                     >
                       <Trash2 className="h-4 w-4 text-text-tertiary hover:text-destructive" />

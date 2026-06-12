@@ -256,3 +256,21 @@ code { font-size: 0.875rem; }
   display: none;
 }
 
+/* ------------------------------------------------------------------ */
+/* Syntax highlighting for code blocks in chat.                       */
+/* ------------------------------------------------------------------ */
+
+.hl-kw { color: #c792ea; font-weight: 500; }
+.hl-str { color: #c3e88d; }
+.hl-comment { color: #546e7a; font-style: italic; }
+.hl-num { color: #f78c6c; }
+.hl-fn { color: #82aaff; }
+.hl-key { color: #80cbc4; }
+.hl-punct { color: #89ddff; }
+.hl-decorator { color: #c792ea; }
+.hl-var { color: #eeffff; }
+.hl-ws { /* invisible */ }
+.hl-meta { color: #89ddff; font-weight: 600; }
+.hl-ins { color: #c3e88d; }
+.hl-del { color: #ff5370; }
+

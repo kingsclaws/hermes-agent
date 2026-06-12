@@ -192,7 +192,7 @@ RUN chmod -R a+rX /opt/hermes && \
 # run as the default hermes user (UID 10000).
 
 # ---------- Install lexitool (legal docx toolkit) ----------
-RUN uv pip install --no-cache-dir vendor/lexitool
+RUN uv pip install --no-cache-dir -e vendor/lexitool
 
 # ---------- Link hermes-agent itself (editable) ----------
 # Deps are already installed in the cached layer above; `--no-deps` makes

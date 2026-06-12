@@ -1,6 +1,12 @@
 import { Button } from "@nous-research/ui/ui/components/button";
 import { Card } from "@nous-research/ui/ui/components/card";
 import { ToolCall, type ToolEntry } from "@/components/ToolCall";
+import { ThinkingStream, type ThinkingBlockData } from "@/components/ThinkingBlock";
+import { ApprovalModal } from "@/components/ApprovalModal";
+import { ContextIndicator } from "@/components/ContextIndicator";
+import { CommandPalette } from "@/components/CommandPalette";
+import { NotificationFeed } from "@/components/NotificationFeed";
+import { Markdown } from "@/components/Markdown";
 import { GatewayClient, type ConnectionState } from "@/lib/gatewayClient";
 import { executeSlash, parseSlash } from "@/lib/slashExec";
 import { cn } from "@/lib/utils";
@@ -62,11 +68,13 @@ export function NativeChatSurface() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [tools, setTools] = useState<ToolEntry[]>([]);
   const [subagents, setSubagents] = useState<SubagentLine[]>([]);
+  const [thinkingBlocks, setThinkingBlocks] = useState<ThinkingBlockData[]>([]);
   const [input, setInput] = useState("");
   const [running, setRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const assistantIdRef = useRef<string | null>(null);
+  const thinkingIdRef = useRef<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -74,26 +82,79 @@ export function NativeChatSurface() {
     const offStart = gw.on("message.start", () => {
       const id = `assistant-${Date.now()}`;
       assistantIdRef.current = id;
+      thinkingIdRef.current = null; // Reset thinking state for new turn
       setMessages((prev) => [...prev, { id, role: "assistant", text: "" }]);
+      setThinkingBlocks([]);
       setRunning(true);
     });
-    const offDelta = gw.on<{ text?: string; rendered?: string }>("message.delta", (ev) => {
-      const delta = ev.payload?.rendered ?? ev.payload?.text ?? "";
-      const id = assistantIdRef.current;
-      if (!id || !delta) return;
-      setMessages((prev) =>
-        prev.map((msg) => (msg.id === id ? { ...msg, text: msg.text + delta } : msg)),
-      );
-    });
+    const offDelta = gw.on<{ text?: string; rendered?: string }>(
+      "message.delta",
+      (ev) => {
+        const delta = ev.payload?.rendered ?? ev.payload?.text ?? "";
+        const id = assistantIdRef.current;
+        if (!id || !delta) return;
+        setMessages((prev) =>
+          prev.map((msg) =>
+            msg.id === id ? { ...msg, text: msg.text + delta } : msg,
+          ),
+        );
+      },
+    );
     const offComplete = gw.on("message.complete", () => {
       setRunning(false);
       assistantIdRef.current = null;
+      // Mark active thinking block as complete
+      setThinkingBlocks((prev) =>
+        prev.map((tb) => (tb.complete ? tb : { ...tb, complete: true })),
+      );
     });
     const offError = gw.on<{ message?: string }>("error", (ev) => {
       setError(ev.payload?.message ?? "Agent error");
       setRunning(false);
     });
-    const offToolStart = gw.on<{ tool_id?: string; name?: string; context?: string }>("tool.start", (ev) => {
+
+    // Thinking / Reasoning events
+    const offReasoning = gw.on<{ text?: string }>(
+      "reasoning.available",
+      (ev) => {
+        const text = ev.payload?.text;
+        if (!text) return;
+        const id = `reasoning-${Date.now()}`;
+        thinkingIdRef.current = id;
+        setThinkingBlocks((prev) => {
+          // If the last block is incomplete, append to it; otherwise create new
+          const last = prev[prev.length - 1];
+          if (last && !last.complete) {
+            return prev.map((tb) =>
+              tb.id === last.id ? { ...tb, text: tb.text + text } : tb,
+            );
+          }
+          return [...prev, { id, text, complete: false }];
+        });
+      },
+    );
+
+    const offThinking = gw.on<{ text?: string }>("thinking.delta", (ev) => {
+      const text = ev.payload?.text;
+      if (!text) return;
+      const id = thinkingIdRef.current ?? `thinking-${Date.now()}`;
+      thinkingIdRef.current = id;
+      setThinkingBlocks((prev) => {
+        const existing = prev.find((tb) => tb.id === id);
+        if (existing) {
+          return prev.map((tb) =>
+            tb.id === id ? { ...tb, text: tb.text + text } : tb,
+          );
+        }
+        return [...prev, { id, text, complete: false }];
+      });
+    });
+
+    const offToolStart = gw.on<{
+      tool_id?: string;
+      name?: string;
+      context?: string;
+    }>("tool.start", (ev) => {
       const id = ev.payload?.tool_id ?? `tool-${Date.now()}`;
       const tool: ToolEntry = {
         kind: "tool",
@@ -104,41 +165,40 @@ export function NativeChatSurface() {
         status: "running",
         startedAt: Date.now(),
       };
-      setTools((prev) =>
-        [
-          ...prev,
-          tool,
-        ].slice(-30),
-      );
+      setTools((prev) => [...prev, tool].slice(-30));
     });
+
     const offToolComplete = gw.on<{
       tool_id?: string;
       summary?: string;
       error?: string;
       inline_diff?: string;
-    }>(
-      "tool.complete",
-      (ev) => {
-        const id = ev.payload?.tool_id;
-        if (!id) return;
-        setTools((prev) =>
-          prev.map((tool) =>
-            tool.id === id
-              ? {
-                  ...tool,
-                  status: ev.payload?.error ? "error" : "done",
-                  summary: ev.payload?.summary,
-                  error: ev.payload?.error,
-                  inline_diff: ev.payload?.inline_diff,
-                  completedAt: Date.now(),
-                }
-              : tool,
-          ),
-        );
-      },
-    );
-    const updateSubagent = (payload: Record<string, unknown>, eventType: string) => {
-      const id = String(payload.subagent_id ?? payload.id ?? `subagent-${Date.now()}`);
+    }>("tool.complete", (ev) => {
+      const id = ev.payload?.tool_id;
+      if (!id) return;
+      setTools((prev) =>
+        prev.map((tool) =>
+          tool.id === id
+            ? {
+                ...tool,
+                status: ev.payload?.error ? "error" : "done",
+                summary: ev.payload?.summary,
+                error: ev.payload?.error,
+                inline_diff: ev.payload?.inline_diff,
+                completedAt: Date.now(),
+              }
+            : tool,
+        ),
+      );
+    });
+
+    const updateSubagent = (
+      payload: Record<string, unknown>,
+      eventType: string,
+    ) => {
+      const id = String(
+        payload.subagent_id ?? payload.id ?? `subagent-${Date.now()}`,
+      );
       const status =
         eventType === "subagent.complete"
           ? payload.status === "error"
@@ -147,7 +207,9 @@ export function NativeChatSurface() {
           : payload.status === "error"
             ? "error"
             : "running";
-      const text = String(payload.text ?? payload.tool_preview ?? payload.preview ?? "");
+      const text = String(
+        payload.text ?? payload.tool_preview ?? payload.preview ?? "",
+      );
       setSubagents((prev) => {
         const existing = prev.find((item) => item.id === id);
         const next: SubagentLine = {
@@ -156,11 +218,16 @@ export function NativeChatSurface() {
           role: payload.role ? String(payload.role) : existing?.role,
           model: payload.model ? String(payload.model) : existing?.model,
           status,
-          toolName: payload.tool_name ? String(payload.tool_name) : existing?.toolName,
+          toolName: payload.tool_name
+            ? String(payload.tool_name)
+            : existing?.toolName,
           preview: text || existing?.preview,
-          summary: payload.summary ? String(payload.summary) : existing?.summary,
+          summary: payload.summary
+            ? String(payload.summary)
+            : existing?.summary,
           startedAt: existing?.startedAt ?? Date.now(),
-          completedAt: status === "running" ? existing?.completedAt : Date.now(),
+          completedAt:
+            status === "running" ? existing?.completedAt : Date.now(),
         };
         const merged = existing
           ? prev.map((item) => (item.id === id ? next : item))
@@ -168,31 +235,49 @@ export function NativeChatSurface() {
         return merged.slice(-20);
       });
     };
-    const offToolProgress = gw.on<Record<string, unknown>>("tool.progress", (ev) => {
-      const payload = ev.payload ?? {};
-      const eventType = String(payload.event_type ?? "");
-      if (eventType.startsWith("subagent.") || payload.subagent_id) {
-        updateSubagent(payload, eventType || "subagent.progress");
-        return;
-      }
-      const name = typeof payload.name === "string" ? payload.name : null;
-      const preview = typeof payload.preview === "string" ? payload.preview : "";
-      if (!name || !preview) return;
-      setTools((prev) =>
-        prev.map((tool) =>
-          tool.status === "running" && tool.name === name ? { ...tool, preview } : tool,
-        ),
-      );
-    });
-    const offSubagentStart = gw.on<Record<string, unknown>>("subagent.start", (ev) => {
-      updateSubagent(ev.payload ?? {}, "subagent.start");
-    });
-    const offSubagentTool = gw.on<Record<string, unknown>>("subagent.tool", (ev) => {
-      updateSubagent(ev.payload ?? {}, "subagent.tool");
-    });
-    const offSubagentComplete = gw.on<Record<string, unknown>>("subagent.complete", (ev) => {
-      updateSubagent(ev.payload ?? {}, "subagent.complete");
-    });
+
+    const offToolProgress = gw.on<Record<string, unknown>>(
+      "tool.progress",
+      (ev) => {
+        const payload = ev.payload ?? {};
+        const eventType = String(payload.event_type ?? "");
+        if (eventType.startsWith("subagent.") || payload.subagent_id) {
+          updateSubagent(payload, eventType || "subagent.progress");
+          return;
+        }
+        const name =
+          typeof payload.name === "string" ? payload.name : null;
+        const preview =
+          typeof payload.preview === "string" ? payload.preview : "";
+        if (!name || !preview) return;
+        setTools((prev) =>
+          prev.map((tool) =>
+            tool.status === "running" && tool.name === name
+              ? { ...tool, preview }
+              : tool,
+          ),
+        );
+      },
+    );
+
+    const offSubagentStart = gw.on<Record<string, unknown>>(
+      "subagent.start",
+      (ev) => {
+        updateSubagent(ev.payload ?? {}, "subagent.start");
+      },
+    );
+    const offSubagentTool = gw.on<Record<string, unknown>>(
+      "subagent.tool",
+      (ev) => {
+        updateSubagent(ev.payload ?? {}, "subagent.tool");
+      },
+    );
+    const offSubagentComplete = gw.on<Record<string, unknown>>(
+      "subagent.complete",
+      (ev) => {
+        updateSubagent(ev.payload ?? {}, "subagent.complete");
+      },
+    );
 
     gw.connect()
       .then(() => {
@@ -213,6 +298,8 @@ export function NativeChatSurface() {
       offDelta();
       offComplete();
       offError();
+      offReasoning();
+      offThinking();
       offToolStart();
       offToolComplete();
       offToolProgress();
@@ -228,7 +315,7 @@ export function NativeChatSurface() {
       top: scrollRef.current.scrollHeight,
       behavior: "smooth",
     });
-  }, [messages, tools]);
+  }, [messages, tools, thinkingBlocks]);
 
   const submit = useCallback(
     async (text: string) => {
@@ -236,12 +323,16 @@ export function NativeChatSurface() {
       if (!trimmed) return;
       if (!sessionId) {
         setInput(trimmed);
-        setError("Chat is still connecting. Submit again once the status is open.");
+        setError(
+          "Chat is still connecting. Submit again once the status is open.",
+        );
         return;
       }
       if (running) {
         setInput(trimmed);
-        setError("A turn is already running. Submit this after the current turn finishes.");
+        setError(
+          "A turn is already running. Submit this after the current turn finishes.",
+        );
         return;
       }
 
@@ -317,7 +408,10 @@ export function NativeChatSurface() {
       setInput("");
       setRunning(true);
       try {
-        await gw.request("prompt.submit", { session_id: sessionId, text: trimmed });
+        await gw.request("prompt.submit", {
+          session_id: sessionId,
+          text: trimmed,
+        });
       } catch (e) {
         setRunning(false);
         setError(e instanceof Error ? e.message : String(e));
@@ -329,10 +423,18 @@ export function NativeChatSurface() {
   const interrupt = useCallback(async () => {
     if (!sessionId || !running) return;
     try {
-      await gw.request("session.interrupt", { session_id: sessionId }, 10_000);
+      await gw.request(
+        "session.interrupt",
+        { session_id: sessionId },
+        10_000,
+      );
       setMessages((prev) => [
         ...prev,
-        { id: `interrupt-${Date.now()}`, role: "status", text: "已请求停止当前任务。" },
+        {
+          id: `interrupt-${Date.now()}`,
+          role: "status",
+          text: "已请求停止当前任务。",
+        },
       ]);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -342,12 +444,23 @@ export function NativeChatSurface() {
   const interruptSubagent = useCallback(
     async (subagentId: string) => {
       try {
-        await gw.request("subagent.interrupt", { subagent_id: subagentId }, 10_000);
+        await gw.request(
+          "subagent.interrupt",
+          { subagent_id: subagentId },
+          10_000,
+        );
       } catch (e) {
         setError(e instanceof Error ? e.message : String(e));
       }
     },
     [gw],
+  );
+
+  const handleCommandPalette = useCallback(
+    (command: string) => {
+      void submit(command);
+    },
+    [submit],
   );
 
   useEffect(() => {
@@ -361,18 +474,22 @@ export function NativeChatSurface() {
 
   return (
     <Card className="flex min-h-0 flex-1 flex-col overflow-hidden border-primary/20 bg-background-base/70 p-0 normal-case">
+      {/* Header bar */}
       <div className="flex items-center justify-between gap-2 border-b border-current/10 px-3 py-2">
-        <div className="min-w-0">
+        <div className="min-w-0 flex-1">
           <div className="text-xs uppercase tracking-wider text-muted-foreground">
             native legal chat
           </div>
-          <div className="truncate text-sm text-muted-foreground">
-            JSON-RPC session · tools and workflow rendered by Web UI
+          <div className="flex items-center gap-3">
+            <div className="truncate text-sm text-muted-foreground">
+              JSON-RPC session · tools and workflow rendered by Web UI
+            </div>
+            <ContextIndicator gw={gw} />
           </div>
         </div>
         <span
           className={cn(
-            "rounded border px-2 py-0.5 text-[0.65rem]",
+            "rounded border px-2 py-0.5 text-[0.65rem] shrink-0",
             conn === "open"
               ? "border-success/40 text-success"
               : "border-current/20 text-muted-foreground",
@@ -382,30 +499,59 @@ export function NativeChatSurface() {
         </span>
       </div>
 
+      {/* Main content area */}
       <div className="grid min-h-0 flex-1 grid-cols-1 overflow-hidden xl:grid-cols-[minmax(0,1fr)_22rem]">
-        <div ref={scrollRef} className="min-h-0 space-y-3 overflow-y-auto px-3 py-3">
+        {/* Message stream */}
+        <div
+          ref={scrollRef}
+          className="min-h-0 space-y-3 overflow-y-auto px-3 py-3"
+        >
           {messages.length === 0 && (
             <div className="rounded border border-dashed border-current/15 p-4 text-sm text-muted-foreground">
               这里是原生 Web Chat，不是 TUI。右侧 workflow 操作会直接提交到这个会话；delegate 和工具执行在右侧检查器里显示。
+              <br />
+              <span className="text-xs text-muted-foreground/60 mt-1 block">
+                Cmd+K / Ctrl+K to open command palette
+              </span>
             </div>
           )}
+
           {messages.map((message) => (
-            <div
-              key={message.id}
-              className={cn(
-                "max-w-[92%] whitespace-pre-wrap rounded-lg border px-3 py-2 text-sm leading-6",
-                message.role === "user"
-                  ? "ml-auto border-primary/30 bg-primary/10"
-                  : message.role === "status"
-                    ? "mx-auto border-current/10 bg-muted/10 text-xs text-muted-foreground"
-                  : "mr-auto border-current/10 bg-black/10",
-              )}
-            >
-              {message.text || (message.role === "assistant" ? "…" : "")}
+            <div key={message.id}>
+              {/* Show thinking blocks before assistant messages */}
+              {message.role === "assistant" &&
+                thinkingBlocks.length > 0 &&
+                message.id ===
+                  messages.filter((m) => m.role === "assistant").slice(-1)[0]
+                    ?.id && (
+                  <ThinkingStream blocks={thinkingBlocks} className="mb-2" />
+                )}
+
+              <div
+                className={cn(
+                  "max-w-[92%] rounded-lg border px-3 py-2 text-sm leading-6",
+                  message.role === "user"
+                    ? "ml-auto border-primary/30 bg-primary/10"
+                    : message.role === "status"
+                      ? "mx-auto border-current/10 bg-muted/10 text-xs text-muted-foreground"
+                      : "mr-auto border-current/10 bg-black/10",
+                )}
+              >
+                {message.role === "assistant" && message.text ? (
+                  <Markdown
+                    content={message.text}
+                    streaming={running &&
+                      message.id === assistantIdRef.current}
+                  />
+                ) : message.text || message.role === "assistant" ? (
+                  message.text || "…"
+                ) : null}
+              </div>
             </div>
           ))}
         </div>
 
+        {/* Execution inspector sidebar */}
         <ExecutionInspector
           running={running}
           tools={tools}
@@ -414,6 +560,7 @@ export function NativeChatSurface() {
         />
       </div>
 
+      {/* Compact inspector for narrow viewports */}
       <div className="border-t border-current/10 px-3 py-2 xl:hidden">
         <ExecutionInspector
           compact
@@ -424,12 +571,14 @@ export function NativeChatSurface() {
         />
       </div>
 
+      {/* Error banner */}
       {error && (
         <div className="border-t border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive">
           {error}
         </div>
       )}
 
+      {/* Composer */}
       <form
         className="flex shrink-0 gap-2 border-t border-current/10 p-3"
         onSubmit={(ev) => {
@@ -448,7 +597,7 @@ export function NativeChatSurface() {
           }}
           disabled={!sessionId || conn !== "open"}
           rows={2}
-          placeholder="输入法律工作指令。Shift+Enter 换行。"
+          placeholder="输入法律工作指令。Shift+Enter 换行。Cmd+K 命令面板。"
           className="min-h-12 flex-1 resize-none rounded border border-current/15 bg-black/10 px-3 py-2 text-sm outline-none focus:border-primary/60"
         />
         <Button
@@ -457,9 +606,22 @@ export function NativeChatSurface() {
           disabled={!sessionId || (!running && !input.trim())}
           className="self-end px-3"
         >
-          {running ? <Square className="h-4 w-4" /> : <Send className="h-4 w-4" />}
+          {running ? (
+            <Square className="h-4 w-4" />
+          ) : (
+            <Send className="h-4 w-4" />
+          )}
         </Button>
       </form>
+
+      {/* Overlays */}
+      <ApprovalModal gw={gw} sessionId={sessionId} />
+      <CommandPalette
+        gw={gw}
+        sessionId={sessionId}
+        onExecute={handleCommandPalette}
+      />
+      <NotificationFeed gw={gw} />
     </Card>
   );
 }
@@ -477,14 +639,20 @@ function ExecutionInspector({
   subagents: SubagentLine[];
   onInterruptSubagent: (subagentId: string) => void;
 }) {
-  const runningTools = tools.filter((tool) => tool.status === "running").length;
-  const runningSubagents = subagents.filter((agent) => agent.status === "running").length;
+  const runningTools = tools.filter(
+    (tool) => tool.status === "running",
+  ).length;
+  const runningSubagents = subagents.filter(
+    (agent) => agent.status === "running",
+  ).length;
 
   return (
     <aside
       className={cn(
         "min-h-0 border-current/10 bg-black/[0.08]",
-        compact ? "max-h-64 overflow-y-auto rounded border p-2" : "hidden overflow-y-auto border-l p-3 xl:block",
+        compact
+          ? "max-h-64 overflow-y-auto rounded border p-2"
+          : "hidden overflow-y-auto border-l p-3 xl:block",
       )}
     >
       <div className="mb-3 flex items-center justify-between gap-2">
@@ -494,7 +662,8 @@ function ExecutionInspector({
             Execution
           </div>
           <div className="text-[0.65rem] text-muted-foreground">
-            {running ? "turn running" : "idle"} · {runningSubagents} agents · {runningTools} tools
+            {running ? "turn running" : "idle"} · {runningSubagents} agents ·{" "}
+            {runningTools} tools
           </div>
         </div>
       </div>
@@ -569,7 +738,12 @@ function SubagentCard({
           </div>
         </div>
         {agent.status === "running" && (
-          <Button type="button" size="sm" className="h-6 px-2" onClick={onInterrupt}>
+          <Button
+            type="button"
+            size="sm"
+            className="h-6 px-2"
+            onClick={onInterrupt}
+          >
             stop
           </Button>
         )}
