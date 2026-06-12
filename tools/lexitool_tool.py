@@ -2799,6 +2799,98 @@ def _handle_get_project_state(args: dict, **kwargs) -> str:
     return tool_result(result)
 
 
+# ── 17b. project_facts ───────────────────────────────────────────────────────
+
+PROJECT_FACTS_SCHEMA = {
+    "name": "project_facts",
+    "description": (
+        "Maintain the living matter facts database for a legal project. "
+        "Use this whenever project facts are discovered, corrected, confirmed, "
+        "or superseded. Facts persist in .hermes-project/project-facts.json "
+        "and sync to memories/project_facts.md so future turns and compressed "
+        "sessions stay aware of the latest project facts."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "project_dir": {
+                "type": "string",
+                "description": "Path to the project root (containing .hermes-project/).",
+            },
+            "action": {
+                "type": "string",
+                "enum": ["upsert", "list", "get", "delete", "search", "history"],
+                "description": "Fact operation.",
+            },
+            "fact_id": {
+                "type": "string",
+                "description": "Fact ID for get/delete/history or targeted update.",
+            },
+            "category": {
+                "type": "string",
+                "description": "Fact category, e.g. parties, economics, security, cp, dates, documents, issues.",
+            },
+            "key": {
+                "type": "string",
+                "description": "Stable fact key within category, e.g. borrower, loan_amount, maturity.",
+            },
+            "value": {
+                "description": "Fact value. May be string, number, boolean, object, or array.",
+            },
+            "source": {
+                "type": "string",
+                "description": "Evidence/source for the fact: filename, paragraph, user instruction, TS clause, etc.",
+            },
+            "confidence": {
+                "type": "string",
+                "enum": ["low", "medium", "high"],
+                "description": "Confidence level. Default: medium.",
+            },
+            "status": {
+                "type": "string",
+                "enum": ["confirmed", "assumed", "needs_confirmation", "superseded"],
+                "description": "Fact status. Use needs_confirmation for unresolved points.",
+            },
+            "tags": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Optional tags for filtering.",
+            },
+            "query": {
+                "type": "string",
+                "description": "Search text for search/list filtering.",
+            },
+            "limit": {
+                "type": "integer",
+                "description": "Max facts to return for list/search. Default: 50.",
+            },
+        },
+        "required": ["project_dir", "action"],
+    },
+}
+
+
+def _handle_project_facts(args: dict, **kwargs) -> str:
+    from hermes_cli.project_commands import project_facts
+
+    project_dir = _resolve_path(args["project_dir"])
+    result = project_facts(
+        project_dir,
+        args["action"],
+        fact_id=args.get("fact_id"),
+        category=args.get("category"),
+        key=args.get("key"),
+        value=args.get("value"),
+        source=args.get("source"),
+        confidence=args.get("confidence", "medium"),
+        status=args.get("status"),
+        tags=args.get("tags"),
+        query=args.get("query"),
+        limit=int(args.get("limit", 50)),
+    )
+    return tool_result(result)
+
+
 # ── 18. refine_goal ─────────────────────────────────────────────────────────
 
 REFINE_GOAL_SCHEMA = {
@@ -3214,6 +3306,7 @@ _TOOLS = [
     # Project State Evolution
     ("update_project_state",   "lexitool", UPDATE_PROJECT_STATE_SCHEMA,   _handle_update_project_state),
     ("get_project_state",      "lexitool", GET_PROJECT_STATE_SCHEMA,      _handle_get_project_state),
+    ("project_facts",          "lexitool", PROJECT_FACTS_SCHEMA,          _handle_project_facts),
     # Goal
     ("refine_goal",            "lexitool", REFINE_GOAL_SCHEMA,            _handle_refine_goal),
     # Task Board

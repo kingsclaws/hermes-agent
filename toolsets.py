@@ -50,6 +50,7 @@ _LEXITOOL_TOOLS = [
     "lex_translation_review",
     "lex_template_audit",
     "lex_template_fill",
+    "project_facts",
 ]
 
 
@@ -629,7 +630,7 @@ TOOLSETS = {
             "and control page layout.  Enable this toolset in profiles that "
             "handle contract drafting, review, or legal document automation."
         ),
-        "tools": ["lex_read", "lex_stats", "lex_table_list", "lex_edit", "lex_tc", "lex_format", "lex_list", "lex_ref", "lex_section", "lex_doc", "lex_clause", "lex_corpus", "lex_ocr", "lex_project_init", "lex_diff", "lex_xref_audit", "lex_deliver", "lex_gate_check", "lex_git", "lex_proofread", "lex_translation_review", "lex_template_audit", "lex_template_fill", "update_project_state", "get_project_state", "refine_goal", "project_add_task", "project_list_tasks", "project_update_task", "project_delete_task", "execute_code"],
+        "tools": ["lex_read", "lex_stats", "lex_table_list", "lex_edit", "lex_tc", "lex_format", "lex_list", "lex_ref", "lex_section", "lex_doc", "lex_clause", "lex_corpus", "lex_ocr", "lex_project_init", "lex_diff", "lex_xref_audit", "lex_deliver", "lex_gate_check", "lex_git", "lex_proofread", "lex_translation_review", "lex_template_audit", "lex_template_fill", "project_facts", "update_project_state", "get_project_state", "refine_goal", "project_add_task", "project_list_tasks", "project_update_task", "project_delete_task", "execute_code"],
         "includes": [],
     },
 
@@ -655,6 +656,7 @@ TOOLSETS = {
             "lex_deliver", "lex_gate_check", "lex_git",
             "lex_proofread", "lex_translation_review",
             "lex_template_audit",
+            "project_facts",
             "update_project_state", "get_project_state",
             "refine_goal",
             "project_add_task", "project_list_tasks",
@@ -679,6 +681,7 @@ TOOLSETS = {
             "lex_xref_audit", "lex_deliver", "lex_gate_check", "lex_git",
             "lex_proofread", "lex_translation_review",
             "lex_template_audit", "lex_template_fill",
+            "project_facts",
             "update_project_state", "get_project_state", "refine_goal",
             "project_add_task", "project_list_tasks",
             "project_update_task", "project_delete_task",
@@ -695,7 +698,7 @@ TOOLSETS = {
             "profiles that handle contract review, due diligence, or "
             "legal document automation."
         ),
-        "tools": ["legal_orchestrate", "legal_workflow", "legal_profiles", "lex_read", "lex_stats", "lex_table_list", "lex_edit", "lex_tc", "lex_format", "lex_list", "lex_ref", "lex_section", "lex_doc", "lex_clause", "lex_corpus", "lex_ocr", "lex_project_init", "lex_diff", "lex_xref_audit", "lex_deliver", "lex_gate_check", "lex_git", "lex_proofread", "lex_translation_review", "lex_template_audit", "lex_template_fill", "update_project_state", "get_project_state", "refine_goal", "project_add_task", "project_list_tasks", "project_update_task", "project_delete_task", "execute_code"],
+        "tools": ["legal_orchestrate", "legal_workflow", "legal_profiles", "lex_read", "lex_stats", "lex_table_list", "lex_edit", "lex_tc", "lex_format", "lex_list", "lex_ref", "lex_section", "lex_doc", "lex_clause", "lex_corpus", "lex_ocr", "lex_project_init", "lex_diff", "lex_xref_audit", "lex_deliver", "lex_gate_check", "lex_git", "lex_proofread", "lex_translation_review", "lex_template_audit", "lex_template_fill", "project_facts", "update_project_state", "get_project_state", "refine_goal", "project_add_task", "project_list_tasks", "project_update_task", "project_delete_task", "execute_code"],
         "includes": [],
     },
 }

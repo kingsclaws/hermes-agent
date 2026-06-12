@@ -258,9 +258,11 @@ def _append_legal_doc_next_step_guidance(function_name: str, function_args: dict
         "requirement": (
             "Before any further non-verification tool call, verify this legal "
             "document edit with lex_read on the edited range/document, or use "
-            "lex_proofread/lex_template_audit/lex_xref_audit as appropriate."
+            "lex_proofread/lex_template_audit/lex_xref_audit as appropriate. "
+            "If the edit reflected newly discovered or corrected matter facts, "
+            "update project_facts as the live project facts database."
         ),
-        "recommended_tools": ["lex_read", "lex_proofread", "lex_template_audit", "lex_xref_audit"],
+        "recommended_tools": ["lex_read", "lex_proofread", "lex_template_audit", "lex_xref_audit", "project_facts"],
     })
     return json.dumps(payload, ensure_ascii=False)
 

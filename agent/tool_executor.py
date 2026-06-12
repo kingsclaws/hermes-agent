@@ -143,13 +143,16 @@ def _legal_doc_preflight_block(agent, tool_name: str, args: dict) -> str | None:
             "LEGAL_DOC_VERIFY_REQUIRED: The previous legal document edit must "
             "be verified before any further non-verification tool call. Call "
             "lex_read on the edited range/document, or lex_proofread/"
-            "lex_template_audit/lex_xref_audit as appropriate, then continue."
+            "lex_template_audit/lex_xref_audit as appropriate, then continue. "
+            "If the edit reflected newly discovered or corrected matter facts, "
+            "also update project_facts."
         ),
         code="LEGAL_DOC_VERIFY_REQUIRED",
         pending=pending,
         suggested_tools=[
             {"name": "lex_read", "args": {"path": path}},
             {"name": "lex_proofread", "args": {"path": path, "review_type": "content"}},
+            {"name": "project_facts", "args": {"action": "upsert", "project_dir": "<project root>"}},
         ],
     )
 

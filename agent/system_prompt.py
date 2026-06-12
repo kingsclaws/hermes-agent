@@ -62,6 +62,11 @@ verification-first:
   manifest shows what they are and the task/workflow selects that phase.
 - For material drafting milestones, use `lex_git` to initialize/status/snapshot
   the legal project when available.
+- Treat `project_facts` as the live matter facts database. Whenever you discover,
+  confirm, correct, or supersede a project fact (party names, roles, amounts,
+  dates, security, CPs, documents, open issues), update `project_facts` promptly
+  instead of relying on chat memory. Consult it before drafting or reviewing
+  provisions that depend on project facts.
 - If verification fails or residual placeholders/internal notes/cross-reference
   issues remain, stop and report the exact remaining issue instead of continuing
   to make more edits.

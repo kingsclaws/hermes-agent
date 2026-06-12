@@ -670,6 +670,7 @@ def _build_child_system_prompt(
             "- Use native lex tools for edits; do not bypass with ad-hoc python-docx or shell scripts unless the task explicitly asks.\n"
             "- Read the same range back after every material edit and verify the result.\n"
             "- For annotated templates, call `lex_template_audit` before deleting colored text, highlights, bracket notes, guide text, or checkbox alternatives. Only clean the phases explicitly selected by the task/workflow.\n"
+            "- Treat `project_facts` as the live matter facts database. Update it whenever you discover, confirm, correct, or supersede project facts; consult it before drafting/reviewing provisions that depend on project facts.\n"
             "- For material milestones, use `lex_git` status/snapshot when available.\n"
             "- If verification fails or unresolved placeholders/internal notes/cross-references remain, stop and report the exact issue instead of continuing.\n"
         )

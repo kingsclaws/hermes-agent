@@ -1164,6 +1164,17 @@ def _seed_project_memories(hermes_dir: Path, name: str, client: str, goal: str, 
         encoding="utf-8",
     )
 
+    (memories_dir / "project_facts.md").write_text(
+        f"# Project Facts — {name}\n\n"
+        f"> Living matter facts database. Agent must keep this updated as the project progresses.\n\n"
+        f"**Client:** {client}  \n"
+        f"**Goal:** {goal}  \n"
+        f"**Created:** {now}\n\n"
+        f"---\n\n"
+        f"<!-- maintained by project_facts tool -->\n",
+        encoding="utf-8",
+    )
+
 
 def _read_project_state(project_dir: str) -> dict:
     """Read project-state.json. Returns empty dict on failure."""
@@ -1199,6 +1210,70 @@ def _write_tasks(project_dir: str, data: dict) -> None:
     tasks_path = Path(project_dir) / ".hermes-project" / "project-tasks.json"
     tasks_path.parent.mkdir(parents=True, exist_ok=True)
     tasks_path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n")
+
+
+def _read_project_facts(project_dir: str) -> dict:
+    """Read project-facts.json. Returns {"facts": []} on failure."""
+    facts_path = Path(project_dir) / ".hermes-project" / "project-facts.json"
+    if not facts_path.is_file():
+        return {"facts": []}
+    try:
+        data = json.loads(facts_path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            return {"facts": []}
+        data.setdefault("facts", [])
+        return data
+    except Exception:
+        return {"facts": []}
+
+
+def _write_project_facts(project_dir: str, data: dict) -> None:
+    """Write project-facts.json."""
+    facts_path = Path(project_dir) / ".hermes-project" / "project-facts.json"
+    facts_path.parent.mkdir(parents=True, exist_ok=True)
+    facts_path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+
+def _sync_project_facts_memory(project_dir: str, facts_data: dict) -> None:
+    """Sync project facts to memories/project_facts.md for compression survival."""
+    memories_dir = Path(project_dir) / ".hermes-project" / "memories"
+    memories_dir.mkdir(parents=True, exist_ok=True)
+
+    facts = facts_data.get("facts", [])
+    active_facts = [f for f in facts if f.get("status") != "superseded"]
+    categories: dict[str, list[dict]] = {}
+    for fact in active_facts:
+        categories.setdefault(fact.get("category", "general"), []).append(fact)
+
+    lines = [
+        "# Project Facts",
+        "",
+        "> Living matter facts database. Agent must keep this updated whenever new project facts are discovered, corrected, confirmed, or superseded.",
+        "",
+        f"**Updated:** {datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}",
+        f"**Active facts:** {len(active_facts)}",
+        "",
+    ]
+
+    if not active_facts:
+        lines.append("<!-- no active facts yet -->")
+    for category in sorted(categories):
+        group = sorted(categories[category], key=lambda item: item.get("key", ""))
+        lines.append(f"## {category}")
+        lines.append("")
+        lines.append("| Key | Value | Status | Confidence | Source | Updated |")
+        lines.append("|-----|-------|--------|------------|--------|---------|")
+        for fact in group:
+            key = str(fact.get("key", "-")).replace("|", "\\|")
+            value = str(fact.get("value", "-")).replace("\n", " ").replace("|", "\\|")
+            status = fact.get("status", "confirmed")
+            confidence = fact.get("confidence", "medium")
+            source = str(fact.get("source", "-")).replace("|", "\\|")
+            updated = str(fact.get("updated_at", ""))[:10] or "-"
+            lines.append(f"| {key} | {value} | {status} | {confidence} | {source} | {updated} |")
+        lines.append("")
+
+    (memories_dir / "project_facts.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def _sync_tasks_memory(project_dir: str, tasks_data: dict) -> None:
@@ -1449,6 +1524,8 @@ def get_project_state(project_dir: str) -> dict:
     state = _read_project_state(project_dir)
     if not state:
         return {"ok": False, "error": f"No project-state.json in {project_dir}"}
+    facts_data = _read_project_facts(project_dir)
+    active_facts = [f for f in facts_data.get("facts", []) if f.get("status") != "superseded"]
 
     return {
         "ok": True,
@@ -1459,7 +1536,163 @@ def get_project_state(project_dir: str) -> dict:
         "key_findings": state.get("key_findings", []),
         "active_documents": state.get("active_documents", []),
         "decisions": state.get("decisions", []),
+        "facts_summary": {
+            "active_count": len(active_facts),
+            "needs_confirmation": [
+                f for f in active_facts
+                if f.get("status") in {"needs_confirmation", "assumed"}
+            ][:20],
+            "memory_file": str(Path(project_dir) / ".hermes-project" / "memories" / "project_facts.md"),
+        },
         "updated_at": state.get("updated_at"),
+    }
+
+
+def _generate_fact_id() -> str:
+    """Generate a short unique fact ID: f_ + 8 hex chars."""
+    return "f_" + __import__("secrets").token_hex(4)
+
+
+def project_facts(
+    project_dir: str,
+    action: str,
+    *,
+    fact_id: str | None = None,
+    category: str | None = None,
+    key: str | None = None,
+    value=None,
+    source: str | None = None,
+    confidence: str = "medium",
+    status: str | None = None,
+    tags: list[str] | None = None,
+    query: str | None = None,
+    limit: int = 50,
+) -> dict:
+    """Maintain the living project facts database."""
+    src = Path(project_dir)
+    meta_path = src / ".hermes-project" / "project-meta.json"
+    state_path = src / ".hermes-project" / "project-state.json"
+    if not meta_path.is_file() and not state_path.is_file():
+        return {"ok": False, "error": f"Not a hermes project: {project_dir}"}
+
+    valid_actions = {"upsert", "list", "get", "delete", "search", "history"}
+    if action not in valid_actions:
+        return {"ok": False, "error": f"Invalid action: {action}. Must be one of: {', '.join(sorted(valid_actions))}"}
+
+    data = _read_project_facts(project_dir)
+    facts = data.setdefault("facts", [])
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    def find_fact() -> dict | None:
+        if fact_id:
+            for item in facts:
+                if item.get("id") == fact_id:
+                    return item
+        if category and key:
+            for item in facts:
+                if item.get("category") == category and item.get("key") == key:
+                    return item
+        return None
+
+    if action == "upsert":
+        if not category or not key:
+            return {"ok": False, "error": "category and key are required for upsert"}
+        if value is None:
+            return {"ok": False, "error": "value is required for upsert"}
+        fact_status = status or "confirmed"
+        if confidence not in {"low", "medium", "high"}:
+            return {"ok": False, "error": "confidence must be low, medium, or high"}
+        if fact_status not in {"confirmed", "assumed", "needs_confirmation", "superseded"}:
+            return {"ok": False, "error": "status must be confirmed, assumed, needs_confirmation, or superseded"}
+
+        fact = find_fact()
+        if fact is None:
+            fact = {
+                "id": _generate_fact_id(),
+                "category": category,
+                "key": key,
+                "value": value,
+                "source": source or "",
+                "confidence": confidence,
+                "status": fact_status,
+                "tags": tags or [],
+                "created_at": now,
+                "updated_at": now,
+                "history": [],
+            }
+            facts.append(fact)
+            changed = "created"
+        else:
+            fact.setdefault("history", []).append({
+                "at": now,
+                "old_value": fact.get("value"),
+                "old_source": fact.get("source", ""),
+                "old_confidence": fact.get("confidence", "medium"),
+                "old_status": fact.get("status", "confirmed"),
+            })
+            fact.update({
+                "category": category,
+                "key": key,
+                "value": value,
+                "source": source if source is not None else fact.get("source", ""),
+                "confidence": confidence,
+                "status": fact_status,
+                "tags": tags if tags is not None else fact.get("tags", []),
+                "updated_at": now,
+            })
+            changed = "updated"
+
+        data["updated_at"] = now
+        _write_project_facts(project_dir, data)
+        _sync_project_facts_memory(project_dir, data)
+        _append_journal_entry(
+            project_dir,
+            f"**Project fact {changed}:** `{category}.{key}` = {value} (status={fact_status}, confidence={confidence})",
+            category="fact",
+        )
+        return {"ok": True, "action": "upsert", "changed": changed, "fact": fact, "memory_synced": True}
+
+    if action == "delete":
+        fact = find_fact()
+        if fact is None:
+            return {"ok": False, "error": "Fact not found"}
+        facts.remove(fact)
+        data["updated_at"] = now
+        _write_project_facts(project_dir, data)
+        _sync_project_facts_memory(project_dir, data)
+        _append_journal_entry(project_dir, f"**Project fact deleted:** `{fact.get('category')}.{fact.get('key')}`", category="fact")
+        return {"ok": True, "action": "delete", "deleted": fact, "memory_synced": True}
+
+    if action in {"get", "history"}:
+        fact = find_fact()
+        if fact is None:
+            return {"ok": False, "error": "Fact not found"}
+        if action == "history":
+            return {"ok": True, "fact": fact, "history": fact.get("history", [])}
+        return {"ok": True, "fact": fact}
+
+    filtered = list(facts)
+    if category:
+        filtered = [f for f in filtered if f.get("category") == category]
+    if status:
+        filtered = [f for f in filtered if f.get("status") == status]
+    if query:
+        q = query.lower()
+        filtered = [
+            f for f in filtered
+            if q in str(f.get("key", "")).lower()
+            or q in str(f.get("value", "")).lower()
+            or q in str(f.get("source", "")).lower()
+            or any(q in str(tag).lower() for tag in f.get("tags", []))
+        ]
+    filtered = sorted(filtered, key=lambda f: (f.get("category", ""), f.get("key", "")))
+    return {
+        "ok": True,
+        "action": action,
+        "facts": filtered[: max(1, int(limit or 50))],
+        "count": len(filtered),
+        "total": len(facts),
+        "memory_file": str(src / ".hermes-project" / "memories" / "project_facts.md"),
     }
 
 
