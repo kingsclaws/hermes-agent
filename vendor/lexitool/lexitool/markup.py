@@ -1284,8 +1284,10 @@ def lex_read(
     Args:
         path: Path to .docx file.
         paras: Specific paragraphs (1-indexed), None = all.
-        mode: "full" (all content), "structure" (headings only), "stats" (counts),
-            "headers_footers" (only section header/footer mapping).
+        mode: "full" (all content), "structure" (headings only),
+            "legal_structure" (Word headings plus legal-style Chinese clauses),
+            "review" (legal review dashboard: structure, TC hotspots, comments),
+            "stats" (counts), "headers_footers" (only section header/footer mapping).
         show_tc: Track Changes mode.
             True or "all" — show [ins]/[del] markup (default).
             "final" — accept all revisions (show insertions, hide deletions).
@@ -1301,6 +1303,10 @@ def lex_read(
     """
     if mode == "structure":
         return _export_structure(path)
+    if mode in {"legal_structure", "legal-outline", "legal_outline"}:
+        return _export_legal_structure(path)
+    if mode in {"review", "review_digest", "digest"}:
+        return _export_review_digest(path)
     if mode == "stats":
         return _export_stats(path)
     if mode in {"headers_footers", "headers-footers", "hf"}:
@@ -1413,6 +1419,148 @@ def _export_structure(path: str) -> str:
             lines.append(f"§{para_count} [{level_str}] {text}")
 
     return "\n".join(lines) if lines else "(no headings found)"
+
+
+_CN_LEGAL_HEADING_RE = re.compile(
+    r"^\s*(?:"
+    r"[一二三四五六七八九十百]+[、.．]\s*.+"
+    r"|第[一二三四五六七八九十百0-9]+[章节条]\s*.+"
+    r"|[0-9]+(?:\.[0-9]+)*[、.．]\s*.+"
+    r")$"
+)
+
+
+def _plain_final_text(para_el) -> str:
+    return _get_para_plain_text(para_el, "final").strip()
+
+
+def _legal_heading_level(text: str, pPr) -> str:
+    if re.match(r"^\s*[一二三四五六七八九十百]+[、.．]", text):
+        return "L1"
+    if re.match(r"^\s*第[一二三四五六七八九十百0-9]+章", text):
+        return "L1"
+    if re.match(r"^\s*第[一二三四五六七八九十百0-9]+节", text):
+        return "L2"
+    if re.match(r"^\s*第[一二三四五六七八九十百0-9]+条", text):
+        return "L3"
+    m = re.match(r"^\s*([0-9]+(?:\.[0-9]+)*)[、.．]", text)
+    if m:
+        return f"L{min(4, 1 + m.group(1).count('.'))}"
+    return "L?"
+
+
+def _is_legal_heading(text: str, para_el) -> bool:
+    text = " ".join(text.split())
+    if not text or len(text) > 90:
+        return False
+    if _CN_LEGAL_HEADING_RE.match(text):
+        return True
+    pPr = para_el.find(f"{W}pPr")
+    inferred = _infer_heading(para_el, pPr)
+    return bool(inferred and len(text) <= 60)
+
+
+def _export_legal_structure(path: str) -> str:
+    """Export legal document outline, including Chinese manually styled clauses."""
+    with zipfile.ZipFile(path, "r") as zf:
+        doc_xml = zf.read("word/document.xml")
+
+    root = etree.fromstring(doc_xml)
+    body = root.find(f"{W}body")
+    if body is None:
+        return ""
+
+    lines: list[str] = []
+    para_count = 0
+    for child in body:
+        if child.tag != f"{W}p":
+            continue
+        para_count += 1
+        text = _plain_final_text(child)
+        if not _is_legal_heading(text, child):
+            continue
+
+        pPr = child.find(f"{W}pPr")
+        level = _legal_heading_level(text, pPr)
+        tc_count = _count_tc_segments(child)
+        tc_marker = f" tc={tc_count}" if tc_count else ""
+        lines.append(f"§{para_count} [{level}{tc_marker}] {text[:160]}")
+
+    return "\n".join(lines) if lines else "(no legal headings found)"
+
+
+def _classify_legal_text(text: str) -> list[str]:
+    """Deterministic issue tags for legal review summaries."""
+    categories: list[tuple[str, tuple[str, ...]]] = [
+        ("parties/definitions", ("以下简称", "定义", "管理人", "项目公司", "运营主体", "支持方")),
+        ("transaction-structure", ("受让", "转让", "公开挂牌", "招投标", "标的资产", "股权", "房屋买卖")),
+        ("obligations/support", ("承诺", "支持", "足额", "义务", "违约", "资金缺口", "督促")),
+        ("conditions/effectiveness", ("生效", "前提", "签署", "审批", "流程", "中标")),
+        ("term/termination", ("持续有效", "终止", "届满", "到期", "履行完毕")),
+        ("liability/security", ("担保", "债务承担", "不可撤销", "责任")),
+        ("documents", ("法律文件", "合同", "协议", "通知", "函件")),
+    ]
+    found = []
+    for label, keys in categories:
+        if any(k in text for k in keys):
+            found.append(label)
+    return found or ["general"]
+
+
+def _export_review_digest(path: str) -> str:
+    """Export a compact legal review dashboard for a .docx."""
+    with zipfile.ZipFile(path, "r") as zf:
+        doc_xml = zf.read("word/document.xml")
+
+    root = etree.fromstring(doc_xml)
+    body = root.find(f"{W}body")
+    if body is None:
+        return ""
+
+    comment_map = _load_comment_map(path)
+    para_count = 0
+    tc_hotspots: list[tuple[int, int, str, list[str]]] = []
+    headings: list[str] = []
+    comments: list[str] = []
+
+    for child in body:
+        if child.tag != f"{W}p":
+            continue
+        para_count += 1
+        final_text = _plain_final_text(child)
+        if _is_legal_heading(final_text, child):
+            headings.append(f"§{para_count} [{_legal_heading_level(final_text, child.find(f'{W}pPr'))}] {final_text[:120]}")
+
+        tc_count = _count_tc_segments(child)
+        if tc_count:
+            cats = _classify_legal_text(final_text)
+            tc_hotspots.append((para_count, tc_count, final_text[:220], cats))
+
+        for c in comment_map.get(para_count, []):
+            comments.append(f"§{para_count} {c}")
+
+    lines = [
+        "[legal-review-digest]",
+        f"Paragraphs: {para_count}",
+        f"Legal headings: {len(headings)}",
+        f"Tracked-change paragraphs: {len(tc_hotspots)}",
+        f"Comments: {len(comments)}",
+        "",
+        "[legal-structure]",
+    ]
+    lines.extend(headings[:80] or ["(none)"])
+    lines.extend(["", "[tracked-change-hotspots]"])
+    for para, count, text, cats in sorted(tc_hotspots, key=lambda item: item[1], reverse=True)[:40]:
+        lines.append(f"§{para} tc={count} tags={','.join(cats)} | {text}")
+    if not tc_hotspots:
+        lines.append("(none)")
+    lines.extend(["", "[comments]"])
+    lines.extend(comments[:80] or ["(none)"])
+    lines.extend(["", "[recommended-next-reads]"])
+    for para, count, _text, cats in sorted(tc_hotspots, key=lambda item: item[1], reverse=True)[:12]:
+        lines.append(f"lex_read paras=[{para}] show_tc='all' include_comments=true  # tc={count}, {','.join(cats)}")
+
+    return "\n".join(lines)
 
 
 def _export_stats(path: str) -> str:

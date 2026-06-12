@@ -13,16 +13,22 @@ from __future__ import annotations
 import json
 import logging
 import os
+import difflib
 import shutil
 import subprocess
 import tempfile
 from pathlib import Path
 from typing import Optional
+import zipfile
+
+from lxml import etree
 
 logger = logging.getLogger(__name__)
 
 _QUICOMPARE_BIN = "/usr/local/bin/quicompare"
 _DEFAULT_CONFIG = "/root/.config/quicompare/config.json"
+W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+W = f"{{{W_NS}}}"
 
 
 def _find_quicompare() -> Optional[str]:
@@ -166,3 +172,126 @@ def _read_config_author() -> str:
     except Exception:
         pass
     return "quicompare"
+
+
+def _para_final_text(para_el) -> str:
+    parts: list[str] = []
+    for child in para_el:
+        if child.tag == f"{W}del":
+            continue
+        if child.tag == f"{W}ins":
+            for t in child.iter(f"{W}t"):
+                parts.append(t.text or "")
+            continue
+        for el in child.iter():
+            if el.tag == f"{W}t":
+                parts.append(el.text or "")
+            elif el.tag == f"{W}tab":
+                parts.append("\t")
+    return "".join(parts).strip()
+
+
+def _read_final_paragraphs(path: str) -> list[dict]:
+    with zipfile.ZipFile(path, "r") as zf:
+        doc_xml = zf.read("word/document.xml")
+    root = etree.fromstring(doc_xml)
+    body = root.find(f"{W}body")
+    if body is None:
+        return []
+    result: list[dict] = []
+    para = 0
+    for child in body:
+        if child.tag != f"{W}p":
+            continue
+        para += 1
+        text = _para_final_text(child)
+        result.append({
+            "para": para,
+            "text": text,
+            "tc_insertions": len(child.findall(f".//{W}ins")),
+            "tc_deletions": len(child.findall(f".//{W}del")),
+        })
+    return result
+
+
+def _classify_change(text: str) -> list[str]:
+    categories: list[tuple[str, tuple[str, ...]]] = [
+        ("parties/definitions", ("以下简称", "定义", "管理人", "项目公司", "运营主体", "支持方")),
+        ("transaction-structure", ("受让", "转让", "公开挂牌", "招投标", "标的资产", "股权", "房屋买卖")),
+        ("obligations/support", ("承诺", "支持", "足额", "义务", "违约", "资金缺口", "督促")),
+        ("conditions/effectiveness", ("生效", "前提", "签署", "审批", "流程", "中标")),
+        ("term/termination", ("持续有效", "终止", "届满", "到期", "履行完毕")),
+        ("liability/security", ("担保", "债务承担", "不可撤销", "责任")),
+        ("documents", ("法律文件", "合同", "协议", "通知", "函件")),
+    ]
+    return [label for label, keys in categories if any(k in text for k in keys)] or ["general"]
+
+
+def _compact(text: str, limit: int = 260) -> str:
+    text = " ".join(str(text or "").split())
+    return text if len(text) <= limit else text[:limit - 1] + "…"
+
+
+def summary(original: str, revised: str, *, limit: int = 80) -> dict:
+    """Produce a paragraph-level legal review summary without external redline tools."""
+    if not os.path.isfile(original):
+        return {"ok": False, "error": f"Original file not found: {original}"}
+    if not os.path.isfile(revised):
+        return {"ok": False, "error": f"Revised file not found: {revised}"}
+
+    old_paras = _read_final_paragraphs(original)
+    new_paras = _read_final_paragraphs(revised)
+    old_texts = [p["text"] for p in old_paras]
+    new_texts = [p["text"] for p in new_paras]
+    matcher = difflib.SequenceMatcher(None, old_texts, new_texts, autojunk=False)
+
+    changes: list[dict] = []
+    category_counts: dict[str, int] = {}
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "equal":
+            continue
+        old_block = "\n".join(old_texts[i1:i2])
+        new_block = "\n".join(new_texts[j1:j2])
+        combined = f"{old_block}\n{new_block}"
+        cats = _classify_change(combined)
+        for cat in cats:
+            category_counts[cat] = category_counts.get(cat, 0) + 1
+        changes.append({
+            "type": tag,
+            "original_paras": [old_paras[k]["para"] for k in range(i1, i2)],
+            "revised_paras": [new_paras[k]["para"] for k in range(j1, j2)],
+            "categories": cats,
+            "original": _compact(old_block),
+            "revised": _compact(new_block),
+        })
+
+    tc_revised = {
+        "insertions": sum(p["tc_insertions"] for p in new_paras),
+        "deletions": sum(p["tc_deletions"] for p in new_paras),
+        "paragraphs_with_tc": sum(1 for p in new_paras if p["tc_insertions"] or p["tc_deletions"]),
+    }
+
+    return {
+        "ok": True,
+        "original": os.path.abspath(original),
+        "revised": os.path.abspath(revised),
+        "paragraphs": {"original": len(old_paras), "revised": len(new_paras)},
+        "changes_total": len(changes),
+        "category_counts": category_counts,
+        "revised_tracked_changes": tc_revised,
+        "changes": changes[: max(1, int(limit or 80))],
+        "truncated": len(changes) > max(1, int(limit or 80)),
+        "next_reads": [
+            {
+                "tool": "lex_read",
+                "args": {
+                    "path": os.path.abspath(revised),
+                    "paras": c["revised_paras"][:5],
+                    "show_tc": "all",
+                    "include_comments": True,
+                },
+            }
+            for c in changes[:10]
+            if c.get("revised_paras")
+        ],
+    }

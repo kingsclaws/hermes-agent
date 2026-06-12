@@ -27,11 +27,14 @@ from tools.registry import invalidate_check_fn_cache, registry, tool_error, tool
 
 logger = logging.getLogger(__name__)
 
-# lexitool lives at /root/.hermes/tools/lexitool (symlink to vendor package).
-# Make sure its PARENT is on sys.path so ``import lexitool`` resolves.
-_LEXITOOL_PATH = Path("/root/.hermes/tools/lexitool")
-if str(_LEXITOOL_PATH.parent) not in sys.path:
-    sys.path.insert(0, str(_LEXITOOL_PATH.parent))
+# Prefer the repo-vendored lexitool during development and image builds so
+# native tool changes in this fork are immediately visible. Fall back to the
+# user-installed/symlinked package for older installations.
+_REPO_LEXITOOL_PARENT = Path(__file__).resolve().parents[1] / "vendor" / "lexitool"
+_USER_LEXITOOL_PARENT = Path("/root/.hermes/tools")
+for _lex_parent in (_USER_LEXITOOL_PARENT, _REPO_LEXITOOL_PARENT):
+    if (_lex_parent / "lexitool").exists() and str(_lex_parent) not in sys.path:
+        sys.path.insert(0, str(_lex_parent))
 
 
 def _check_lexitool():
@@ -81,8 +84,13 @@ LEX_READ_SCHEMA = {
             },
             "mode": {
                 "type": "string",
-                "enum": ["full", "structure", "stats", "headers_footers"],
-                "description": "full=all content with markup, structure=headings only, stats=counts only, headers_footers=only Word section header/footer text. Default: full.",
+                "enum": ["full", "structure", "legal_structure", "review", "stats", "headers_footers"],
+                "description": (
+                    "full=all content with markup; structure=Word headings only; "
+                    "legal_structure=Word headings plus Chinese legal-style clauses; "
+                    "review=legal review dashboard with outline, TC hotspots, comments, and next reads; "
+                    "stats=counts only; headers_footers=only Word section header/footer text. Default: full."
+                ),
             },
             "show_tc": {
                 "oneOf": [
@@ -2326,9 +2334,12 @@ def _handle_project_init(args: dict, **kwargs) -> str:
 LEX_DIFF_SCHEMA = {
     "name": "lex_diff",
     "description": (
-        "Compare two .docx files and produce a tracked-changes redline document.\n"
-        "Uses quicompare (Aspose Words backend) for professional legal redlining.\n\n"
-        "Produces a Word .docx with all insertions, deletions, and moves tracked.\n"
+        "Compare two .docx files. Use mode='summary' first when the agent needs "
+        "to understand legal revision intent; use mode='redline' to produce a "
+        "tracked-changes Word/PDF redline via quicompare.\n\n"
+        "summary returns paragraph-level before/after changes, legal category "
+        "tags, revised tracked-change stats, and recommended lex_read follow-ups. "
+        "redline produces a Word .docx with all insertions, deletions, and moves tracked.\n"
         "Optionally also generates a PDF redline.\n\n"
         "Typical use: compare contract v1 vs v2, or compare final vs draft."
     ),
@@ -2342,6 +2353,11 @@ LEX_DIFF_SCHEMA = {
             "revised": {
                 "type": "string",
                 "description": "Path to the revised (newer) .docx file.",
+            },
+            "mode": {
+                "type": "string",
+                "enum": ["summary", "redline"],
+                "description": "summary=readable JSON review summary; redline=generate redline document. Default: summary.",
             },
             "output_dir": {
                 "type": "string",
@@ -2360,6 +2376,10 @@ LEX_DIFF_SCHEMA = {
                 "enum": ["char", "word"],
                 "description": "Track changes at character or word level (default: char).",
             },
+            "limit": {
+                "type": "integer",
+                "description": "Max changed blocks to return for mode='summary'. Default: 80.",
+            },
         },
         "required": ["original", "revised"],
     },
@@ -2371,6 +2391,15 @@ def _handle_diff(args: dict, **kwargs) -> str:
 
     original = _resolve_path(args["original"])
     revised = _resolve_path(args["revised"])
+    mode = str(args.get("mode") or "summary").lower()
+
+    if mode == "summary":
+        result = _diff.summary(
+            original=original,
+            revised=revised,
+            limit=int(args.get("limit", 80)),
+        )
+        return tool_result(result) if result.get("ok") else tool_error(result.get("error", "diff summary failed"))
 
     if not _diff.is_available():
         return tool_error(
