@@ -28,7 +28,7 @@ RUN set -eux; \
     mkdir -p /opt/hermes/docker; \
     cp /tmp/patch_src/docker/main-wrapper.sh /opt/hermes/docker/main-wrapper.sh; \
     chmod +x /opt/hermes/docker/main-wrapper.sh; \
-    rm -f /root/.hermes; \
+    if [ -e /root/.hermes ] && [ ! -d /root/.hermes ]; then rm -f /root/.hermes; fi; \
     mkdir -p /root/.hermes; \
     cp /tmp/patch_src/start-lex-hermes.sh /usr/local/bin/; \
     cp /tmp/patch_src/start-lex-hermes.sh /opt/lex-hermes/; \
