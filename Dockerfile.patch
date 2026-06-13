@@ -44,7 +44,8 @@ RUN set -eux; \
     mkdir -p /opt/lex-hermes/profiles/; \
     (cp /tmp/patch_src/profiles/*.soul.md /opt/lex-hermes/profiles/ 2>/dev/null || true); \
     rm -rf /tmp/patch_src; \
-    pip install --no-cache-dir --no-deps /opt/lexitool; \
+    . /opt/hermes/.venv/bin/activate; \
+    python3 -m pip install --no-cache-dir --no-deps /opt/lexitool; \
     python3 -c "import docx, lxml"; \
     cd /opt/lex-hermes/web && npm run build; \
     python3 -m compileall -q -f /usr/local/lib/python3.11/site-packages/; \
