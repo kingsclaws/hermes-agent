@@ -51,6 +51,13 @@ RUN set -eux; \
     printf '%s\n' '#!/bin/sh' 'exec /opt/hermes/.venv/bin/python3 -c "from lexitool.ocr_cli import main; raise SystemExit(main())" "$@"' > /usr/local/bin/lex-ocr; \
     chmod +x /usr/local/bin/lexitool /usr/local/bin/lex-docx /usr/local/bin/lex-ocr; \
     /opt/hermes/.venv/bin/python3 -c "import docx, lxml, lexitool"; \
-    cd /opt/lex-hermes/web && npm run build; \
+    if [ -x /opt/lex-hermes/web/node_modules/.bin/tsc ]; then \
+      cd /opt/lex-hermes/web && npm run build; \
+    elif [ -f /opt/lex-hermes/hermes_cli/web_dist/index.html ]; then \
+      echo "Using prebuilt hermes_cli/web_dist from patch context"; \
+    else \
+      echo "No web build toolchain or prebuilt hermes_cli/web_dist found" >&2; \
+      exit 1; \
+    fi; \
     python3 -m compileall -q -f /usr/local/lib/python3.11/site-packages/; \
     python3 -m compileall -q -f /opt/lex-hermes/
