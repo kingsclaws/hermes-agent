@@ -4,18 +4,12 @@ import {
   useCallback,
   useRef,
 } from "react";
-import { useParams, useNavigate } from "react-router-dom";
+import { useParams } from "react-router-dom";
 import {
-  ArrowLeft,
   FolderKanban,
-  FileText,
-  File,
   Upload,
   Trash2,
   RefreshCw,
-  FolderOpen,
-  ChevronRight,
-  Home,
   AlertCircle,
   Download,
   History,
@@ -23,11 +17,14 @@ import {
   FileSearch,
   FilePenLine,
   Eye,
+  Copy,
   ArrowLeftRight,
   BookOpen,
 } from "lucide-react";
 import { api, type FileEntry, type DocumentMeta } from "@/lib/api";
 import { formatFileSize, cn } from "@/lib/utils";
+import { loadPanelSize } from "@/lib/layout-persistence";
+import { ResizablePanelGroup, ResizablePanel, ResizableHandle } from "@/components/ResizablePanel";
 import { Button } from "@nous-research/ui/ui/components/button";
 import { Badge } from "@nous-research/ui/ui/components/badge";
 import { Spinner } from "@nous-research/ui/ui/components/spinner";
@@ -42,10 +39,15 @@ import { VersionHistory } from "@/components/VersionHistory";
 import { FileDetailPanel } from "@/components/FileDetailPanel";
 import { DiffViewer } from "@/components/DiffViewer";
 import { BinderDialog } from "@/components/BinderDialog";
+import { TreeView } from "@/components/TreeView";
+import { getDocIcon, getDocStatusBadge } from "@/lib/file-utils";
+import { usePageHeader } from "@/contexts/usePageHeader";
+import { ContextMenu } from "@/components/ContextMenu";
+import { ContextMenuItem, ContextMenuSeparator } from "@/components/ContextMenuItem";
+import type { FileTreeNode } from "@/lib/file-utils";
 
 export default function ProjectFilesPage() {
   const { projectId } = useParams<{ projectId: string }>();
-  const navigate = useNavigate();
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const [files, setFiles] = useState<FileEntry[]>([]);
@@ -70,8 +72,15 @@ export default function ProjectFilesPage() {
     status: string;
     file_type: string;
   }>({ status: "", file_type: "" });
+  const [ctxMenuPos, setCtxMenuPos] = useState<{ x: number; y: number } | null>(null);
+  const [ctxMenuNode, setCtxMenuNode] = useState<FileTreeNode | null>(null);
 
   const { toast, showToast } = useToast();
+  const { setBreadcrumb, setToolbarActions } = usePageHeader();
+
+  const breadcrumbs = currentPath
+    ? currentPath.split("/").filter(Boolean)
+    : [];
 
   const fileDelete = useConfirmDelete({
     onDelete: useCallback(
@@ -115,16 +124,104 @@ export default function ProjectFilesPage() {
     loadFiles();
   }, [loadFiles]);
 
-  const navigateTo = (relPath: string) => {
-    setCurrentPath(relPath);
-  };
+  // Sync breadcrumb to ViewToolbar
+  useEffect(() => {
+    const segments: { label: string; href?: string }[] = [
+      { label: projectName || "Files", href: `/projects/${projectId}/files` },
+    ];
+    for (let i = 0; i < breadcrumbs.length; i++) {
+      const subpath = breadcrumbs.slice(0, i + 1).join("/");
+      segments.push({ label: breadcrumbs[i], href: `/projects/${projectId}/files/${subpath}` });
+    }
+    setBreadcrumb(segments);
+  }, [projectName, projectId, breadcrumbs, setBreadcrumb]);
 
-  const navigateUp = () => {
-    if (!currentPath) return;
-    const parts = currentPath.split("/");
-    parts.pop();
-    setCurrentPath(parts.join("/"));
-  };
+  // Sync toolbar actions to ViewToolbar
+  useEffect(() => {
+    setToolbarActions(
+      <div className="flex items-center gap-1">
+        <Button
+          ghost
+          size="sm"
+          onClick={loadFiles}
+          disabled={loading}
+          prefix={<RefreshCw className={cn(loading && "animate-spin")} />}
+        >
+          Refresh
+        </Button>
+        <Button
+          size="sm"
+          onClick={() => fileInputRef.current?.click()}
+          disabled={uploading}
+          prefix={uploading ? <Spinner /> : <Upload />}
+        >
+          {uploading ? "Uploading..." : "Upload"}
+        </Button>
+        <Button
+          ghost
+          size="sm"
+          onClick={() => setVersionOpen((v) => !v)}
+          prefix={<History className={cn(versionOpen && "text-primary")} />}
+        >
+          History
+        </Button>
+        <Button
+          ghost
+          size="sm"
+          onClick={() => { setCompareMode((v) => !v); setCompareA(null); setCompareB(null); }}
+          prefix={<ArrowLeftRight className={cn(compareMode && "text-primary")} />}
+        >
+          Compare
+        </Button>
+        <Button
+          ghost
+          size="sm"
+          onClick={() => setBinderOpen(true)}
+          disabled={selectedForBinder.length < 2}
+          prefix={<BookOpen className="h-3.5 w-3.5" />}
+        >
+          Binder {selectedForBinder.length > 0 ? `(${selectedForBinder.length})` : ""}
+        </Button>
+        <div className="flex items-center gap-1.5 ml-2">
+          <div className="relative w-40">
+            <Search className="absolute left-2 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-text-tertiary" />
+            <Input
+              className="pl-7 h-7 text-xs"
+              placeholder="Search..."
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter") handleSearch(); }}
+            />
+          </div>
+          <select
+            className="h-7 rounded border border-border bg-background px-2 text-[11px] text-text-secondary"
+            value={searchFilters.status}
+            onChange={(e) => setSearchFilters((f) => ({ ...f, status: e.target.value }))}
+          >
+            <option value="">All statuses</option>
+            <option value="draft">Draft</option>
+            <option value="review">In Review</option>
+            <option value="final">Final</option>
+            <option value="signed">Signed</option>
+            <option value="archived">Archived</option>
+          </select>
+          <select
+            className="h-7 rounded border border-border bg-background px-2 text-[11px] text-text-secondary"
+            value={searchFilters.file_type}
+            onChange={(e) => setSearchFilters((f) => ({ ...f, file_type: e.target.value }))}
+          >
+            <option value="">All types</option>
+            <option value="docx">DOCX</option>
+            <option value="pdf">PDF</option>
+            <option value="xlsx">XLSX</option>
+          </select>
+        </div>
+      </div>,
+    );
+  }, [
+    setToolbarActions, loading, uploading, versionOpen, compareMode, selectedForBinder.length,
+    searchQuery, searchFilters, loadFiles,
+  ]);
 
   const handleUpload = async (fileList: FileList | File[]) => {
     if (!projectId || fileList.length === 0) return;
@@ -164,44 +261,7 @@ export default function ProjectFilesPage() {
     }
   };
 
-  const getDocIcon = (name: string, isDir: boolean) => {
-    if (isDir) return <FolderOpen className="h-5 w-5 text-warning flex-shrink-0" />;
-    const ext = name.split(".").pop()?.toLowerCase();
-    switch (ext) {
-      case "docx":
-        return <FileText className="h-5 w-5 text-[#2B7CD3] flex-shrink-0" />;
-      case "pdf":
-        return <FileText className="h-5 w-5 text-[#DC2626] flex-shrink-0" />;
-      case "jpg": case "jpeg": case "png": case "gif": case "svg": case "webp":
-        return <FileText className="h-5 w-5 text-[#8B5CF6] flex-shrink-0" />;
-      case "xlsx": case "xls":
-        return <FileText className="h-5 w-5 text-[#059669] flex-shrink-0" />;
-      default:
-        return <File className="h-5 w-5 text-text-tertiary flex-shrink-0" />;
-    }
-  };
-
-  const getDocStatusBadge = (filePath: string) => {
-    const meta = inventory[filePath];
-    if (!meta?.status && !meta?.signing_status) return null;
-    const tones: Record<string, { tone: "outline" | "warning" | "success"; label: string }> = {
-      draft: { tone: "outline", label: "Draft" },
-      review: { tone: "warning", label: "In Review" },
-      final: { tone: "success", label: "Final" },
-      signed: { tone: "success", label: "Signed" },
-      archived: { tone: "outline", label: "Archived" },
-    };
-    const t = meta.status ? (tones[meta.status] ?? { tone: "outline" as const, label: meta.status }) : null;
-    const signing = meta.signing_status && meta.signing_status !== "unsigned" ? meta.signing_status : null;
-    return (
-      <span className="flex items-center gap-1 flex-shrink-0">
-        {t && <Badge tone={t.tone} className="text-xs">{t.label}</Badge>}
-        {signing && <Badge tone={signing === "signed" ? "success" : signing === "partially-signed" ? "warning" : "outline"} className="text-[10px]">{signing}</Badge>}
-      </span>
-    );
-  };
-
-  const handleDownload = (file: FileEntry) => {
+  const handleDownload = (file: { path: string }) => {
     if (!projectId) return;
     api.downloadProjectFile(projectId, file.path);
   };
@@ -223,10 +283,6 @@ export default function ProjectFilesPage() {
       handleUpload(e.dataTransfer.files);
     }
   };
-
-  const breadcrumbs = currentPath
-    ? currentPath.split("/").filter(Boolean)
-    : [];
 
   if (!projectId) {
     return (
@@ -255,147 +311,17 @@ export default function ProjectFilesPage() {
         loading={fileDelete.isDeleting}
       />
 
-      {/* Back + breadcrumb bar */}
-      <div className="flex items-center gap-3 flex-wrap">
-        <Button
-          ghost
-          size="sm"
-          onClick={() => navigate("/projects")}
-          prefix={<ArrowLeft />}
-        >
-          Projects
-        </Button>
-
-        <span className="text-text-tertiary">/</span>
-
-        <Button
-          ghost
-          size="sm"
-          onClick={() => setCurrentPath("")}
-          className={cn(!currentPath && "text-primary font-medium")}
-          prefix={!currentPath ? <FolderOpen className="h-3.5 w-3.5" /> : <Home className="h-3.5 w-3.5" />}
-        >
-          {projectName || "Files"}
-        </Button>
-
-        {breadcrumbs.map((name, i) => {
-          const path = breadcrumbs.slice(0, i + 1).join("/");
-          const isLast = i === breadcrumbs.length - 1;
-          return (
-            <span key={path} className="flex items-center gap-3">
-              <ChevronRight className="h-3.5 w-3.5 text-text-tertiary" />
-              <Button
-                ghost
-                size="sm"
-                onClick={() => setCurrentPath(path)}
-                className={cn(isLast && "text-primary font-medium")}
-              >
-                {name}
-              </Button>
-            </span>
-          );
-        })}
-
-        <div className="flex-1" />
-
-        <input
-          ref={fileInputRef}
-          type="file"
-          multiple
-          className="hidden"
-          onChange={(e) => {
-            if (e.target.files) handleUpload(e.target.files);
-            e.target.value = "";
-          }}
-        />
-
-        <Button
-          ghost
-          size="sm"
-          onClick={loadFiles}
-          disabled={loading}
-          prefix={<RefreshCw className={cn(loading && "animate-spin")} />}
-        >
-          Refresh
-        </Button>
-
-        <Button
-          size="sm"
-          onClick={() => fileInputRef.current?.click()}
-          disabled={uploading}
-          prefix={uploading ? <Spinner /> : <Upload />}
-        >
-          {uploading ? "Uploading..." : "Upload"}
-        </Button>
-
-        <Button
-          ghost
-          size="sm"
-          onClick={() => setVersionOpen((v) => !v)}
-          title="Version history"
-          prefix={<History className={cn(versionOpen && "text-primary")} />}
-        >
-          History
-        </Button>
-
-        <Button
-          ghost
-          size="sm"
-          onClick={() => { setCompareMode((v) => !v); setCompareA(null); setCompareB(null); }}
-          title="Compare two files"
-          prefix={<ArrowLeftRight className={cn(compareMode && "text-primary")} />}
-        >
-          Compare
-        </Button>
-
-        <Button
-          ghost
-          size="sm"
-          onClick={() => {
-            setBinderOpen(true);
-          }}
-          title="Create a binder from selected files"
-          disabled={selectedForBinder.length < 2}
-          prefix={<BookOpen className="h-3.5 w-3.5" />}
-        >
-          Binder {selectedForBinder.length > 0 ? `(${selectedForBinder.length})` : ""}
-        </Button>
-
-        <div className="relative flex items-center gap-2">
-          <div className="relative w-48">
-            <Search className="absolute left-2 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-text-tertiary" />
-            <Input
-              className="pl-7 h-8 text-xs"
-              placeholder="Search documents..."
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              onKeyDown={(e) => { if (e.key === "Enter") handleSearch(); }}
-            />
-          </div>
-          <select
-            className="h-8 rounded-md border border-border bg-background px-2 text-xs text-text-secondary"
-            value={searchFilters.status}
-            onChange={(e) => setSearchFilters((f) => ({ ...f, status: e.target.value }))}
-          >
-            <option value="">All statuses</option>
-            <option value="draft">Draft</option>
-            <option value="review">In Review</option>
-            <option value="final">Final</option>
-            <option value="signed">Signed</option>
-            <option value="archived">Archived</option>
-          </select>
-          <select
-            className="h-8 rounded-md border border-border bg-background px-2 text-xs text-text-secondary"
-            value={searchFilters.file_type}
-            onChange={(e) => setSearchFilters((f) => ({ ...f, file_type: e.target.value }))}
-          >
-            <option value="">All types</option>
-            <option value="docx">DOCX</option>
-            <option value="pdf">PDF</option>
-            <option value="xlsx">XLSX</option>
-          </select>
-        </div>
-      </div>
+      {/* Hidden file input (triggered from toolbar) */}
+      <input
+        ref={fileInputRef}
+        type="file"
+        multiple
+        className="hidden"
+        onChange={(e) => {
+          if (e.target.files) handleUpload(e.target.files);
+          e.target.value = "";
+        }}
+      />
 
       {/* Version history panel */}
       {versionOpen && (
@@ -471,9 +397,13 @@ export default function ProjectFilesPage() {
       )}
 
       {/* Main content: file list + optional detail panel */}
-      <div className="flex-1 min-h-0 flex gap-0">
+      <ResizablePanelGroup orientation="horizontal" className="flex-1">
         {/* File listing */}
-        <div className={cn("flex-1 min-w-0 flex flex-col gap-1", detailPath && "pr-1")}>
+        <ResizablePanel
+          defaultSize={detailPath ? loadPanelSize("files-list") : 100}
+          minSize={40}
+        >
+        <div className="flex-1 min-w-0 flex flex-col gap-1">
           {loading ? (
             <div className="flex items-center justify-center py-24">
               <Spinner className="text-2xl text-primary" />
@@ -498,161 +428,123 @@ export default function ProjectFilesPage() {
               </CardContent>
             </Card>
           ) : (
-            <>
-              {/* Directory up / subdirectories */}
-              {currentPath && (
-                <button
-                  type="button"
-                  onClick={navigateUp}
-                  className="flex items-center gap-3 px-3 py-2 rounded text-sm hover:bg-muted/10 transition-colors text-left w-full"
-                >
-                  <FolderOpen className="h-4 w-4 text-text-tertiary" />
-                  <span className="text-text-secondary">..</span>
-                </button>
-              )}
-
-              {files.map((f) => (
-                <div
-                  key={f.path}
-                  className={cn(
-                    "flex items-center gap-3 px-3 py-2 rounded group transition-colors",
-                    f.is_dir
-                      ? "cursor-pointer hover:bg-muted/10"
-                      : "cursor-pointer hover:bg-muted/5",
-                    !f.is_dir && detailPath === f.path && "bg-primary/10 border-l-2 border-l-primary",
-                  )}
-                  onClick={() => {
-                    if (f.is_dir) {
-                      navigateTo(f.path);
-                    } else if (compareMode) {
-                      if (!compareA) setCompareA(f.path);
-                      else if (!compareB && f.path !== compareA) setCompareB(f.path);
-                    } else {
-                      setDetailPath(f.path);
-                      setDetailName(f.name);
-                    }
-                  }}
-              role="button"
-              tabIndex={0}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") {
-                  if (f.is_dir) navigateTo(f.path);
-                  else {
-                    setDetailPath(f.path);
-                    setDetailName(f.name);
-                  }
+            <TreeView
+              files={files}
+              currentPath={currentPath}
+              selectedPath={detailPath}
+              onSelectPath={(path, name) => {
+                if (compareMode) {
+                  if (!compareA) setCompareA(path);
+                  else if (!compareB && path !== compareA) setCompareB(path);
+                } else {
+                  setDetailPath(path);
+                  setDetailName(name);
                 }
               }}
-            >
-              {!f.is_dir && (
-                <input
-                  type="checkbox"
-                  className="rounded shrink-0 opacity-50 group-hover:opacity-100 transition-opacity"
-                  checked={selectedForBinder.includes(f.path)}
-                  onClick={(e) => e.stopPropagation()}
-                  onChange={() => {
-                    setSelectedForBinder((prev) =>
-                      prev.includes(f.path)
-                        ? prev.filter((p) => p !== f.path)
-                        : [...prev, f.path],
-                    );
-                  }}
-                />
-              )}
-              {getDocIcon(f.name, f.is_dir)}
-
-              <span
-                className={cn(
-                  "flex-1 min-w-0 truncate text-sm",
-                  f.is_dir ? "font-medium" : "",
-                )}
-              >
-                {f.name}
-              </span>
-
-              {!f.is_dir && getDocStatusBadge(f.path)}
-
-              {!f.is_dir && (
-                <Badge tone="outline" className="text-xs flex-shrink-0 hidden sm:inline-flex">
-                  {formatFileSize(f.size)}
+              onNavigate={(path) => setCurrentPath(path)}
+              renderIcon={(name, isDir) => getDocIcon(name, isDir)}
+              renderBadge={(path) => getDocStatusBadge(inventory, path)}
+              renderSize={(node) => (
+                <Badge tone="outline" className="text-[10px] flex-shrink-0 hidden sm:inline-flex">
+                  {formatFileSize(node.size)}
                 </Badge>
               )}
-
-              {!f.is_dir && (
-                <span className="text-xs text-text-tertiary hidden md:inline-block w-30 text-right flex-shrink-0">
-                  {f.modified}
-                </span>
+              renderCheckbox={(node) =>
+                !node.isDir ? (
+                  <input
+                    type="checkbox"
+                    className="rounded shrink-0 opacity-0 group-hover:opacity-100 transition-opacity"
+                    checked={selectedForBinder.includes(node.path)}
+                    onClick={(e) => e.stopPropagation()}
+                    onChange={(e) => {
+                      e.stopPropagation();
+                      setSelectedForBinder((prev) =>
+                        prev.includes(node.path)
+                          ? prev.filter((p) => p !== node.path)
+                          : [...prev, node.path],
+                      );
+                    }}
+                  />
+                ) : null
+              }
+              renderActions={(node) => (
+                <>
+                  {!node.isDir && (
+                    <>
+                      <Button
+                        ghost
+                        size="icon"
+                        className="h-6 w-6"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setDetailPath(node.path);
+                          setDetailName(node.name);
+                        }}
+                        title="Preview"
+                      >
+                        <Eye className="h-3 w-3" />
+                      </Button>
+                      <Button
+                        ghost
+                        size="icon"
+                        className="h-6 w-6"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setDetailPath(node.path);
+                          setDetailName(node.name);
+                        }}
+                        title="Edit metadata"
+                      >
+                        <FilePenLine className="h-3 w-3" />
+                      </Button>
+                      <Button
+                        ghost
+                        size="icon"
+                        className="h-6 w-6"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleDownload(node);
+                        }}
+                        title="Download"
+                      >
+                        <Download className="h-3 w-3" />
+                      </Button>
+                    </>
+                  )}
+                  <Button
+                    ghost
+                    size="icon"
+                    className="h-6 w-6"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      fileDelete.requestDelete(node.path);
+                    }}
+                    title="Delete"
+                  >
+                    <Trash2 className="h-3 w-3 text-text-tertiary hover:text-destructive" />
+                  </Button>
+                </>
               )}
-
-              <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
-                {!f.is_dir && (
-                  <>
-                    <Button
-                      ghost
-                      size="icon"
-                      className="h-7 w-7"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setDetailPath(f.path);
-                        setDetailName(f.name);
-                      }}
-                      title="Preview"
-                    >
-                      <Eye className="h-3.5 w-3.5" />
-                    </Button>
-                    <Button
-                      ghost
-                      size="icon"
-                      className="h-7 w-7"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setDetailPath(f.path);
-                        setDetailName(f.name);
-                      }}
-                      title="Edit metadata"
-                    >
-                      <FilePenLine className="h-3.5 w-3.5" />
-                    </Button>
-                    <Button
-                      ghost
-                      size="icon"
-                      className="h-7 w-7"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        handleDownload(f);
-                      }}
-                      title="Download"
-                    >
-                      <Download className="h-3.5 w-3.5" />
-                    </Button>
-                  </>
-                )}
-                <Button
-                  ghost
-                  size="icon"
-                  className="h-7 w-7"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    fileDelete.requestDelete(f.path);
-                  }}
-                  title="Delete"
-                >
-                  <Trash2 className="h-3.5 w-3.5 text-text-tertiary hover:text-destructive" />
-                </Button>
-              </div>
-            </div>
-          ))}
-
-              <p className="text-xs text-text-tertiary px-3 mt-2">
-                {files.length} item{files.length !== 1 ? "s" : ""}
-              </p>
-            </>
+              onContextMenu={(e, node) => {
+                e.preventDefault();
+                setCtxMenuPos({ x: e.clientX, y: e.clientY });
+                setCtxMenuNode(node);
+              }}
+              searchQuery={searchQuery}
+            />
           )}
         </div>
+        </ResizablePanel>
 
         {/* Right detail panel */}
         {detailPath && (
-          <div className="w-[420px] shrink-0">
+          <>
+            <ResizableHandle className="mx-0" />
+            <ResizablePanel
+              defaultSize={loadPanelSize("files-detail")}
+              minSize={20}
+              maxSize={50}
+            >
             <div className="sticky top-0 h-[calc(100vh-16rem)]">
               <FileDetailPanel
                 projectId={projectId}
@@ -665,9 +557,10 @@ export default function ProjectFilesPage() {
                 }}
               />
             </div>
-          </div>
+            </ResizablePanel>
+          </>
         )}
-      </div>
+      </ResizablePanelGroup>
 
       {/* Diff viewer modal */}
       {compareA && compareB && (
@@ -703,6 +596,64 @@ export default function ProjectFilesPage() {
           files={selectedForBinder}
           onClose={() => setBinderOpen(false)}
         />
+      )}
+
+      {/* File context menu */}
+      {ctxMenuPos && ctxMenuNode && (
+        <ContextMenu
+          position={ctxMenuPos}
+          onClose={() => { setCtxMenuPos(null); setCtxMenuNode(null); }}
+        >
+          <ContextMenuItem
+            icon={<Eye className="h-3.5 w-3.5" />}
+            label="Preview"
+            onClick={() => {
+              setDetailPath(ctxMenuNode.path);
+              setDetailName(ctxMenuNode.name);
+              setCtxMenuPos(null);
+              setCtxMenuNode(null);
+            }}
+          />
+          <ContextMenuItem
+            icon={<FilePenLine className="h-3.5 w-3.5" />}
+            label="Edit Metadata"
+            onClick={() => {
+              setDetailPath(ctxMenuNode.path);
+              setDetailName(ctxMenuNode.name);
+              setCtxMenuPos(null);
+              setCtxMenuNode(null);
+            }}
+          />
+          <ContextMenuItem
+            icon={<Download className="h-3.5 w-3.5" />}
+            label="Download"
+            onClick={() => {
+              handleDownload(ctxMenuNode);
+              setCtxMenuPos(null);
+              setCtxMenuNode(null);
+            }}
+          />
+          <ContextMenuItem
+            icon={<Copy className="h-3.5 w-3.5" />}
+            label="Copy Path"
+            onClick={() => {
+              navigator.clipboard.writeText(ctxMenuNode.path).catch(() => {});
+              setCtxMenuPos(null);
+              setCtxMenuNode(null);
+            }}
+          />
+          <ContextMenuSeparator />
+          <ContextMenuItem
+            variant="destructive"
+            icon={<Trash2 className="h-3.5 w-3.5" />}
+            label="Delete"
+            onClick={() => {
+              fileDelete.requestDelete(ctxMenuNode.path);
+              setCtxMenuPos(null);
+              setCtxMenuNode(null);
+            }}
+          />
+        </ContextMenu>
       )}
     </div>
   );

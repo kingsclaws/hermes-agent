@@ -1,6 +1,7 @@
 import { Button } from "@nous-research/ui/ui/components/button";
 import { GatewayClient } from "@/lib/gatewayClient";
 import { cn } from "@/lib/utils";
+import { useKeyboardShortcuts } from "@/contexts/KeyboardShortcutsContext";
 import { ArrowRight, Search, X } from "lucide-react";
 import {
   useCallback,
@@ -37,6 +38,7 @@ const BUILTIN_COMMANDS: CommandDef[] = [
   { command: "/project", description: "Manage legal projects", category: "Legal" },
   { command: "/role", description: "Switch active agent role", category: "Agent" },
   { command: "/delegate", description: "Delegate a task to a subagent", category: "Agent" },
+  { command: "/reset-workspace", description: "Reset panel layout to defaults", category: "View" },
 ];
 
 interface CommandPaletteProps {
@@ -62,16 +64,18 @@ export function CommandPalette({ onExecute }: CommandPaletteProps) {
     );
   }, [query]);
 
-  // Cmd+K / Ctrl+K to toggle
+  const { register } = useKeyboardShortcuts();
+
+  // Register Cmd+K / Ctrl+K via shortcut system
   useEffect(() => {
+    return register("palette", () => setOpen((prev) => !prev));
+  }, [register]);
+
+  // Also handle Escape as a fallback when palette is open
+  useEffect(() => {
+    if (!open) return;
     const onKey = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && e.key === "k") {
-        e.preventDefault();
-        setOpen((prev) => !prev);
-      }
-      if (e.key === "Escape" && open) {
-        setOpen(false);
-      }
+      if (e.key === "Escape") setOpen(false);
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);

@@ -31,6 +31,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useSearchParams } from "react-router-dom";
 
+import { ResizablePanelGroup, ResizablePanel, ResizableHandle } from "@/components/ResizablePanel";
+import { loadPanelSize, savePanelSize } from "@/lib/layout-persistence";
 import { ChatSidebar } from "@/components/ChatSidebar";
 import {
   dispatchWorkflowPrompt,
@@ -38,6 +40,8 @@ import {
 } from "@/components/NativeChatSurface";
 import { usePageHeader } from "@/contexts/usePageHeader";
 import { useI18n } from "@/i18n";
+import { ChatTabBar } from "@/components/ChatTabBar";
+import { useChatTabs } from "@/contexts/ChatTabContext";
 import { api } from "@/lib/api";
 import { PluginSlot } from "@/plugins";
 
@@ -112,6 +116,15 @@ function terminalLineHeightForWidth(layoutWidthPx: number): number {
 }
 
 export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
+  const { tabs, addTab } = useChatTabs();
+
+  // Ensure at least one tab exists
+  useEffect(() => {
+    if (tabs.length === 0) {
+      addTab({ title: "Chat", sessionId: null, type: "terminal" });
+    }
+  }, [tabs.length, addTab]);
+
   const hostRef = useRef<HTMLDivElement | null>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
@@ -835,6 +848,7 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
 
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-2">
+      <ChatTabBar />
       <PluginSlot name="chat:top" />
       {mobileModelToolsPortal}
 
@@ -844,7 +858,14 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
         </div>
       )}
 
-      <div className="flex min-h-0 flex-1 flex-col gap-2 lg:flex-row lg:gap-3">
+      <ResizablePanelGroup orientation="horizontal" className="flex-1">
+        <ResizablePanel
+          defaultSize={loadPanelSize("chat-main")}
+          minSize={30}
+          onResize={(panelSize) => {
+            savePanelSize("chat-main", panelSize.asPercentage);
+          }}
+        >
         <div
           className={cn(
             "relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-lg",
@@ -942,23 +963,33 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
             </Button>
           )}
         </div>
+        </ResizablePanel>
 
         {!narrow && (
-          <div
-            id="chat-side-panel"
-            role="complementary"
-            aria-label={modelToolsLabel}
-            className="flex min-h-0 shrink-0 flex-col overflow-hidden lg:h-full lg:w-96"
-          >
-            <div className="min-h-0 flex-1 overflow-hidden">
-              <ChatSidebar
-                channel={channel}
-                onRunWorkflowPrompt={handleRunWorkflowPrompt}
-              />
+          <>
+            <ResizableHandle className="hidden lg:flex mx-0" />
+            <ResizablePanel
+              defaultSize={loadPanelSize("chat-sidebar")}
+              minSize={15}
+              maxSize={50}
+            >
+            <div
+              id="chat-side-panel"
+              role="complementary"
+              aria-label={modelToolsLabel}
+              className="flex min-h-0 shrink-0 flex-col overflow-hidden lg:h-full"
+            >
+              <div className="min-h-0 flex-1 overflow-hidden">
+                <ChatSidebar
+                  channel={channel}
+                  onRunWorkflowPrompt={handleRunWorkflowPrompt}
+                />
+              </div>
             </div>
-          </div>
+            </ResizablePanel>
+          </>
         )}
-      </div>
+      </ResizablePanelGroup>
       <PluginSlot name="chat:bottom" />
     </div>
   );

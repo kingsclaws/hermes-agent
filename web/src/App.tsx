@@ -58,6 +58,8 @@ import { SidebarFooter } from "@/components/SidebarFooter";
 import { SidebarStatusStrip, gatewayLine } from "@/components/SidebarStatusStrip";
 import { useBelowBreakpoint } from "@nous-research/ui/hooks/use-below-breakpoint";
 import { useSidebarStatus } from "@/hooks/useSidebarStatus";
+import { ResizablePanelGroup, ResizablePanel, ResizableHandle } from "@/components/ResizablePanel";
+import { loadPanelSize, savePanelSize } from "@/lib/layout-persistence";
 import { AuthWidget } from "@/components/AuthWidget";
 import { PageHeaderProvider } from "@/contexts/PageHeaderProvider";
 import { useSystemActions } from "@/contexts/useSystemActions";
@@ -87,6 +89,10 @@ import { useTheme } from "@/themes";
 import { isDashboardEmbeddedChatEnabled } from "@/lib/dashboard-flags";
 import { api } from "@/lib/api";
 import type { StatusResponse } from "@/lib/api";
+import { StatusBar } from "@/components/StatusBar";
+import { useKeyboardShortcuts } from "@/contexts/KeyboardShortcutsContext";
+import { KeyboardShortcutsDialog } from "@/components/KeyboardShortcutsDialog";
+import { ChatTabProvider } from "@/contexts/ChatTabContext";
 
 function RootRedirect() {
   return <Navigate to="/sessions" replace />;
@@ -351,6 +357,15 @@ export default function App() {
       return next;
     });
   }, []);
+  const { register } = useKeyboardShortcuts();
+  const [shortcutsDialogOpen, setShortcutsDialogOpen] = useState(false);
+
+  useEffect(() => register("toggle-sidebar", toggleCollapsed), [register, toggleCollapsed]);
+  useEffect(
+    () => register("shortcuts-dialog", () => setShortcutsDialogOpen(true)),
+    [register],
+  );
+
   const isMobile = useBelowBreakpoint(1024);
   const isDesktopCollapsed = collapsed && !isMobile;
   const tooltipWarmRef = useRef(0);
@@ -517,7 +532,16 @@ export default function App() {
       <PluginSlot name="header-banner" />
 
       <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden pt-14 lg:pt-0">
-        <div className="flex min-h-0 min-w-0 flex-1">
+        <ResizablePanelGroup orientation="horizontal" className="flex-1">
+          <ResizablePanel
+            id="sidebar-panel"
+            defaultSize={loadPanelSize("sidebar")}
+            minSize={collapsed ? 5 : 12}
+            maxSize={25}
+            onResize={(panelSize) => {
+              savePanelSize("sidebar", panelSize.asPercentage);
+            }}
+          >
           <aside
             id="app-sidebar"
             aria-label={t.app.navigation}
@@ -692,7 +716,14 @@ export default function App() {
               <SidebarFooter status={sidebarStatus} />
             </div>
           </aside>
+          </ResizablePanel>
 
+          <ResizableHandle className="hidden lg:flex mx-0" />
+
+          <ResizablePanel
+            defaultSize={100 - loadPanelSize("sidebar")}
+            minSize={30}
+          >
           <PageHeaderProvider pluginTabs={pluginTabMeta}>
             <div
               className={cn(
@@ -750,17 +781,25 @@ export default function App() {
                       )}
                       aria-hidden={!isChatRoute}
                     >
-                      <ChatPage isActive={isChatRoute} />
+                      <ChatTabProvider>
+                        <ChatPage isActive={isChatRoute} />
+                      </ChatTabProvider>
                     </div>
                   ))}
               </div>
               <PluginSlot name="post-main" />
             </div>
           </PageHeaderProvider>
-        </div>
+          </ResizablePanel>
+        </ResizablePanelGroup>
       </div>
 
       <PluginSlot name="overlay" />
+      <KeyboardShortcutsDialog
+        open={shortcutsDialogOpen}
+        onClose={() => setShortcutsDialogOpen(false)}
+      />
+      <StatusBar />
     </div>
   );
 }

@@ -81,8 +81,8 @@
   /* Layout tokens. */
   --radius: 0.5rem;
   --theme-radius: 0.5rem;
-  --theme-spacing-mul: 1;
-  --theme-density: comfortable;
+  --theme-spacing-mul: 0.85;
+  --theme-density: compact;
 }
 
 /* Theme tokens cascade into the document root so every descendant inherits

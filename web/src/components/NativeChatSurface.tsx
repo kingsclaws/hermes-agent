@@ -12,6 +12,8 @@ import { executeSlash, parseSlash } from "@/lib/slashExec";
 import { cn } from "@/lib/utils";
 import { Bot, GitBranch, Send, Square } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { ResizablePanelGroup, ResizablePanel, ResizableHandle } from "@/components/ResizablePanel";
+import { loadPanelSize, savePanelSize } from "@/lib/layout-persistence";
 
 type ChatMessage = {
   id: string;
@@ -73,6 +75,7 @@ export function NativeChatSurface() {
   const [running, setRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
+  const scrollRefNarrow = useRef<HTMLDivElement | null>(null);
   const assistantIdRef = useRef<string | null>(null);
   const thinkingIdRef = useRef<string | null>(null);
 
@@ -311,8 +314,9 @@ export function NativeChatSurface() {
   }, [gw]);
 
   useEffect(() => {
-    scrollRef.current?.scrollTo({
-      top: scrollRef.current.scrollHeight,
+    const el = scrollRef.current ?? scrollRefNarrow.current;
+    el?.scrollTo({
+      top: el.scrollHeight,
       behavior: "smooth",
     });
   }, [messages, tools, thinkingBlocks]);
@@ -499,11 +503,10 @@ export function NativeChatSurface() {
         </span>
       </div>
 
-      {/* Main content area */}
-      <div className="grid min-h-0 flex-1 grid-cols-1 overflow-hidden xl:grid-cols-[minmax(0,1fr)_22rem]">
-        {/* Message stream */}
+      {/* Main content area — resizable split on xl, vertical stack on narrow */}
+      <div className="min-h-0 flex-1 grid-cols-1 overflow-hidden xl:hidden">
         <div
-          ref={scrollRef}
+          ref={scrollRefNarrow}
           className="min-h-0 space-y-3 overflow-y-auto px-3 py-3"
         >
           {messages.length === 0 && (
@@ -518,7 +521,6 @@ export function NativeChatSurface() {
 
           {messages.map((message) => (
             <div key={message.id}>
-              {/* Show thinking blocks before assistant messages */}
               {message.role === "assistant" &&
                 thinkingBlocks.length > 0 &&
                 message.id ===
@@ -550,15 +552,80 @@ export function NativeChatSurface() {
             </div>
           ))}
         </div>
+      </div>
 
-        {/* Execution inspector sidebar */}
+      <ResizablePanelGroup orientation="horizontal" className="min-h-0 flex-1 hidden xl:flex">
+        <ResizablePanel
+          defaultSize={loadPanelSize("native-messages")}
+          minSize={35}
+          onResize={(panelSize) => {
+            savePanelSize("native-messages", panelSize.asPercentage);
+          }}
+        >
+        <div
+          ref={scrollRef}
+          className="min-h-0 space-y-3 overflow-y-auto px-3 py-3"
+        >
+          {messages.length === 0 && (
+            <div className="rounded border border-dashed border-current/15 p-4 text-sm text-muted-foreground">
+              这里是原生 Web Chat，不是 TUI。右侧 workflow 操作会直接提交到这个会话；delegate 和工具执行在右侧检查器里显示。
+              <br />
+              <span className="text-xs text-muted-foreground/60 mt-1 block">
+                Cmd+K / Ctrl+K to open command palette
+              </span>
+            </div>
+          )}
+
+          {messages.map((message) => (
+            <div key={message.id}>
+              {message.role === "assistant" &&
+                thinkingBlocks.length > 0 &&
+                message.id ===
+                  messages.filter((m) => m.role === "assistant").slice(-1)[0]
+                    ?.id && (
+                  <ThinkingStream blocks={thinkingBlocks} className="mb-2" />
+                )}
+
+              <div
+                className={cn(
+                  "max-w-[92%] rounded-lg border px-3 py-2 text-sm leading-6",
+                  message.role === "user"
+                    ? "ml-auto border-primary/30 bg-primary/10"
+                    : message.role === "status"
+                      ? "mx-auto border-current/10 bg-muted/10 text-xs text-muted-foreground"
+                      : "mr-auto border-current/10 bg-black/10",
+                )}
+              >
+                {message.role === "assistant" && message.text ? (
+                  <Markdown
+                    content={message.text}
+                    streaming={running &&
+                      message.id === assistantIdRef.current}
+                  />
+                ) : message.text || message.role === "assistant" ? (
+                  message.text || "…"
+                ) : null}
+              </div>
+            </div>
+          ))}
+        </div>
+        </ResizablePanel>
+
+        <ResizableHandle className="mx-0" />
+
+        <ResizablePanel
+          defaultSize={loadPanelSize("native-inspector")}
+          minSize={20}
+          maxSize={50}
+        >
         <ExecutionInspector
           running={running}
           tools={tools}
           subagents={subagents}
           onInterruptSubagent={interruptSubagent}
         />
-      </div>
+        </ResizablePanel>
+      </ResizablePanelGroup>
 
       {/* Compact inspector for narrow viewports */}
       <div className="border-t border-current/10 px-3 py-2 xl:hidden">

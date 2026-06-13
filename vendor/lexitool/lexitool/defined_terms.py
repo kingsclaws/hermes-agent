@@ -71,6 +71,13 @@ _QUOTED_INNER = re.compile(
     _OPEN_QUOTES + r'(' + _TERM_BODY + r')' + _CLOSE_QUOTES
 )
 
+# 定义表模式：中文术语（段首/格首，后跟英文术语或独立成行）
+#   e.g. 财务年度\n"Financial Year"  or  财务年度"Financial Year"  or  B组承贷比例
+_TABLE_ZH_TERM = re.compile(
+    r'^([一-鿿㐀-䶿豈-﫿A-Z][一-鿿㐀-䶿豈-﫿A-Za-z··]{0,40})'
+    r'(?:\s*' + _OPEN_QUOTES + r'[A-Z]|\s*$)'
+)
+
 
 # --------------------------------------------------------------------------- #
 # 主接口                                                                        #
@@ -201,6 +208,10 @@ def _find_term_spans(text: str, extra_patterns: list | None = None) -> list[tupl
 
     # ── 英文行内简称 ──────────────────────────────────────────────────────── #
     for m in _EN_INLINE.finditer(text):
+        spans.append((m.start(1), m.end(1)))
+
+    # ── 定义表模式：中文术语（段首/格首，后跟英文术语或独立成行）───────────── #
+    for m in _TABLE_ZH_TERM.finditer(text):
         spans.append((m.start(1), m.end(1)))
 
     # ── 自定义 extra 模式 ─────────────────────────────────────────────────── #
@@ -404,6 +415,191 @@ def term_format_audit(
 
         results.append({
             "para_index": i,
+            "text_preview": full[:80],
+            "terms": terms_out,
+        })
+
+    return results
+
+
+# --------------------------------------------------------------------------- #
+# Table-aware functions                                                        #
+# --------------------------------------------------------------------------- #
+
+def _iter_table_paragraphs(doc):
+    """Yield (table_index, row_index, col_index, paragraph) for every table cell."""
+    for t_idx, table in enumerate(doc.tables):
+        for r_idx, row in enumerate(table.rows):
+            for c_idx, cell in enumerate(row.cells):
+                for para in cell.paragraphs:
+                    yield t_idx, r_idx, c_idx, para
+
+
+def _iter_all_paragraphs(doc):
+    """Yield (source, paragraph) where source is 'body:P{idx}' or 'table:T{t}.R{r}.C{c}'."""
+    for i, para in enumerate(doc.paragraphs):
+        yield f"body:P{i}", para
+    for t_idx, r_idx, c_idx, para in _iter_table_paragraphs(doc):
+        yield f"table:T{t_idx}.R{r_idx}.C{c_idx}", para
+
+
+def auto_bold_table(doc, table_index, column_indices=None, extra_patterns=None, cfg=None) -> list[dict]:
+    """Auto-detect and bold defined terms in table cells.
+
+    Args:
+        doc:             python-docx Document
+        table_index:     which table to process (0-based)
+        column_indices:  list of column indices to process (None = all columns)
+        extra_patterns:  extra regex patterns for term detection
+        cfg:             DocConfig with extra_term_patterns
+
+    Returns:
+        [{"row": int, "col": int, "terms": [str, ...]}, ...]
+    """
+    if table_index >= len(doc.tables):
+        return []
+    table = doc.tables[table_index]
+    extra = _merge_extra_patterns(extra_patterns, cfg)
+    results = []
+    for r_idx, row in enumerate(table.rows):
+        for c_idx, cell in enumerate(row.cells):
+            if column_indices is not None and c_idx not in column_indices:
+                continue
+            for para in cell.paragraphs:
+                full = _para_full_text(para)
+                spans = _find_term_spans(full, extra)
+                for start, end in sorted(spans, reverse=True):
+                    _apply_bold_to_span(para, start, end)
+                if spans:
+                    results.append({
+                        "row": r_idx,
+                        "col": c_idx,
+                        "terms": [full[s:e] for s, e in spans],
+                    })
+    return results
+
+
+def bold_terms_in_table(doc, table_index, row_column_map) -> list[dict]:
+    """Bold specific terms in table cells.
+
+    Args:
+        doc:             python-docx Document
+        table_index:     which table to process (0-based)
+        row_column_map:  {(row_idx, col_idx): [term1, term2, ...]}
+
+    Returns:
+        [{"row": int, "col": int, "terms": [str, ...]}, ...]
+    """
+    if table_index >= len(doc.tables):
+        return []
+    table = doc.tables[table_index]
+    results = []
+    for (r_idx, c_idx), terms in row_column_map.items():
+        if r_idx >= len(table.rows) or c_idx >= len(table.rows[r_idx].cells):
+            continue
+        cell = table.rows[r_idx].cells[c_idx]
+        for para in cell.paragraphs:
+            full = _para_full_text(para)
+            spans = []
+            for term in terms:
+                pos = full.find(term)
+                if pos != -1:
+                    spans.append((pos, pos + len(term)))
+            for start, end in sorted(spans, key=lambda x: x[0], reverse=True):
+                _apply_bold_to_span(para, start, end)
+            if spans:
+                results.append({
+                    "row": r_idx,
+                    "col": c_idx,
+                    "terms": [full[s:e] for s, e in spans],
+                })
+    return results
+
+
+def auto_bold_all(doc, extra_patterns=None, cfg=None) -> dict:
+    """Auto-detect and bold defined terms in ALL paragraphs (body + tables).
+
+    Returns:
+        {"body": [{"para_index": int, "terms": [str, ...]}, ...],
+         "tables": [{"table_index": int, "results": [{"row": int, "col": int, "terms": [str, ...]}, ...]}, ...]}
+    """
+    extra = _merge_extra_patterns(extra_patterns, cfg)
+
+    body_results = []
+    for i, para in enumerate(doc.paragraphs):
+        full = _para_full_text(para)
+        spans = _find_term_spans(full, extra)
+        for start, end in sorted(spans, reverse=True):
+            _apply_bold_to_span(para, start, end)
+        if spans:
+            body_results.append({
+                "para_index": i,
+                "terms": [full[s:e] for s, e in spans],
+            })
+
+    table_results = []
+    for t_idx, table in enumerate(doc.tables):
+        t_res = auto_bold_table(doc, t_idx, extra_patterns=extra_patterns, cfg=cfg)
+        if t_res:
+            table_results.append({"table_index": t_idx, "results": t_res})
+
+    return {"body": body_results, "tables": table_results}
+
+
+def scan_terms_all(doc, extra_patterns=None, cfg=None) -> list[dict]:
+    """Scan both body paragraphs and table cells for defined terms.
+
+    Returns:
+        [{"source": "body:P{idx}"|"table:T{t}.R{r}.C{c}", "text_preview": str, "terms": [str, ...]}, ...]
+    """
+    extra = _merge_extra_patterns(extra_patterns, cfg)
+    results = []
+    for source, para in _iter_all_paragraphs(doc):
+        full = _para_full_text(para)
+        spans = _find_term_spans(full, extra)
+        if spans:
+            results.append({
+                "source": source,
+                "text_preview": full[:80],
+                "terms": [full[s:e] for s, e in spans],
+            })
+    return results
+
+
+def term_format_audit_all(doc, extra_patterns=None, cfg=None) -> list[dict]:
+    """Audit defined term formatting across body paragraphs AND table cells.
+
+    Returns:
+        [{"source": str, "text_preview": str,
+          "terms": [{"text": str, "char_start": int, "char_end": int, "format": dict}, ...]}, ...]
+    """
+    extra = _merge_extra_patterns(extra_patterns, cfg)
+    results = []
+
+    for source, para in _iter_all_paragraphs(doc):
+        full = _para_full_text(para)
+        term_spans = _find_term_spans(full, extra)
+        if not term_spans:
+            continue
+
+        runs_with_pos = _get_all_runs_with_pos(para)
+        terms_out = []
+
+        for char_start, char_end in term_spans:
+            term_fmt = {}
+            for run_el, r_start, r_end in runs_with_pos:
+                if r_start <= char_start < r_end:
+                    term_fmt = _run_format(run_el)
+                    break
+            terms_out.append({
+                "text": full[char_start:char_end],
+                "char_start": char_start,
+                "char_end": char_end,
+                "format": term_fmt,
+            })
+
+        results.append({
+            "source": source,
             "text_preview": full[:80],
             "terms": terms_out,
         })
