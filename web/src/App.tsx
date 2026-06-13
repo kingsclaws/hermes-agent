@@ -58,8 +58,6 @@ import { SidebarFooter } from "@/components/SidebarFooter";
 import { SidebarStatusStrip, gatewayLine } from "@/components/SidebarStatusStrip";
 import { useBelowBreakpoint } from "@nous-research/ui/hooks/use-below-breakpoint";
 import { useSidebarStatus } from "@/hooks/useSidebarStatus";
-import { ResizablePanelGroup, ResizablePanel, ResizableHandle } from "@/components/ResizablePanel";
-import { loadPanelSize, savePanelSize } from "@/lib/layout-persistence";
 import { AuthWidget } from "@/components/AuthWidget";
 import { PageHeaderProvider } from "@/contexts/PageHeaderProvider";
 import { useSystemActions } from "@/contexts/useSystemActions";
@@ -530,17 +528,7 @@ export default function App() {
 
       <PluginSlot name="header-banner" />
 
-      <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden pt-14 lg:pt-0">
-        <ResizablePanelGroup orientation="horizontal" className="flex-1">
-          <ResizablePanel
-            id="sidebar-panel"
-            defaultSize={loadPanelSize("sidebar")}
-            minSize={collapsed ? 5 : 12}
-            maxSize={25}
-            onResize={(panelSize) => {
-              savePanelSize("sidebar", panelSize.asPercentage);
-            }}
-          >
+      <div className="flex min-h-0 min-w-0 flex-1 overflow-hidden pt-14 lg:pt-0">
           <aside
             id="app-sidebar"
             aria-label={t.app.navigation}
@@ -551,7 +539,7 @@ export default function App() {
               "bg-background-base/95 backdrop-blur-sm",
               "transition-[transform] duration-200 ease-out",
               mobileOpen ? "translate-x-0" : "-translate-x-full",
-              "lg:sticky lg:top-0 lg:translate-x-0 lg:shrink-0 lg:overflow-hidden",
+              "lg:relative lg:top-auto lg:translate-x-0 lg:shrink-0 lg:overflow-hidden",
               "lg:transition-[width] lg:duration-[600ms] lg:ease-[cubic-bezier(0.33,1.35,0.62,1)]",
               collapsed && "lg:w-14",
             )}
@@ -716,19 +704,12 @@ export default function App() {
               <SidebarFooter status={sidebarStatus} />
             </div>
           </aside>
-          </ResizablePanel>
 
-          <ResizableHandle className="hidden lg:flex mx-0" />
-
-          <ResizablePanel
-            defaultSize={100 - loadPanelSize("sidebar")}
-            minSize={30}
-          >
           <PageHeaderProvider pluginTabs={pluginTabMeta}>
             <div
               className={cn(
                 "hermes-desktop-main",
-                "relative z-2 flex min-w-0 min-h-0 flex-1 flex-col",
+                "relative z-2 flex min-w-0 min-h-0 flex-1 flex-col overflow-hidden",
                 "px-3 sm:px-6",
                 isChatRoute
                   ? "pb-0 pt-1 sm:pt-2 lg:pt-4"
@@ -758,39 +739,22 @@ export default function App() {
                   />
                 </Routes>
 
-                {embeddedChat &&
-                  !chatOverriddenByPlugin &&
-                  (pluginsLoading ? (
-                    isChatRoute ? (
-                      <div
-                        className="flex min-h-0 min-w-0 flex-1 items-center justify-center"
-                        aria-busy="true"
-                        aria-live="polite"
-                      >
-                        <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                          <Spinner />
-                          <span>Loading chat…</span>
-                        </div>
-                      </div>
-                    ) : null
-                  ) : (
-                    <div
-                      data-chat-active={isChatRoute ? "true" : "false"}
-                      className={cn(
-                        "min-h-0 min-w-0",
-                        isChatRoute ? "flex flex-1 flex-col" : "hidden",
-                      )}
-                      aria-hidden={!isChatRoute}
-                    >
-                      <ChatPage isActive={isChatRoute} />
-                    </div>
-                  ))}
+                {embeddedChat && !chatOverriddenByPlugin && (
+                  <div
+                    data-chat-active={isChatRoute ? "true" : "false"}
+                    className={cn(
+                      "min-h-0 min-w-0",
+                      isChatRoute ? "flex flex-1 flex-col" : "hidden",
+                    )}
+                    aria-hidden={!isChatRoute}
+                  >
+                    <ChatPage isActive={isChatRoute} />
+                  </div>
+                )}
               </div>
               <PluginSlot name="post-main" />
             </div>
           </PageHeaderProvider>
-          </ResizablePanel>
-        </ResizablePanelGroup>
       </div>
 
       <PluginSlot name="overlay" />

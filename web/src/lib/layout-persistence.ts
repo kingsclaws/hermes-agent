@@ -11,22 +11,39 @@ const DEFAULTS: Record<string, number> = {
   "native-inspector": 40,
 };
 
+const LIMITS: Record<string, { min: number; max: number }> = {
+  sidebar: { min: 14, max: 25 },
+  "chat-main": { min: 45, max: 80 },
+  "chat-sidebar": { min: 20, max: 45 },
+  "files-list": { min: 35, max: 75 },
+  "files-detail": { min: 25, max: 65 },
+  "native-messages": { min: 45, max: 75 },
+  "native-inspector": { min: 25, max: 55 },
+};
+
+function clampPanelSize(id: string, value: number): number {
+  const limits = LIMITS[id];
+  if (!limits) return value;
+  return Math.min(limits.max, Math.max(limits.min, value));
+}
+
 export function loadPanelSize(id: string): number {
   try {
     const raw = localStorage.getItem(KEY_PREFIX + id);
     if (raw !== null) {
       const n = parseFloat(raw);
-      if (!Number.isNaN(n) && n > 0) return n;
+      if (!Number.isNaN(n) && n > 0) return clampPanelSize(id, n);
     }
   } catch {
     // localStorage unavailable
   }
-  return DEFAULTS[id] ?? 50;
+  return clampPanelSize(id, DEFAULTS[id] ?? 50);
 }
 
 export function savePanelSize(id: string, size: number): void {
   try {
-    localStorage.setItem(KEY_PREFIX + id, String(Math.round(size * 10) / 10));
+    const clamped = clampPanelSize(id, size);
+    localStorage.setItem(KEY_PREFIX + id, String(Math.round(clamped * 10) / 10));
   } catch {
     // silently ignore
   }

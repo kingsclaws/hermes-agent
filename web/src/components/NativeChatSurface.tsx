@@ -12,8 +12,6 @@ import { executeSlash, parseSlash } from "@/lib/slashExec";
 import { cn } from "@/lib/utils";
 import { Bot, GitBranch, Send, Square } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ResizablePanelGroup, ResizablePanel, ResizableHandle } from "@/components/ResizablePanel";
-import { loadPanelSize, savePanelSize } from "@/lib/layout-persistence";
 
 type ChatMessage = {
   id: string;
@@ -595,17 +593,10 @@ export function NativeChatSurface({
         </div>
       </div>
 
-      <ResizablePanelGroup orientation="horizontal" className="min-h-0 flex-1 hidden xl:flex">
-        <ResizablePanel
-          defaultSize={loadPanelSize("native-messages")}
-          minSize={35}
-          onResize={(panelSize) => {
-            savePanelSize("native-messages", panelSize.asPercentage);
-          }}
-        >
+      <div className="hidden min-h-0 flex-1 xl:flex">
         <div
           ref={scrollRef}
-          className="min-h-0 space-y-3 overflow-y-auto px-3 py-3"
+          className="min-h-0 min-w-0 flex-1 space-y-3 overflow-y-auto px-3 py-3"
         >
           {messages.length === 0 && (
             <div className="rounded border border-dashed border-current/15 p-4 text-sm text-muted-foreground">
@@ -650,25 +641,18 @@ export function NativeChatSurface({
             </div>
           ))}
         </div>
-        </ResizablePanel>
 
-        <ResizableHandle className="mx-0" />
-
-        <ResizablePanel
-          defaultSize={loadPanelSize("native-inspector")}
-          minSize={20}
-          maxSize={50}
-        >
-        <ExecutionInspector
-          running={running}
-          stopping={stopping}
-          tools={tools}
-          subagents={subagents}
-          onInterruptTurn={interrupt}
-          onInterruptSubagent={interruptSubagent}
-        />
-        </ResizablePanel>
-      </ResizablePanelGroup>
+        <div className="min-h-0 w-80 shrink-0 border-l border-current/10">
+          <ExecutionInspector
+            running={running}
+            stopping={stopping}
+            tools={tools}
+            subagents={subagents}
+            onInterruptTurn={interrupt}
+            onInterruptSubagent={interruptSubagent}
+          />
+        </div>
+      </div>
 
       {/* Compact inspector for narrow viewports */}
       <div className="border-t border-current/10 px-3 py-2 xl:hidden">
