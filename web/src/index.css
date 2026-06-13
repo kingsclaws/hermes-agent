@@ -83,6 +83,20 @@
   --theme-radius: 0.5rem;
   --theme-spacing-mul: 0.85;
   --theme-density: compact;
+
+  /* Desktop-aligned chrome tokens.  These mirror the desktop app's
+     pane/surface hierarchy without importing Electron-only runtime code. */
+  --dt-background: var(--background-base);
+  --dt-foreground: var(--midground);
+  --dt-sidebar: color-mix(in srgb, var(--background-base) 88%, #000);
+  --dt-panel: color-mix(in srgb, var(--midground-base) 5%, var(--background-base));
+  --dt-panel-strong: color-mix(in srgb, var(--midground-base) 8%, var(--background-base));
+  --dt-panel-border: color-mix(in srgb, var(--midground-base) 16%, transparent);
+  --dt-panel-border-strong: color-mix(in srgb, var(--midground-base) 26%, transparent);
+  --dt-hover: color-mix(in srgb, var(--midground-base) 10%, transparent);
+  --dt-active: color-mix(in srgb, var(--midground-base) 16%, transparent);
+  --dt-statusbar: color-mix(in srgb, var(--background-base) 94%, #000);
+  --dt-shadow: 0 24px 80px rgba(0, 0, 0, 0.28);
 }
 
 /* Theme tokens cascade into the document root so every descendant inherits
@@ -231,6 +245,41 @@ code { font-size: 0.875rem; }
   font-family: var(--theme-font-mono);
 }
 
+/* Desktop-inspired Web shell. Keep these as plain CSS classes so pages can
+   opt in incrementally while still using the existing React/runtime stack. */
+.hermes-desktop-shell {
+  background:
+    radial-gradient(circle at 12% 0%, color-mix(in srgb, var(--warm-glow) 42%, transparent), transparent 34rem),
+    linear-gradient(135deg, color-mix(in srgb, var(--dt-background) 92%, #000), var(--dt-background));
+}
+
+.hermes-desktop-sidebar {
+  box-shadow: inset -1px 0 0 var(--dt-panel-border);
+}
+
+.hermes-desktop-main {
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--dt-panel) 76%, transparent), transparent 18rem),
+    color-mix(in srgb, var(--dt-background) 96%, #000);
+}
+
+.hermes-desktop-statusbar {
+  background: var(--dt-statusbar);
+  border-color: var(--dt-panel-border);
+  box-shadow: 0 -1px 0 color-mix(in srgb, #fff 4%, transparent);
+}
+
+.hermes-desktop-pane {
+  background: var(--dt-panel);
+  border: 1px solid var(--dt-panel-border);
+  box-shadow: var(--dt-shadow);
+}
+
+.hermes-desktop-pane-header {
+  background: var(--dt-panel-strong);
+  border-bottom: 1px solid var(--dt-panel-border);
+}
+
 /* Subtle grain overlay for badges. */
 .grain {
   position: relative;
@@ -273,4 +322,3 @@ code { font-size: 0.875rem; }
 .hl-meta { color: #89ddff; font-weight: 600; }
 .hl-ins { color: #c3e88d; }
 .hl-del { color: #ff5370; }
-

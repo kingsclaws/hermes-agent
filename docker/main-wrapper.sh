@@ -12,7 +12,8 @@
 # what s6-supervised services use too (see main-hermes/run).
 #
 # Routing:
-#   no args                       → exec `hermes` (the default)
+#   no args + TTY                 → exec `hermes` (interactive default)
+#   no args + no TTY/dashboard    → exec `sleep infinity` (s6 services stay up)
 #   first arg is an executable    → exec it directly (sleep, bash, sh, …)
 #   first arg is anything else    → exec `hermes <args>` (subcommand passthrough)
 #
@@ -45,6 +46,14 @@ cd /opt/data
 . /opt/hermes/.venv/bin/activate
 
 if [ $# -eq 0 ]; then
+    # Detached compose/dashboard deployments have no interactive stdin. Running
+    # the CLI there exits immediately ("Input is not a terminal"), which makes
+    # /init shut the whole container down and kills supervised services. Keep
+    # the CMD alive; explicit commands like `hermes`, `bash`, or `sleep` still
+    # pass through below.
+    if _truthy "${HERMES_DASHBOARD:-}" || [ ! -t 0 ]; then
+        exec sleep infinity
+    fi
     # shellcheck disable=SC2086
     exec $runner hermes
 fi

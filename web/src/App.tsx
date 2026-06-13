@@ -92,7 +92,6 @@ import type { StatusResponse } from "@/lib/api";
 import { StatusBar } from "@/components/StatusBar";
 import { useKeyboardShortcuts } from "@/contexts/KeyboardShortcutsContext";
 import { KeyboardShortcutsDialog } from "@/components/KeyboardShortcutsDialog";
-import { ChatTabProvider } from "@/contexts/ChatTabContext";
 
 function RootRedirect() {
   return <Navigate to="/sessions" replace />;
@@ -478,7 +477,7 @@ export default function App() {
   return (
     <div
       data-layout-variant={layoutVariant}
-      className="flex h-dvh max-h-dvh min-h-0 flex-col overflow-hidden bg-black text-text-primary antialiased"
+      className="hermes-desktop-shell flex h-dvh max-h-dvh min-h-0 flex-col overflow-hidden bg-black text-text-primary antialiased"
     >
       <SelectionSwitcher />
       <Backdrop />
@@ -546,6 +545,7 @@ export default function App() {
             id="app-sidebar"
             aria-label={t.app.navigation}
             className={cn(
+              "hermes-desktop-sidebar",
               "fixed top-0 left-0 z-50 flex h-dvh max-h-dvh w-64 min-h-0 flex-col",
               "border-r border-current/20",
               "bg-background-base/95 backdrop-blur-sm",
@@ -727,6 +727,7 @@ export default function App() {
           <PageHeaderProvider pluginTabs={pluginTabMeta}>
             <div
               className={cn(
+                "hermes-desktop-main",
                 "relative z-2 flex min-w-0 min-h-0 flex-1 flex-col",
                 "px-3 sm:px-6",
                 isChatRoute
@@ -781,9 +782,7 @@ export default function App() {
                       )}
                       aria-hidden={!isChatRoute}
                     >
-                      <ChatTabProvider>
-                        <ChatPage isActive={isChatRoute} />
-                      </ChatTabProvider>
+                      <ChatPage isActive={isChatRoute} />
                     </div>
                   ))}
               </div>

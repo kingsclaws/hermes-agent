@@ -2605,11 +2605,49 @@ async def delete_session_endpoint(session_id: str):
 import shutil as _shutil
 
 
+def _project_doc_count(cwd_path: Path) -> int:
+    """Count common legal project documents under a project's working dir."""
+    if not cwd_path.is_dir():
+        return 0
+    doc_count = 0
+    for pattern in ("*.docx", "*.DOCX", "*.pdf", "*.PDF"):
+        try:
+            doc_count += len(list(cwd_path.rglob(pattern)))
+        except OSError:
+            continue
+    return doc_count
+
+
+def _project_created_iso(value) -> str:
+    """Normalize DB timestamps (float seconds) and metadata strings for the UI."""
+    if value in (None, ""):
+        return ""
+    if isinstance(value, (int, float)):
+        try:
+            return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(float(value)))
+        except Exception:
+            return ""
+    return str(value)
+
+
+def _project_identity_candidates(project: dict) -> set[str]:
+    values = {
+        str(project.get("id") or ""),
+        str(project.get("name") or ""),
+        str(project.get("directory") or ""),
+        str(project.get("cwd") or ""),
+        str(project.get("management_dir") or ""),
+    }
+    return {v for v in values if v}
+
+
 def _scan_projects_dir(base: str = "/data/projects") -> list[dict]:
     """Scan for .hermes-project/project-meta.json files across multiple roots.
 
-    Returns projects with both 'directory' (management/bootstrap dir) and
-    'cwd' (working directory where documents live).
+    Returns projects with both 'cwd' (document working directory) and
+    'management_dir' (sidecar/bootstrap directory).  'directory' is kept as
+    a backwards-compatible alias for cwd because the WebUI file browser uses
+    it as the document root.
     """
     projects = []
     for base_dir in ("/data/projects", "/workingfile", "/workspace"):
@@ -2624,21 +2662,18 @@ def _scan_projects_dir(base: str = "/data/projects") -> list[dict]:
                 meta = json.loads(meta_path.read_text())
                 mgmt_dir = str(meta_path.parent.parent)
                 cwd = meta.get("cwd", mgmt_dir)
-                # Count docs in CWD (where documents actually live), not mgmt dir
-                doc_count = 0
                 cwd_path = Path(cwd) if cwd else Path(mgmt_dir)
-                if cwd_path.is_dir():
-                    for pattern in ("*.docx", "*.pdf"):
-                        doc_count += len(list(cwd_path.rglob(pattern)))
                 projects.append({
                     "id": mgmt_dir.replace("/", "_").lstrip("_"),
                     "name": meta.get("name", "Unnamed"),
                     "client": meta.get("client", ""),
                     "goal": meta.get("goal", ""),
-                    "directory": mgmt_dir,
-                    "cwd": cwd,
+                    "directory": str(cwd_path),
+                    "cwd": str(cwd_path),
+                    "management_dir": mgmt_dir,
+                    "source": "scan",
                     "created": meta.get("created", ""),
-                    "doc_count": doc_count,
+                    "doc_count": _project_doc_count(cwd_path),
                 })
             except Exception:
                 continue
@@ -2660,11 +2695,63 @@ def _scan_projects_dir(base: str = "/data/projects") -> list[dict]:
     return list(seen.values())
 
 
+def _list_projects() -> list[dict]:
+    """Return projects from state.db first, with filesystem scan as fallback."""
+    projects: list[dict] = []
+    seen: set[str] = set()
+
+    try:
+        from hermes_state import SessionDB
+        db = SessionDB()
+        try:
+            for row in db.list_projects():
+                mgmt_dir = str(row.get("path") or "")
+                cwd = str(row.get("cwd") or mgmt_dir)
+                cwd_path = Path(cwd) if cwd else Path(mgmt_dir)
+                project = {
+                    "id": row.get("id"),
+                    "name": row.get("name") or "Unnamed",
+                    "client": row.get("client") or "",
+                    "goal": row.get("goal") or "",
+                    "directory": str(cwd_path),
+                    "cwd": str(cwd_path),
+                    "management_dir": mgmt_dir or str(cwd_path),
+                    "status": row.get("status") or "",
+                    "notes": row.get("notes") or "",
+                    "source": "db",
+                    "created": _project_created_iso(row.get("created_at")),
+                    "updated": _project_created_iso(row.get("updated_at")),
+                    "doc_count": _project_doc_count(cwd_path),
+                }
+                projects.append(project)
+                seen.update(_project_identity_candidates(project))
+        finally:
+            db.close()
+    except Exception:
+        _log.debug("state.db project list unavailable; falling back to scan", exc_info=True)
+
+    for project in _scan_projects_dir():
+        candidates = _project_identity_candidates(project)
+        if candidates & seen:
+            continue
+        projects.append(project)
+        seen.update(candidates)
+
+    return projects
+
+
+def _resolve_project(project_id: str) -> dict | None:
+    for project in _list_projects():
+        if project_id in _project_identity_candidates(project):
+            return project
+    return None
+
+
 @app.get("/api/projects")
 async def get_projects():
     """List all projects discovered under /data/projects."""
     try:
-        projects = _scan_projects_dir()
+        projects = _list_projects()
         total = len(projects)
         return {"projects": projects, "total": total}
     except Exception:
@@ -2733,9 +2820,7 @@ async def get_project_detail(project_id: str):
     except ImportError:
         raise HTTPException(status_code=500, detail="SessionDB unavailable")
 
-    # Map project_id back to directory
-    projects = _scan_projects_dir()
-    project = next((p for p in projects if p["id"] == project_id), None)
+    project = _resolve_project(project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
 
@@ -2744,9 +2829,14 @@ async def get_project_detail(project_id: str):
         db = SessionDB()
         try:
             all_sessions = db.list_sessions_rich(limit=500, offset=0)
-            project_dir = project["directory"]
-            linked = [s for s in all_sessions
-                      if s.get("cwd", "").startswith(project_dir)]
+            cwd = str(project.get("cwd") or project.get("directory") or "")
+            mgmt_dir = str(project.get("management_dir") or "")
+            linked = [
+                s for s in all_sessions
+                if s.get("project_id") == project.get("id")
+                or (cwd and s.get("cwd", "").startswith(cwd))
+                or (mgmt_dir and s.get("cwd", "").startswith(mgmt_dir))
+            ]
             project["sessions"] = linked
             project["session_count"] = len(linked)
         finally:
@@ -2761,12 +2851,11 @@ async def get_project_detail(project_id: str):
 @app.delete("/api/projects/{project_id}")
 async def delete_project(project_id: str):
     """Delete a project directory and all its contents."""
-    projects = _scan_projects_dir()
-    project = next((p for p in projects if p["id"] == project_id), None)
+    project = _resolve_project(project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
 
-    project_dir = Path(project["directory"])
+    project_dir = Path(project.get("management_dir") or project["directory"])
     if not project_dir.is_dir():
         raise HTTPException(status_code=404, detail="Project directory not found")
 
@@ -2776,6 +2865,15 @@ async def delete_project(project_id: str):
 
     try:
         _shutil.rmtree(str(project_dir))
+        try:
+            from hermes_state import SessionDB
+            db = SessionDB()
+            try:
+                db.delete_project(str(project.get("id")))
+            finally:
+                db.close()
+        except Exception:
+            _log.debug("Failed to delete project DB row", exc_info=True)
         return {"ok": True, "deleted": str(project_dir)}
     except Exception as e:
         _log.exception("DELETE /api/projects failed")
@@ -2790,12 +2888,27 @@ import mimetypes as _mimetypes
 
 
 def _resolve_project_path(project_id: str) -> Path | None:
-    """Resolve a project_id back to its directory on disk."""
-    projects = _scan_projects_dir()
-    project = next((p for p in projects if p["id"] == project_id), None)
+    """Resolve a project_id to its document working directory on disk."""
+    project = _resolve_project(project_id)
     if not project:
         return None
-    return Path(project["directory"])
+    return Path(project.get("cwd") or project["directory"])
+
+
+def _project_sidecar_dir(project_dir: Path) -> Path:
+    """Resolve the .hermes-project sidecar for a document working directory."""
+    local = project_dir / ".hermes-project"
+    if local.is_dir():
+        return local
+    try:
+        resolved = project_dir.resolve()
+        for project in _list_projects():
+            cwd = Path(project.get("cwd") or project.get("directory") or "")
+            if cwd.resolve() == resolved:
+                return Path(project.get("management_dir") or cwd) / ".hermes-project"
+    except Exception:
+        pass
+    return local
 
 
 def _safe_project_rel(project_dir: Path, rel: str) -> Path | None:
@@ -2915,23 +3028,36 @@ async def upload_project_files(
             errors.append({"filename": "(unknown)", "error": "Not a file"})
             continue
 
-        filename = field.filename or "unnamed"
+        raw_filename = field.filename or "unnamed"
+        filename = Path(raw_filename).name
+        if (
+            not filename
+            or filename in {".", ".."}
+            or "/" in raw_filename
+            or "\\" in raw_filename
+            or "\x00" in raw_filename
+        ):
+            errors.append({"filename": raw_filename, "error": "Invalid filename"})
+            continue
         # Read into memory to check size (FastAPI/Starlette streams to temp files
         # for large uploads, but we enforce a hard cap)
         content = await field.read()
         if len(content) > MAX_SIZE:
             errors.append({
-                "filename": filename,
+                "filename": raw_filename,
                 "error": f"File exceeds {MAX_SIZE // (1024*1024)} MB limit",
             })
             continue
 
-        dest = target_dir / filename
+        dest = (target_dir / filename).resolve()
+        if not dest.is_relative_to(project_dir.resolve()):
+            errors.append({"filename": raw_filename, "error": "Path traversal rejected"})
+            continue
         try:
             dest.write_bytes(content)
             uploaded.append({"name": filename, "size": len(content)})
         except OSError as e:
-            errors.append({"filename": filename, "error": str(e)})
+            errors.append({"filename": raw_filename, "error": str(e)})
 
     return {"uploaded": uploaded, "errors": errors}
 
@@ -3414,7 +3540,7 @@ import subprocess as _subprocess
 
 def _read_inventory(project_dir: Path) -> dict:
     """Read or initialise the project document inventory."""
-    inv_path = project_dir / _INVENTORY_FILE
+    inv_path = _project_sidecar_dir(project_dir) / "inventory.json"
     if inv_path.is_file():
         try:
             return json.loads(inv_path.read_text())
@@ -3425,7 +3551,7 @@ def _read_inventory(project_dir: Path) -> dict:
 
 def _write_inventory(project_dir: Path, inventory: dict):
     """Persist the project document inventory."""
-    inv_path = project_dir / _INVENTORY_FILE
+    inv_path = _project_sidecar_dir(project_dir) / "inventory.json"
     inv_path.parent.mkdir(parents=True, exist_ok=True)
     inv_path.write_text(json.dumps(inventory, indent=2, ensure_ascii=False))
 
@@ -3933,7 +4059,7 @@ _PHASES = [
 
 def _read_project_json(project_dir: Path, filename: str, default=None):
     """Read a JSON file from .hermes-project/, returning *default* on failure."""
-    path = project_dir / ".hermes-project" / filename
+    path = _project_sidecar_dir(project_dir) / filename
     try:
         return json.loads(path.read_text())
     except Exception:
@@ -3942,11 +4068,270 @@ def _read_project_json(project_dir: Path, filename: str, default=None):
 
 def _write_project_json(project_dir: Path, filename: str, data):
     """Atomically write a JSON file to .hermes-project/."""
-    path = project_dir / ".hermes-project" / filename
+    path = _project_sidecar_dir(project_dir) / filename
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False))
     tmp.replace(path)
+
+
+# ── Native legal workflows ─────────────────────────────────────────────────
+
+
+def _workflow_project_filters(project_id: str) -> tuple[str | None, str | None]:
+    project = _resolve_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    return (
+        str(project.get("id") or "") or None,
+        str(project.get("cwd") or project.get("directory") or "") or None,
+    )
+
+
+def _normalise_workflow_steps(raw_steps: list | None) -> list[dict]:
+    steps: list[dict] = []
+    for index, raw in enumerate(raw_steps or []):
+        if not isinstance(raw, dict):
+            continue
+        step_id = str(raw.get("id") or raw.get("step_key") or f"step-{index + 1}").strip()
+        if not step_id:
+            step_id = f"step-{index + 1}"
+        input_payload = raw.get("input") if isinstance(raw.get("input"), dict) else {}
+        for key in ("instructions", "x", "y"):
+            if key in raw and key not in input_payload:
+                input_payload[key] = raw.get(key)
+        steps.append({
+            "id": step_id,
+            "step_index": int(raw.get("step_index", index)),
+            "title": str(raw.get("title") or step_id),
+            "type": str(raw.get("type") or "manual"),
+            "role": str(raw.get("role") or "coordinator"),
+            "depends_on": raw.get("depends_on") if isinstance(raw.get("depends_on"), list) else [],
+            "input": input_payload,
+            "requires_approval": bool(raw.get("requires_approval")),
+        })
+    return steps
+
+
+def _workflow_step_prompt(workflow: dict, step: dict) -> str:
+    step_input = step.get("input") if isinstance(step.get("input"), dict) else {}
+    instructions = str(step_input.get("instructions") or workflow.get("instructions") or "").strip()
+    payload = {
+        "workflow_run_id": workflow.get("id"),
+        "step_id": step.get("id"),
+        "step_key": step.get("step_key"),
+        "title": step.get("title"),
+        "type": step.get("type"),
+        "role": step.get("role"),
+        "requires_approval": bool(step.get("requires_approval")),
+        "project_dir": workflow.get("project_dir"),
+        "document_path": workflow.get("document_path"),
+        "term_sheet_path": workflow.get("term_sheet_path"),
+        "input": step_input,
+    }
+    return f"""
+请执行以下原生法律 workflow step，并在完成后调用 legal_workflow(action="update_step") 回写状态和结构化结果。
+
+执行约束：
+1. 如果 requires_approval=true，先提交计划并等待确认，不得修改文档。
+2. 如果 type 是读取/分析类，只读取和产出结构化结果，不修改文档。
+3. 如果需要修改 Word，必须使用 lex_read 定位、lex_edit 修改、lex_read 读回验证。
+4. 发现或更正项目事实时，必须调用 project_facts 更新。
+5. 完成后把 status/result 写回 step_id，不要只在正文里总结。
+
+workflow step:
+{json.dumps(payload, ensure_ascii=False, indent=2)}
+
+用户补充要求：
+{instructions or "无"}
+""".strip()
+
+
+@app.get("/api/projects/{project_id}/workflows")
+async def list_project_workflows(project_id: str, limit: int = 20):
+    """List persistent legal workflows for a project."""
+    project_db_id, project_dir = _workflow_project_filters(project_id)
+    try:
+        from hermes_state import SessionDB
+        db = SessionDB()
+        try:
+            workflows = []
+            seen = set()
+            for kwargs in (
+                {"project_id": project_db_id, "project_dir": None},
+                {"project_id": None, "project_dir": project_dir},
+            ):
+                if not kwargs["project_id"] and not kwargs["project_dir"]:
+                    continue
+                for workflow in db.list_legal_workflows(limit=limit, **kwargs):
+                    wid = workflow.get("id")
+                    if wid in seen:
+                        continue
+                    seen.add(wid)
+                    workflows.append(workflow)
+            workflows.sort(key=lambda item: item.get("updated_at") or 0, reverse=True)
+            workflows = workflows[: max(1, int(limit or 20))]
+        finally:
+            db.close()
+        return {"project_id": project_id, "workflows": workflows}
+    except Exception as e:
+        _log.exception("GET project workflows failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/projects/{project_id}/workflows")
+async def create_project_workflow(project_id: str, request: Request):
+    """Create a persistent legal workflow plan from WebUI canvas nodes."""
+    project_db_id, project_dir = _workflow_project_filters(project_id)
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+
+    name = str(body.get("name") or "法律文书 workflow").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="name is required")
+    steps = _normalise_workflow_steps(body.get("steps") if isinstance(body.get("steps"), list) else [])
+    if not steps:
+        raise HTTPException(status_code=400, detail="steps are required")
+
+    try:
+        from hermes_state import SessionDB
+        db = SessionDB()
+        try:
+            run_id = db.create_legal_workflow(
+                name=name,
+                project_id=project_db_id,
+                project_dir=project_dir,
+                document_path=str(body.get("document_path") or "").strip() or None,
+                term_sheet_path=str(body.get("term_sheet_path") or "").strip() or None,
+                instructions=str(body.get("instructions") or "").strip() or None,
+                steps=steps,
+            )
+            workflow = db.get_legal_workflow(run_id)
+        finally:
+            db.close()
+        return {"ok": True, "workflow": workflow}
+    except Exception as e:
+        _log.exception("POST project workflow failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/workflows/{run_id}")
+async def get_workflow(run_id: str):
+    """Get a persistent legal workflow run and ordered steps."""
+    try:
+        from hermes_state import SessionDB
+        db = SessionDB()
+        try:
+            workflow = db.get_legal_workflow(run_id)
+        finally:
+            db.close()
+        if not workflow:
+            raise HTTPException(status_code=404, detail="Workflow not found")
+        return {"workflow": workflow}
+    except HTTPException:
+        raise
+    except Exception as e:
+        _log.exception("GET workflow failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.patch("/api/workflows/{run_id}")
+async def update_workflow_run(run_id: str, request: Request):
+    """Update workflow run metadata."""
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+    fields = {
+        key: body[key]
+        for key in ("name", "status", "document_path", "term_sheet_path", "instructions")
+        if key in body
+    }
+    try:
+        from hermes_state import SessionDB
+        db = SessionDB()
+        try:
+            ok = db.update_legal_workflow(run_id, **fields)
+            workflow = db.get_legal_workflow(run_id)
+        finally:
+            db.close()
+        if not ok or not workflow:
+            raise HTTPException(status_code=404, detail="Workflow not found")
+        return {"ok": True, "workflow": workflow}
+    except HTTPException:
+        raise
+    except Exception as e:
+        _log.exception("PATCH workflow failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.patch("/api/workflows/{run_id}/steps/{step_id}")
+async def update_workflow_step(run_id: str, step_id: str, request: Request):
+    """Update workflow step status/result/input from WebUI."""
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+    allowed = {
+        "title", "type", "role", "status", "depends_on", "input", "result",
+        "requires_approval", "started_at", "ended_at",
+    }
+    step = {key: body[key] for key in allowed if key in body}
+    try:
+        from hermes_state import SessionDB
+        db = SessionDB()
+        try:
+            workflow = db.get_legal_workflow(run_id)
+            if not workflow:
+                raise HTTPException(status_code=404, detail="Workflow not found")
+            if not any(str(item.get("id")) == step_id for item in workflow.get("steps", [])):
+                raise HTTPException(status_code=404, detail="Workflow step not found")
+            db.update_legal_workflow_step(step_id, **step)
+            workflow = db.get_legal_workflow(run_id)
+        finally:
+            db.close()
+        return {"ok": True, "workflow": workflow}
+    except HTTPException:
+        raise
+    except Exception as e:
+        _log.exception("PATCH workflow step failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/workflows/{run_id}/steps/{step_id}/run")
+async def prepare_workflow_step_run(run_id: str, step_id: str):
+    """Prepare a selected workflow step for execution in the active Native Chat."""
+    try:
+        from hermes_state import SessionDB
+        db = SessionDB()
+        try:
+            workflow = db.get_legal_workflow(run_id)
+            if not workflow:
+                raise HTTPException(status_code=404, detail="Workflow not found")
+            step = next(
+                (item for item in workflow.get("steps", []) if str(item.get("id")) == step_id),
+                None,
+            )
+            if not step:
+                raise HTTPException(status_code=404, detail="Workflow step not found")
+            db.update_legal_workflow_step(step_id, status="running", started_at=time.time())
+            workflow = db.get_legal_workflow(run_id)
+            step = next(item for item in workflow.get("steps", []) if str(item.get("id")) == step_id)
+        finally:
+            db.close()
+        return {
+            "ok": True,
+            "workflow": workflow,
+            "step": step,
+            "prompt": _workflow_step_prompt(workflow, step),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        _log.exception("POST workflow step run failed")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # ── Dashboard (aggregated summary) ─────────────────────────────────────────

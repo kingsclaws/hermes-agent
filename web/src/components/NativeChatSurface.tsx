@@ -40,6 +40,12 @@ export function dispatchWorkflowPrompt(prompt: string) {
   window.dispatchEvent(new CustomEvent(WORKFLOW_PROMPT_EVENT, { detail: prompt }));
 }
 
+type ResumeResult = {
+  session_id: string;
+  resumed?: string;
+  messages?: unknown[];
+};
+
 function textFromMessage(raw: unknown): string {
   if (!raw || typeof raw !== "object") return "";
   const content = (raw as { content?: unknown }).content;
@@ -63,7 +69,30 @@ function roleFromMessage(raw: unknown): ChatMessage["role"] | null {
   return role === "user" || role === "assistant" ? role : null;
 }
 
-export function NativeChatSurface() {
+function messagesFromResume(result: ResumeResult, fallback: string): ChatMessage[] {
+  return [
+    {
+      id: `resume-${Date.now()}`,
+      role: "status",
+      text: `已恢复会话：${result.resumed ?? fallback}`,
+    },
+    ...(result.messages ?? [])
+      .map((message, index) => {
+        const role = roleFromMessage(message);
+        const text = textFromMessage(message);
+        return role && text
+          ? { id: `history-${index}`, role, text }
+          : null;
+      })
+      .filter((message): message is ChatMessage => message !== null),
+  ];
+}
+
+export function NativeChatSurface({
+  resumeTarget,
+}: {
+  resumeTarget?: string | null;
+}) {
   const gw = useMemo(() => new GatewayClient(), []);
   const [conn, setConn] = useState<ConnectionState>("idle");
   const [sessionId, setSessionId] = useState<string | null>(null);
@@ -73,6 +102,7 @@ export function NativeChatSurface() {
   const [thinkingBlocks, setThinkingBlocks] = useState<ThinkingBlockData[]>([]);
   const [input, setInput] = useState("");
   const [running, setRunning] = useState(false);
+  const [stopping, setStopping] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const scrollRefNarrow = useRef<HTMLDivElement | null>(null);
@@ -89,6 +119,7 @@ export function NativeChatSurface() {
       setMessages((prev) => [...prev, { id, role: "assistant", text: "" }]);
       setThinkingBlocks([]);
       setRunning(true);
+      setStopping(false);
     });
     const offDelta = gw.on<{ text?: string; rendered?: string }>(
       "message.delta",
@@ -105,6 +136,7 @@ export function NativeChatSurface() {
     );
     const offComplete = gw.on("message.complete", () => {
       setRunning(false);
+      setStopping(false);
       assistantIdRef.current = null;
       // Mark active thinking block as complete
       setThinkingBlocks((prev) =>
@@ -114,6 +146,7 @@ export function NativeChatSurface() {
     const offError = gw.on<{ message?: string }>("error", (ev) => {
       setError(ev.payload?.message ?? "Agent error");
       setRunning(false);
+      setStopping(false);
     });
 
     // Thinking / Reasoning events
@@ -285,10 +318,26 @@ export function NativeChatSurface() {
     gw.connect()
       .then(() => {
         if (cancelled) return null;
+        if (resumeTarget) {
+          return gw.request<ResumeResult>("session.resume", {
+            session_id: resumeTarget,
+          });
+        }
         return gw.request<{ session_id: string }>("session.create", {});
       })
       .then((created) => {
-        if (!cancelled && created?.session_id) setSessionId(created.session_id);
+        if (cancelled || !created?.session_id) return;
+        setSessionId(created.session_id);
+        if ("messages" in created) {
+          const resumed = created as ResumeResult;
+          setMessages(messagesFromResume(
+            {
+              ...resumed,
+              messages: Array.isArray(resumed.messages) ? resumed.messages : [],
+            },
+            resumeTarget ?? created.session_id,
+          ));
+        }
       })
       .catch((e: Error) => {
         if (!cancelled) setError(e.message);
@@ -311,7 +360,7 @@ export function NativeChatSurface() {
       offSubagentComplete();
       gw.close();
     };
-  }, [gw]);
+  }, [gw, resumeTarget]);
 
   useEffect(() => {
     const el = scrollRef.current ?? scrollRefNarrow.current;
@@ -357,22 +406,7 @@ export function NativeChatSurface() {
               messages?: unknown[];
             }>("session.resume", { session_id: arg });
             setSessionId(resumed.session_id);
-            setMessages([
-              {
-                id: `resume-${Date.now()}`,
-                role: "status",
-                text: `已恢复会话：${resumed.resumed ?? arg}`,
-              },
-              ...(resumed.messages ?? [])
-                .map((message, index) => {
-                  const role = roleFromMessage(message);
-                  const text = textFromMessage(message);
-                  return role && text
-                    ? { id: `history-${index}`, role, text }
-                    : null;
-                })
-                .filter((message): message is ChatMessage => message !== null),
-            ]);
+            setMessages(messagesFromResume(resumed, arg));
             return;
           } catch (e) {
             setMessages((prev) => [
@@ -425,8 +459,9 @@ export function NativeChatSurface() {
   );
 
   const interrupt = useCallback(async () => {
-    if (!sessionId || !running) return;
+    if (!sessionId || !running || stopping) return;
     try {
+      setStopping(true);
       await gw.request(
         "session.interrupt",
         { session_id: sessionId },
@@ -441,9 +476,10 @@ export function NativeChatSurface() {
         },
       ]);
     } catch (e) {
+      setStopping(false);
       setError(e instanceof Error ? e.message : String(e));
     }
-  }, [gw, running, sessionId]);
+  }, [gw, running, sessionId, stopping]);
 
   const interruptSubagent = useCallback(
     async (subagentId: string) => {
@@ -488,6 +524,11 @@ export function NativeChatSurface() {
             <div className="truncate text-sm text-muted-foreground">
               JSON-RPC session · tools and workflow rendered by Web UI
             </div>
+            {sessionId && (
+              <div className="hidden truncate font-mono-ui text-[0.65rem] text-muted-foreground/70 sm:block">
+                {sessionId}
+              </div>
+            )}
             <ContextIndicator gw={gw} />
           </div>
         </div>
@@ -620,8 +661,10 @@ export function NativeChatSurface() {
         >
         <ExecutionInspector
           running={running}
+          stopping={stopping}
           tools={tools}
           subagents={subagents}
+          onInterruptTurn={interrupt}
           onInterruptSubagent={interruptSubagent}
         />
         </ResizablePanel>
@@ -632,8 +675,10 @@ export function NativeChatSurface() {
         <ExecutionInspector
           compact
           running={running}
+          stopping={stopping}
           tools={tools}
           subagents={subagents}
+          onInterruptTurn={interrupt}
           onInterruptSubagent={interruptSubagent}
         />
       </div>
@@ -670,7 +715,9 @@ export function NativeChatSurface() {
         <Button
           type={running ? "button" : "submit"}
           onClick={running ? interrupt : undefined}
-          disabled={!sessionId || (!running && !input.trim())}
+          disabled={!sessionId || stopping || (!running && !input.trim())}
+          title={running ? "Stop current turn" : "Send"}
+          aria-label={running ? "Stop current turn" : "Send"}
           className="self-end px-3"
         >
           {running ? (
@@ -696,14 +743,18 @@ export function NativeChatSurface() {
 function ExecutionInspector({
   compact,
   running,
+  stopping,
   tools,
   subagents,
+  onInterruptTurn,
   onInterruptSubagent,
 }: {
   compact?: boolean;
   running: boolean;
+  stopping: boolean;
   tools: ToolEntry[];
   subagents: SubagentLine[];
+  onInterruptTurn: () => void;
   onInterruptSubagent: (subagentId: string) => void;
 }) {
   const runningTools = tools.filter(
@@ -729,10 +780,21 @@ function ExecutionInspector({
             Execution
           </div>
           <div className="text-[0.65rem] text-muted-foreground">
-            {running ? "turn running" : "idle"} · {runningSubagents} agents ·{" "}
+            {stopping ? "stopping" : running ? "turn running" : "idle"} · {runningSubagents} agents ·{" "}
             {runningTools} tools
           </div>
         </div>
+        {running && (
+          <Button
+            type="button"
+            size="sm"
+            onClick={onInterruptTurn}
+            disabled={stopping}
+            className="h-7 shrink-0 px-2 text-[0.7rem]"
+          >
+            {stopping ? "stopping" : "stop turn"}
+          </Button>
+        )}
       </div>
 
       {subagents.length === 0 && tools.length === 0 ? (

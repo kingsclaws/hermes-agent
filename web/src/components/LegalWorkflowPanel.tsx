@@ -1,6 +1,7 @@
 import { Badge } from "@nous-research/ui/ui/components/badge";
 import { Button } from "@nous-research/ui/ui/components/button";
 import { Card } from "@nous-research/ui/ui/components/card";
+import { api, type LegalWorkflowRun, type LegalWorkflowStep, type ProjectInfo } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import {
   CheckSquare,
@@ -16,7 +17,7 @@ import {
   Users,
 } from "lucide-react";
 import type { PointerEvent, ReactNode } from "react";
-import { useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 interface LegalWorkflowPanelProps {
   cwd?: string;
@@ -37,6 +38,8 @@ type WorkflowAtom = {
   instructions?: string;
   requires_approval?: boolean;
   role: string;
+  status?: string;
+  stepId?: string;
   title: string;
   type: string;
   x: number;
@@ -76,6 +79,11 @@ export function LegalWorkflowPanel({
   const [workflowAtoms, setWorkflowAtoms] = useState<WorkflowAtom[]>(DEFAULT_WORKFLOW_ATOMS);
   const [selectedAtomIndex, setSelectedAtomIndex] = useState(0);
   const [connectFrom, setConnectFrom] = useState<string | null>(null);
+  const [projectId, setProjectId] = useState<string | null>(null);
+  const [workflows, setWorkflows] = useState<LegalWorkflowRun[]>([]);
+  const [currentWorkflow, setCurrentWorkflow] = useState<LegalWorkflowRun | null>(null);
+  const [workflowBusy, setWorkflowBusy] = useState(false);
+  const [workflowError, setWorkflowError] = useState<string | null>(null);
   const [dragging, setDragging] = useState<{
     index: number;
     offsetX: number;
@@ -91,14 +99,189 @@ export function LegalWorkflowPanel({
     () => reviewTypes.map((v) => `"${v}"`).join(", "),
     [reviewTypes],
   );
-  const workflowAtomText = useMemo(
-    () => JSON.stringify(workflowAtoms, null, 2),
-    [workflowAtoms],
-  );
-
   const run = (prompt: string) => {
     if (disabled) return;
     onRun(prompt.trim());
+  };
+
+  const atomFromStep = (step: LegalWorkflowStep, index: number): WorkflowAtom => {
+    const input = step.input ?? {};
+    return {
+      id: step.step_key || step.id || `step-${index + 1}`,
+      stepId: step.id,
+      title: step.title,
+      type: step.type,
+      role: step.role,
+      status: step.status,
+      depends_on: step.depends_on ?? [],
+      requires_approval: !!step.requires_approval,
+      instructions: typeof input.instructions === "string" ? input.instructions : "",
+      x: typeof input.x === "number" ? input.x : 24 + (index % 2) * 156,
+      y: typeof input.y === "number" ? input.y : 24 + Math.floor(index / 2) * 82,
+    };
+  };
+
+  const loadProjectWorkflows = useCallback(async (
+    targetProjectId: string,
+    autoSelect = false,
+  ) => {
+    setWorkflowError(null);
+    const res = await api.fetchProjectWorkflows(targetProjectId, 20);
+    setWorkflows(res.workflows ?? []);
+    if (autoSelect && res.workflows?.[0]) {
+      const workflow = await api.getWorkflow(res.workflows[0].id);
+      setCurrentWorkflow(workflow.workflow);
+      setWorkflowAtoms((workflow.workflow.steps ?? []).map(atomFromStep));
+    }
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function resolveProject() {
+      if (!effectiveProjectDir) return;
+      try {
+        const res = await api.fetchProjects();
+        if (cancelled) return;
+        const normalise = (value?: string) => (value || "").replace(/\/+$/, "");
+        const target = normalise(effectiveProjectDir);
+        const matched = (res.projects ?? []).find((project: ProjectInfo) =>
+          [project.id, project.name, project.cwd, project.directory]
+            .map(normalise)
+            .includes(target),
+        );
+        if (matched?.id) {
+          setProjectId(matched.id);
+          void loadProjectWorkflows(matched.id, true);
+        }
+      } catch (e) {
+        if (!cancelled) setWorkflowError(e instanceof Error ? e.message : String(e));
+      }
+    }
+    void resolveProject();
+    return () => {
+      cancelled = true;
+    };
+  }, [effectiveProjectDir, loadProjectWorkflows]);
+
+  const selectWorkflow = async (runId: string) => {
+    if (!runId) {
+      setCurrentWorkflow(null);
+      setWorkflowAtoms(DEFAULT_WORKFLOW_ATOMS);
+      return;
+    }
+    setWorkflowBusy(true);
+    setWorkflowError(null);
+    try {
+      const res = await api.getWorkflow(runId);
+      setCurrentWorkflow(res.workflow);
+      setWorkflowAtoms((res.workflow.steps ?? []).map(atomFromStep));
+      setSelectedAtomIndex(0);
+    } catch (e) {
+      setWorkflowError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setWorkflowBusy(false);
+    }
+  };
+
+  const createPersistentWorkflow = async () => {
+    if (!projectId) {
+      setWorkflowError("Project is not registered in DB yet; register/select the project first.");
+      return;
+    }
+    setWorkflowBusy(true);
+    setWorkflowError(null);
+    try {
+      const res = await api.createProjectWorkflow(projectId, {
+        name: "法律文书 workflow",
+        document_path: q(documentPath),
+        term_sheet_path: q(termSheetPath),
+        instructions: q(instructions),
+        steps: workflowAtoms.map((atom) => ({
+          id: atom.id,
+          title: atom.title,
+          type: atom.type,
+          role: atom.role,
+          depends_on: atom.depends_on ?? [],
+          instructions: atom.instructions ?? "",
+          requires_approval: !!atom.requires_approval,
+          x: atom.x,
+          y: atom.y,
+        })),
+      });
+      setCurrentWorkflow(res.workflow);
+      setWorkflowAtoms((res.workflow.steps ?? []).map(atomFromStep));
+      if (projectId) await loadProjectWorkflows(projectId);
+    } catch (e) {
+      setWorkflowError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setWorkflowBusy(false);
+    }
+  };
+
+  const runSelectedAtom = async () => {
+    const atom = selectedAtom;
+    if (!atom) return;
+    if (currentWorkflow?.id && atom.stepId) {
+      setWorkflowBusy(true);
+      setWorkflowError(null);
+      try {
+        const res = await api.prepareWorkflowStepRun(currentWorkflow.id, atom.stepId);
+        setCurrentWorkflow(res.workflow);
+        setWorkflowAtoms((res.workflow.steps ?? []).map(atomFromStep));
+        run(res.prompt);
+        return;
+      } catch (e) {
+        setWorkflowError(e instanceof Error ? e.message : String(e));
+      } finally {
+        setWorkflowBusy(false);
+      }
+    }
+    run(`
+请运行 UI 选中的 workflow 原子，不要自由发挥。
+项目目录：${effectiveProjectDir || "使用当前 active project"}
+主文档：${q(documentPath) || "按 workflow 上下文"}
+TS/支持文件：${q(termSheetPath) || "无"}
+选中原子：
+${JSON.stringify(atom, null, 2)}
+要求：
+1. 如果该原子 requires_approval=true，先汇报计划并等待确认，不得修改文档。
+2. 如果 type=lex_read/source_read/analysis，只读取和产出结构化结果，不修改文档。
+3. 如果 type=lex_edit，必须先 lex_read 定位，再 lex_edit，最后验证。
+4. 如已有 workflow run_id，请用 legal_workflow(action="update_step") 回写状态和结果。
+    `);
+  };
+
+  const saveSelectedAtom = async () => {
+    const atom = selectedAtom;
+    if (!currentWorkflow?.id || !atom?.stepId) {
+      setWorkflowError("Create or select a persistent workflow before saving a step.");
+      return;
+    }
+    setWorkflowBusy(true);
+    setWorkflowError(null);
+    try {
+      const res = await api.updateWorkflowStep(currentWorkflow.id, atom.stepId, {
+        title: atom.title,
+        type: atom.type,
+        role: atom.role,
+        depends_on: atom.depends_on ?? [],
+        requires_approval: !!atom.requires_approval,
+        input: {
+          ...(currentWorkflow.steps ?? [])
+            .find((step) => step.id === atom.stepId)
+            ?.input,
+          instructions: atom.instructions ?? "",
+          x: atom.x,
+          y: atom.y,
+        },
+      });
+      setCurrentWorkflow(res.workflow);
+      setWorkflowAtoms((res.workflow.steps ?? []).map(atomFromStep));
+    } catch (e) {
+      setWorkflowError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setWorkflowBusy(false);
+    }
   };
 
   const toggleReview = (type: string) => {
@@ -211,8 +394,62 @@ export function LegalWorkflowPanel({
               "w-full rounded border border-current/15 bg-black/10 px-2 py-1.5",
               "text-xs outline-none focus:border-primary/60",
             )}
-          />
+            />
         </label>
+
+        <div className="space-y-1 rounded border border-current/10 bg-black/5 p-2">
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-[0.65rem] uppercase tracking-wider text-muted-foreground">
+              persistent workflow
+            </span>
+            <Badge tone={projectId ? "success" : "secondary"}>
+              {projectId ? "db linked" : "not registered"}
+            </Badge>
+          </div>
+          <select
+            value={currentWorkflow?.id ?? ""}
+            disabled={!projectId || workflowBusy}
+            onChange={(e) => void selectWorkflow(e.target.value)}
+            className="w-full rounded border border-current/15 bg-black/10 px-2 py-1.5 text-xs outline-none focus:border-primary/60 disabled:opacity-50"
+          >
+            <option value="">本地草稿 canvas</option>
+            {workflows.map((workflow) => (
+              <option key={workflow.id} value={workflow.id}>
+                {workflow.name} · {workflow.status} · {workflow.id}
+              </option>
+            ))}
+          </select>
+          <div className="flex gap-1">
+            <button
+              type="button"
+              disabled={!projectId || workflowBusy || workflowAtoms.length === 0}
+              onClick={() => void createPersistentWorkflow()}
+              className="rounded border border-primary/30 px-2 py-0.5 text-[0.65rem] text-primary hover:bg-primary/10 disabled:opacity-50"
+            >
+              {currentWorkflow ? "另存为新计划" : "创建持久计划"}
+            </button>
+            {projectId && (
+              <button
+                type="button"
+                disabled={workflowBusy}
+                onClick={() => void loadProjectWorkflows(projectId)}
+                className="rounded border border-current/15 px-2 py-0.5 text-[0.65rem] text-muted-foreground hover:text-foreground disabled:opacity-50"
+              >
+                刷新
+              </button>
+            )}
+          </div>
+          {currentWorkflow && (
+            <div className="truncate font-mono-ui text-[0.65rem] text-muted-foreground">
+              run_id: {currentWorkflow.id}
+            </div>
+          )}
+          {workflowError && (
+            <div className="rounded border border-destructive/30 bg-destructive/5 px-2 py-1 text-[0.65rem] text-destructive">
+              {workflowError}
+            </div>
+          )}
+        </div>
 
         <div className="space-y-1 rounded border border-current/10 bg-black/5 p-2">
           <div className="flex items-center justify-between gap-2">
@@ -280,6 +517,9 @@ export function LegalWorkflowPanel({
                     ? "border-primary/70 ring-1 ring-primary/30"
                     : "border-current/15 hover:border-current/30",
                   connectFrom === atom.id && "border-warning/70 ring-1 ring-warning/40",
+                  atom.status === "running" && "border-warning/70",
+                  atom.status === "done" && "border-success/60",
+                  atom.status === "error" && "border-destructive/70",
                 )}
                 style={{ left: atom.x, top: atom.y }}
               >
@@ -289,6 +529,7 @@ export function LegalWorkflowPanel({
                     <div className="truncate text-[0.7rem] font-medium">{atom.title}</div>
                     <div className="truncate text-[0.6rem] text-muted-foreground">
                       {atom.role} · {atom.type}
+                      {atom.status ? ` · ${atom.status}` : ""}
                     </div>
                   </div>
                 </div>
@@ -304,25 +545,21 @@ export function LegalWorkflowPanel({
                 <button
                   type="button"
                   disabled={disabled}
-                  onClick={() =>
-                    run(`
-请运行 UI 选中的 workflow 原子，不要自由发挥。
-项目目录：${effectiveProjectDir || "使用当前 active project"}
-主文档：${q(documentPath) || "按 workflow 上下文"}
-TS/支持文件：${q(termSheetPath) || "无"}
-选中原子：
-${JSON.stringify(selectedAtom, null, 2)}
-要求：
-1. 如果该原子 requires_approval=true，先汇报计划并等待确认，不得修改文档。
-2. 如果 type=lex_read/source_read/analysis，只读取和产出结构化结果，不修改文档。
-3. 如果 type=lex_edit，必须先 lex_read 定位，再 lex_edit，最后验证。
-4. 如已有 workflow run_id，请用 legal_workflow(action="update_step") 回写状态和结果。
-                    `)
-                  }
+                  onClick={() => void runSelectedAtom()}
                   className="rounded border border-primary/30 px-2 py-0.5 text-[0.65rem] text-primary hover:bg-primary/10 disabled:opacity-50"
                 >
-                  运行选中
+                  {currentWorkflow ? "运行选中 step" : "运行选中草稿"}
                 </button>
+                {currentWorkflow && selectedAtom.stepId && (
+                  <button
+                    type="button"
+                    disabled={workflowBusy}
+                    onClick={() => void saveSelectedAtom()}
+                    className="rounded border border-current/15 px-2 py-0.5 text-[0.65rem] text-muted-foreground hover:text-foreground disabled:opacity-50"
+                  >
+                    保存选中
+                  </button>
+                )}
               </div>
               <input
                 value={selectedAtom.title}
@@ -524,23 +761,7 @@ ${JSON.stringify(selectedAtom, null, 2)}
             disabled={!canRunDocument}
             icon={<PenLine />}
             label="创建计划"
-            onClick={() =>
-              run(`
-请先创建法律文书 workflow 计划，不要直接修改文件。
-项目目录：${effectiveProjectDir || "使用当前 active project"}
-主文档：${q(documentPath)}
-TS/支持文件：${q(termSheetPath) || "无"}
-指令：${q(instructions) || "按项目上下文和用户要求处理。"}
-要求：
-1. 调用 legal_orchestrate(task_type="plan") 或 legal_workflow(action="create_plan")。
-   如果直接调用 legal_workflow，必须把下方 UI 指定 workflow 原子作为 steps 参数传入。
-2. workflow 必须包含：通读模板、读取 TS、条款地图、TS-合同矩阵、修订计划、人审确认、执行修订、交叉引用、格式复核、交付检查。
-3. 在用户确认修订计划前，禁止调用 lex_edit 修改主文档。
-4. 创建后展示 workflow run_id 和每个 step_id，等待 Master 选择、修改或确认。
-5. UI 指定的 workflow 原子如下，优先按该顺序建计划：
-${workflowAtomText}
-              `)
-            }
+            onClick={() => void createPersistentWorkflow()}
           />
           <WorkflowButton
             disabled={!canRunDocument}

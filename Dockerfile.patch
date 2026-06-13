@@ -20,6 +20,9 @@ RUN set -eux; \
     for f in run_agent.py model_tools.py toolsets.py hermes_state.py hermes_constants.py cli.py; do \
       if [ -f "/tmp/patch_src/$f" ]; then cp "/tmp/patch_src/$f" "/opt/lex-hermes/$f"; fi; \
     done; \
+    mkdir -p /opt/hermes/docker; \
+    cp /tmp/patch_src/docker/main-wrapper.sh /opt/hermes/docker/main-wrapper.sh; \
+    chmod +x /opt/hermes/docker/main-wrapper.sh; \
     cp /tmp/patch_src/start-lex-hermes.sh /usr/local/bin/; \
     cp /tmp/patch_src/start-lex-hermes.sh /opt/lex-hermes/; \
     cp /tmp/patch_src/SOUL.md /root/.hermes/; \

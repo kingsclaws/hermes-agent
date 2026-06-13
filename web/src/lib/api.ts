@@ -522,6 +522,50 @@ export const api = {
       { method: "DELETE" },
     ),
 
+  // Project legal workflows
+  fetchProjectWorkflows: (projectId: string, limit?: number) => {
+    const qs = limit ? `?limit=${encodeURIComponent(String(limit))}` : "";
+    return fetchJSON<WorkflowListResponse>(
+      `/api/projects/${encodeURIComponent(projectId)}/workflows${qs}`,
+    );
+  },
+  createProjectWorkflow: (projectId: string, body: CreateWorkflowRequest) =>
+    fetchJSON<WorkflowResponse>(
+      `/api/projects/${encodeURIComponent(projectId)}/workflows`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      },
+    ),
+  getWorkflow: (runId: string) =>
+    fetchJSON<WorkflowResponse>(
+      `/api/workflows/${encodeURIComponent(runId)}`,
+    ),
+  updateWorkflow: (runId: string, body: Partial<LegalWorkflowRun>) =>
+    fetchJSON<WorkflowResponse>(
+      `/api/workflows/${encodeURIComponent(runId)}`,
+      {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      },
+    ),
+  updateWorkflowStep: (runId: string, stepId: string, body: Partial<LegalWorkflowStep>) =>
+    fetchJSON<WorkflowResponse>(
+      `/api/workflows/${encodeURIComponent(runId)}/steps/${encodeURIComponent(stepId)}`,
+      {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      },
+    ),
+  prepareWorkflowStepRun: (runId: string, stepId: string) =>
+    fetchJSON<WorkflowStepRunResponse>(
+      `/api/workflows/${encodeURIComponent(runId)}/steps/${encodeURIComponent(stepId)}/run`,
+      { method: "POST" },
+    ),
+
   // Project files
   fetchProjectFiles: (projectId: string, path?: string) => {
     const qs = path ? `?path=${encodeURIComponent(path)}` : "";
@@ -554,25 +598,44 @@ export const api = {
     }
     return res.json();
   },
-  downloadProjectFile: (projectId: string, path: string) => {
+  downloadProjectFile: async (projectId: string, path: string): Promise<void> => {
     const qs = `?path=${encodeURIComponent(path)}`;
-    // Navigate the browser to the download endpoint — triggers a file save dialog.
-    // Construct the full URL manually so the browser handles the download natively.
-    const token = window.__HERMES_SESSION_TOKEN__;
     const url = `${BASE}/api/projects/${encodeURIComponent(projectId)}/files/download${qs}`;
-    if (token) {
-      // Use a hidden anchor with the session token as a query param so the
-      // browser's download manager can follow it.
-      const sep = url.includes("?") ? "&" : "?";
+    const headers = new Headers();
+    try {
+      const token = await getSessionToken();
+      if (token) {
+        headers.set(SESSION_HEADER, token);
+      }
+    } catch {
+      // Gated mode authenticates with cookies; loopback mode will fail below
+      // if the injected header token is absent.
+    }
+
+    const res = await fetch(url, { headers, credentials: "include" });
+    if (!res.ok) {
+      const text = await res.text().catch(() => res.statusText);
+      throw new Error(`${res.status}: ${text}`);
+    }
+    const blob = await res.blob();
+    const disposition = res.headers.get("content-disposition") ?? "";
+    const match =
+      /filename\*=UTF-8''([^;]+)/i.exec(disposition) ??
+      /filename="?([^";]+)"?/i.exec(disposition);
+    const filename = match?.[1]
+      ? decodeURIComponent(match[1])
+      : path.split(/[\\/]/).pop() || "download";
+
+    const objectUrl = URL.createObjectURL(blob);
+    try {
       const anchor = document.createElement("a");
-      anchor.href = `${url}${sep}token=${encodeURIComponent(token)}`;
-      anchor.download = "";
+      anchor.href = objectUrl;
+      anchor.download = filename;
+      document.body.appendChild(anchor);
       anchor.click();
-    } else {
-      const anchor = document.createElement("a");
-      anchor.href = url;
-      anchor.download = "";
-      anchor.click();
+      anchor.remove();
+    } finally {
+      URL.revokeObjectURL(objectUrl);
     }
   },
   deleteProjectFile: (projectId: string, path: string) => {
@@ -879,6 +942,9 @@ export interface ProjectInfo {
   client?: string;
   goal?: string;
   directory: string;
+  cwd?: string;
+  management_dir?: string;
+  status?: string;
   created?: string;
   doc_count?: number;
 }
@@ -1259,6 +1325,77 @@ export interface TaskEntry {
 export interface TasksResponse {
   project_id: string;
   tasks: TaskEntry[];
+}
+
+// ── Legal workflow types ────────────────────────────────────────────────────
+
+export interface LegalWorkflowStep {
+  id: string;
+  run_id?: string;
+  step_key?: string;
+  step_index?: number;
+  title: string;
+  type: string;
+  role: string;
+  status: string;
+  depends_on?: string[];
+  input?: Record<string, unknown>;
+  result?: unknown;
+  requires_approval?: boolean;
+  started_at?: number | null;
+  ended_at?: number | null;
+  updated_at?: number | null;
+}
+
+export interface LegalWorkflowRun {
+  id: string;
+  name: string;
+  project_id?: string | null;
+  project_dir?: string | null;
+  document_path?: string | null;
+  term_sheet_path?: string | null;
+  instructions?: string | null;
+  status: string;
+  created_by_session_id?: string | null;
+  created_at?: number | null;
+  updated_at?: number | null;
+  steps?: LegalWorkflowStep[];
+}
+
+export interface WorkflowListResponse {
+  project_id: string;
+  workflows: LegalWorkflowRun[];
+}
+
+export interface WorkflowResponse {
+  ok?: boolean;
+  workflow: LegalWorkflowRun;
+}
+
+export interface CreateWorkflowRequest {
+  name: string;
+  document_path?: string;
+  term_sheet_path?: string;
+  instructions?: string;
+  steps: Array<{
+    id: string;
+    title: string;
+    type: string;
+    role: string;
+    depends_on?: string[];
+    instructions?: string;
+    requires_approval?: boolean;
+    x?: number;
+    y?: number;
+    input?: Record<string, unknown>;
+  }>;
+}
+
+export interface WorkflowStepRunResponse {
+  ok: boolean;
+  workflow: LegalWorkflowRun;
+  step: LegalWorkflowStep;
+  prompt: string;
 }
 
 export interface PaginatedSessions {

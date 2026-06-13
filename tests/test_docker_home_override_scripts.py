@@ -5,6 +5,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DASHBOARD_RUN = REPO_ROOT / "docker" / "s6-rc.d" / "dashboard" / "run"
+MAIN_WRAPPER = REPO_ROOT / "docker" / "main-wrapper.sh"
 
 
 def test_dashboard_run_resets_home_before_dropping_privileges() -> None:
@@ -12,7 +13,8 @@ def test_dashboard_run_resets_home_before_dropping_privileges() -> None:
 
     assert "#!/command/with-contenv sh" in text
     assert "export HOME=/opt/data" in text
-    assert "exec s6-setuidgid hermes hermes dashboard" in text
+    assert 'runner="s6-setuidgid hermes"' in text
+    assert "exec $runner hermes dashboard" in text
 
 
 def test_dashboard_run_does_not_derive_insecure_from_bind_host() -> None:
@@ -46,3 +48,13 @@ def test_dashboard_run_does_not_derive_insecure_from_bind_host() -> None:
         assert truthy in text, (
             f"HERMES_DASHBOARD_INSECURE should accept truthy value {truthy!r}"
         )
+
+
+def test_main_wrapper_keeps_detached_dashboard_container_alive() -> None:
+    """No-arg detached containers must not run interactive Hermes and exit."""
+    text = MAIN_WRAPPER.read_text(encoding="utf-8")
+
+    assert "if [ $# -eq 0 ]; then" in text
+    assert '_truthy "${HERMES_DASHBOARD:-}" || [ ! -t 0 ]' in text
+    assert "exec sleep infinity" in text
+    assert "exec $runner hermes" in text

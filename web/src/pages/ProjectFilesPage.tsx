@@ -261,9 +261,13 @@ export default function ProjectFilesPage() {
     }
   };
 
-  const handleDownload = (file: { path: string }) => {
+  const handleDownload = async (file: { path: string }) => {
     if (!projectId) return;
-    api.downloadProjectFile(projectId, file.path);
+    try {
+      await api.downloadProjectFile(projectId, file.path);
+    } catch (e: any) {
+      showToast(e?.message ?? "Download failed", "error");
+    }
   };
 
   const handleDragOver = (e: React.DragEvent) => {
@@ -403,7 +407,7 @@ export default function ProjectFilesPage() {
           defaultSize={detailPath ? loadPanelSize("files-list") : 100}
           minSize={40}
         >
-        <div className="flex-1 min-w-0 flex flex-col gap-1">
+        <div className="hermes-desktop-pane flex-1 min-w-0 flex flex-col gap-1 overflow-hidden">
           {loading ? (
             <div className="flex items-center justify-center py-24">
               <Spinner className="text-2xl text-primary" />
@@ -545,7 +549,7 @@ export default function ProjectFilesPage() {
               minSize={20}
               maxSize={50}
             >
-            <div className="sticky top-0 h-[calc(100vh-16rem)]">
+            <div className="hermes-desktop-pane sticky top-0 h-[calc(100vh-16rem)] overflow-hidden">
               <FileDetailPanel
                 projectId={projectId}
                 filePath={detailPath}

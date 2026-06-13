@@ -40,8 +40,6 @@ import {
 } from "@/components/NativeChatSurface";
 import { usePageHeader } from "@/contexts/usePageHeader";
 import { useI18n } from "@/i18n";
-import { ChatTabBar } from "@/components/ChatTabBar";
-import { useChatTabs } from "@/contexts/ChatTabContext";
 import { api } from "@/lib/api";
 import { PluginSlot } from "@/plugins";
 
@@ -116,15 +114,6 @@ function terminalLineHeightForWidth(layoutWidthPx: number): number {
 }
 
 export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
-  const { tabs, addTab } = useChatTabs();
-
-  // Ensure at least one tab exists
-  useEffect(() => {
-    if (tabs.length === 0) {
-      addTab({ title: "Chat", sessionId: null, type: "terminal" });
-    }
-  }, [tabs.length, addTab]);
-
   const hostRef = useRef<HTMLDivElement | null>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
@@ -309,6 +298,8 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
   }, [chatMode]);
 
   useEffect(() => {
+    if (chatMode !== "terminal" || !isActive) return;
+
     const host = hostRef.current;
     if (!host) return;
 
@@ -707,7 +698,7 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
         copyResetRef.current = null;
       }
     };
-  }, [channel, resumeParam]);
+  }, [channel, resumeParam, chatMode, isActive]);
 
   // When the user returns to the chat tab (isActive: false → true), the
   // terminal host just transitioned from display:none to display:flex.
@@ -726,7 +717,7 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
   // tabs, we must not yank focus away from wherever they left it when
   // they come back — that's a surprise and an a11y foot-gun.
   useEffect(() => {
-    if (!isActive) return;
+    if (!isActive || chatMode !== "terminal") return;
     let raf1 = 0;
     let raf2 = 0;
     raf1 = requestAnimationFrame(() => {
@@ -752,7 +743,7 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
       if (raf1) cancelAnimationFrame(raf1);
       if (raf2) cancelAnimationFrame(raf2);
     };
-  }, [isActive]);
+  }, [isActive, chatMode]);
 
   // Layout:
   //   outer flex column — sits inside the dashboard's content area
@@ -848,7 +839,6 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
 
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-2">
-      <ChatTabBar />
       <PluginSlot name="chat:top" />
       {mobileModelToolsPortal}
 
@@ -867,9 +857,10 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
           }}
         >
         <div
-          className={cn(
-            "relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-lg",
-            chatMode === "terminal" && "p-2 sm:p-3",
+            className={cn(
+              "hermes-desktop-pane",
+              "relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-lg",
+              chatMode === "terminal" && "p-2 sm:p-3",
           )}
           style={{
             backgroundColor:
@@ -879,6 +870,7 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
         >
           <div
             className={cn(
+              "hermes-desktop-pane-header",
               "mb-2 flex shrink-0 items-center justify-between gap-2 rounded border",
               "px-2 py-1 text-[0.65rem] tracking-wide",
               chatMode === "terminal"
@@ -920,22 +912,18 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
             </span>
           </div>
 
-          <div
-            className={cn(
-              "min-h-0 min-w-0 flex-1",
-              chatMode === "native" ? "flex" : "hidden",
-            )}
-          >
-            <NativeChatSurface />
-          </div>
+          {chatMode === "native" && (
+            <div className="flex min-h-0 min-w-0 flex-1">
+              <NativeChatSurface resumeTarget={resumeParam} />
+            </div>
+          )}
 
-          <div
-            ref={hostRef}
-            className={cn(
-              "hermes-chat-xterm-host min-h-0 min-w-0 flex-1",
-              chatMode === "terminal" ? "block" : "hidden",
-            )}
-          />
+          {chatMode === "terminal" && (
+            <div
+              ref={hostRef}
+              className="hermes-chat-xterm-host min-h-0 min-w-0 flex-1"
+            />
+          )}
 
           {chatMode === "terminal" && (
             <Button

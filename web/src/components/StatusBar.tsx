@@ -25,6 +25,7 @@ export function StatusBar() {
       aria-live="polite"
       className={cn(
         "z-30 flex h-6 shrink-0 items-center justify-between gap-2 px-3",
+        "hermes-desktop-statusbar",
         "border-t border-current/10 bg-background-base/95",
         "text-[0.65rem] font-mono-ui text-muted-foreground",
       )}
