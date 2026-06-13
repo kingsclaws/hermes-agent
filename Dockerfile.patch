@@ -8,6 +8,7 @@ WORKDIR /opt/lex-hermes
 COPY . /tmp/patch_src/
 
 RUN set -eux; \
+    mkdir -p /opt/lexitool/lexitool; \
     cp -a /tmp/patch_src/vendor/lexitool/lexitool/. /opt/lexitool/lexitool/; \
     cp /tmp/patch_src/vendor/lexitool/pyproject.toml /opt/lexitool/; \
     rm -rf /opt/lex-hermes/web/src; \
