@@ -11,15 +11,19 @@ RUN set -eux; \
     mkdir -p /opt/lexitool/lexitool; \
     cp -a /tmp/patch_src/vendor/lexitool/lexitool/. /opt/lexitool/lexitool/; \
     cp /tmp/patch_src/vendor/lexitool/pyproject.toml /opt/lexitool/; \
-    rm -rf /opt/lex-hermes/web/src; \
+    rm -rf /opt/lex-hermes/web/src /opt/hermes/web/src; \
     for d in tools hermes_cli agent tui_gateway web; do \
-      mkdir -p "/opt/lex-hermes/$d"; \
-      cp -a "/tmp/patch_src/$d/." "/opt/lex-hermes/$d/"; \
+      for root in /opt/lex-hermes /opt/hermes; do \
+        mkdir -p "$root/$d"; \
+        cp -a "/tmp/patch_src/$d/." "$root/$d/"; \
+      done; \
     done; \
     find /opt/lex-hermes/tools /opt/lex-hermes/hermes_cli /opt/lex-hermes/agent /opt/lex-hermes/tui_gateway \
+      /opt/hermes/tools /opt/hermes/hermes_cli /opt/hermes/agent /opt/hermes/tui_gateway \
       \( -name '__pycache__' -o -name '*.pyc' \) -exec rm -rf {} +; \
     for f in run_agent.py model_tools.py toolsets.py hermes_state.py hermes_constants.py cli.py; do \
       if [ -f "/tmp/patch_src/$f" ]; then cp "/tmp/patch_src/$f" "/opt/lex-hermes/$f"; fi; \
+      if [ -f "/tmp/patch_src/$f" ]; then cp "/tmp/patch_src/$f" "/opt/hermes/$f"; fi; \
     done; \
     mkdir -p /opt/hermes/docker; \
     cp /tmp/patch_src/docker/main-wrapper.sh /opt/hermes/docker/main-wrapper.sh; \
@@ -28,21 +32,27 @@ RUN set -eux; \
     mkdir -p /root/.hermes; \
     cp /tmp/patch_src/start-lex-hermes.sh /usr/local/bin/; \
     cp /tmp/patch_src/start-lex-hermes.sh /opt/lex-hermes/; \
+    cp /tmp/patch_src/start-lex-hermes.sh /opt/hermes/; \
     cp /tmp/patch_src/SOUL.md /root/.hermes/; \
     rm -rf /opt/lex-hermes/skills/productivity/ocr-and-documents/ \
+      /opt/hermes/skills/productivity/ocr-and-documents/ \
       /root/.hermes/skills/productivity/ocr-and-documents/ \
       /opt/lex-hermes/skills/productivity/legal-project-workflow/ \
+      /opt/hermes/skills/productivity/legal-project-workflow/ \
       /root/.hermes/skills/productivity/legal-project-workflow/; \
     for s in \
       skills/productivity/ocr-and-documents \
       skills/productivity/legal-project-workflow \
       skills/legal/lexitool-operations; do \
-      mkdir -p "/opt/lex-hermes/$s" "/root/.hermes/$s"; \
+      mkdir -p "/opt/lex-hermes/$s" "/opt/hermes/$s" "/root/.hermes/$s"; \
       cp -a "/tmp/patch_src/$s/." "/opt/lex-hermes/$s/"; \
+      cp -a "/tmp/patch_src/$s/." "/opt/hermes/$s/"; \
       cp -a "/tmp/patch_src/$s/." "/root/.hermes/$s/"; \
     done; \
     mkdir -p /opt/lex-hermes/profiles/; \
+    mkdir -p /opt/hermes/profiles/; \
     (cp /tmp/patch_src/profiles/*.soul.md /opt/lex-hermes/profiles/ 2>/dev/null || true); \
+    (cp /tmp/patch_src/profiles/*.soul.md /opt/hermes/profiles/ 2>/dev/null || true); \
     rm -rf /tmp/patch_src; \
     mkdir -p /opt/hermes/.venv/lib/python3.11/site-packages; \
     printf '%s\n' /opt/lexitool > /opt/hermes/.venv/lib/python3.11/site-packages/lexitool.pth; \
@@ -59,5 +69,9 @@ RUN set -eux; \
       echo "No web build toolchain or prebuilt hermes_cli/web_dist found" >&2; \
       exit 1; \
     fi; \
+    rm -rf /opt/hermes/hermes_cli/web_dist; \
+    mkdir -p /opt/hermes/hermes_cli/web_dist; \
+    cp -a /opt/lex-hermes/hermes_cli/web_dist/. /opt/hermes/hermes_cli/web_dist/; \
     python3 -m compileall -q -f /usr/local/lib/python3.11/site-packages/; \
-    python3 -m compileall -q -f /opt/lex-hermes/
+    python3 -m compileall -q -f /opt/lex-hermes/; \
+    python3 -m compileall -q -f /opt/hermes/
