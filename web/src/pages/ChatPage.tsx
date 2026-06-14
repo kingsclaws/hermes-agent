@@ -41,7 +41,22 @@ import {
 import { usePageHeader } from "@/contexts/usePageHeader";
 import { useI18n } from "@/i18n";
 import { api } from "@/lib/api";
+import type { ProjectInfo, SessionInfo } from "@/lib/api";
 import { PluginSlot } from "@/plugins";
+
+const CHAT_PROJECT_KEY = "hermes.lex.chat.project";
+
+function sessionLabel(session: SessionInfo): string {
+  const title = session.title?.trim() || session.preview?.trim() || "Untitled session";
+  const shortId = session.id.slice(0, 8);
+  const active = session.is_active ? " · active" : "";
+  return `${title.slice(0, 72)} · ${shortId}${active}`;
+}
+
+function projectLabel(project: ProjectInfo): string {
+  const client = project.client?.trim();
+  return client ? `${project.name} · ${client}` : project.name;
+}
 
 function buildWsUrl(
   authParam: [string, string],
@@ -166,7 +181,20 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
   // treat the current resume target as part of the PTY identity and rebuild the
   // terminal session when it changes.
   const resumeParam = searchParams.get("resume");
+  const projectParam = searchParams.get("project");
   const channel = useMemo(() => generateChannelId(), [resumeParam]);
+  const [projects, setProjects] = useState<ProjectInfo[]>([]);
+  const [sessions, setSessions] = useState<SessionInfo[]>([]);
+  const [selectedProjectId, setSelectedProjectId] = useState<string>(() => {
+    if (projectParam) return projectParam;
+    try {
+      return localStorage.getItem(CHAT_PROJECT_KEY) ?? "";
+    } catch {
+      return "";
+    }
+  });
+  const [selectorError, setSelectorError] = useState<string | null>(null);
+  const [selectorBusy, setSelectorBusy] = useState(false);
 
   useEffect(() => {
     if (!resumeParam) return;
@@ -192,6 +220,100 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
       cancelled = true;
     };
   }, [resumeParam, searchParams, setSearchParams]);
+
+  useEffect(() => {
+    if (!projectParam || projectParam === selectedProjectId) return;
+    setSelectedProjectId(projectParam);
+  }, [projectParam, selectedProjectId]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setSelectorBusy(true);
+    setSelectorError(null);
+
+    Promise.all([
+      api.fetchProjects().catch((e: any) => {
+        throw new Error(e?.message ?? "Failed to load projects");
+      }),
+      api.getSessions(50).catch((e: any) => {
+        throw new Error(e?.message ?? "Failed to load sessions");
+      }),
+    ])
+      .then(([projectRes, sessionRes]) => {
+        if (cancelled) return;
+        setProjects(projectRes.projects ?? []);
+        setSessions(sessionRes.sessions ?? []);
+      })
+      .catch((e: any) => {
+        if (cancelled) return;
+        setSelectorError(e?.message ?? "Failed to load chat context");
+      })
+      .finally(() => {
+        if (!cancelled) setSelectorBusy(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!selectedProjectId) return;
+    let cancelled = false;
+    setSelectorBusy(true);
+    setSelectorError(null);
+    api
+      .getProject(selectedProjectId)
+      .then((project) => {
+        if (cancelled) return;
+        if (project.sessions?.length) {
+          setSessions(project.sessions);
+        }
+      })
+      .catch(() => {
+        // Some imported projects may not have detail/session linkage yet.
+        // Keep the global recent session list available instead of failing chat.
+      })
+      .finally(() => {
+        if (!cancelled) setSelectorBusy(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedProjectId]);
+
+  const updateChatSearch = useCallback(
+    (updates: Record<string, string | null>) => {
+      const next = new URLSearchParams(searchParams);
+      for (const [key, value] of Object.entries(updates)) {
+        if (value) next.set(key, value);
+        else next.delete(key);
+      }
+      setSearchParams(next, { replace: false });
+    },
+    [searchParams, setSearchParams],
+  );
+
+  const handleSelectProject = useCallback(
+    (projectId: string) => {
+      setSelectedProjectId(projectId);
+      try {
+        if (projectId) localStorage.setItem(CHAT_PROJECT_KEY, projectId);
+        else localStorage.removeItem(CHAT_PROJECT_KEY);
+      } catch {
+        // Ignore storage failures; URL state remains canonical.
+      }
+      updateChatSearch({ project: projectId || null });
+    },
+    [updateChatSearch],
+  );
+
+  const handleSelectSession = useCallback(
+    (sessionId: string) => {
+      updateChatSearch({ resume: sessionId || null });
+    },
+    [updateChatSearch],
+  );
 
   useEffect(() => {
     const mql = window.matchMedia("(max-width: 1023px)");
@@ -841,6 +963,52 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
     <div className="flex min-h-0 flex-1 flex-col gap-2">
       <PluginSlot name="chat:top" />
       {mobileModelToolsPortal}
+
+      <div className="hermes-desktop-pane flex shrink-0 flex-col gap-2 rounded-lg px-3 py-2 sm:flex-row sm:items-center sm:justify-between">
+        <div className="flex min-w-0 flex-1 flex-col gap-2 sm:flex-row">
+          <label className="flex min-w-0 flex-1 items-center gap-2 text-[0.65rem] uppercase tracking-[0.14em] text-text-tertiary">
+            <span className="shrink-0">Project</span>
+            <select
+              value={selectedProjectId}
+              onChange={(event) => handleSelectProject(event.target.value)}
+              className="min-w-0 flex-1 rounded border border-current/15 bg-background-base/80 px-2 py-1 text-xs normal-case tracking-normal text-text-primary outline-none hover:border-current/30 focus:border-primary/50"
+            >
+              <option value="">No project selected</option>
+              {projects.map((project) => (
+                <option key={project.id} value={project.id}>
+                  {projectLabel(project)}
+                </option>
+              ))}
+            </select>
+          </label>
+
+          <label className="flex min-w-0 flex-1 items-center gap-2 text-[0.65rem] uppercase tracking-[0.14em] text-text-tertiary">
+            <span className="shrink-0">Session</span>
+            <select
+              value={resumeParam ?? ""}
+              onChange={(event) => handleSelectSession(event.target.value)}
+              className="min-w-0 flex-1 rounded border border-current/15 bg-background-base/80 px-2 py-1 text-xs normal-case tracking-normal text-text-primary outline-none hover:border-current/30 focus:border-primary/50"
+            >
+              <option value="">New session</option>
+              {sessions.map((session) => (
+                <option key={session.id} value={session.id}>
+                  {sessionLabel(session)}
+                </option>
+              ))}
+            </select>
+          </label>
+        </div>
+
+        <div className="shrink-0 text-[0.65rem] uppercase tracking-[0.14em] text-text-tertiary">
+          {selectorBusy
+            ? "Loading context..."
+            : selectorError
+              ? selectorError
+              : resumeParam
+                ? `resume ${resumeParam.slice(0, 8)}`
+                : "new session"}
+        </div>
+      </div>
 
       {banner && (
         <div className="border border-warning/50 bg-warning/10 text-warning px-3 py-2 text-xs tracking-wide">
