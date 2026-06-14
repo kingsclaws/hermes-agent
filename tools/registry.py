@@ -200,6 +200,56 @@ class ToolRegistry:
         # against it: a cache entry keyed on the generation is valid for as
         # long as the generation hasn't changed.
         self._generation: int = 0
+        # Callbacks fired whenever a tool is registered or deregistered.
+        # Used by the gateway to refresh cached agent sessions so existing
+        # (non-new) sessions see updated tool definitions after hot-reload.
+        self._on_tools_changed: List[Callable] = []
+        self._batch_depth: int = 0
+        self._batch_dirty: bool = False
+
+    def add_tools_changed_callback(self, cb: Callable) -> Callable:
+        """Register a callback fired after register()/deregister().
+
+        Returns a remover function so callers can unregister easily.
+        """
+        self._on_tools_changed.append(cb)
+        def _remove():
+            try:
+                self._on_tools_changed.remove(cb)
+            except ValueError:
+                pass
+        return _remove
+
+    def notify_tools_changed(self) -> None:
+        """Signal that tools have changed.  Use this explicitly after batch
+        operations (e.g. reload_lexitool_tools) to avoid N callbacks for N
+        register/deregister calls.  Safe to call from outside the lock.
+        """
+        self._fire_tools_changed()
+
+    def _fire_tools_changed(self) -> None:
+        if self._batch_depth > 0:
+            self._batch_dirty = True
+            return
+        for cb in self._on_tools_changed:
+            try:
+                cb()
+            except Exception:
+                logger.debug("tools-changed callback %s raised", cb, exc_info=True)
+
+    def batch_tools_changed(self):
+        """Context manager that defers tools-changed callbacks until exit.
+
+        Usage::
+
+            with registry.batch_tools_changed():
+                registry.deregister(name1)
+                registry.deregister(name2)
+                registry.register(...)
+                registry.register(...)
+            # callbacks fire once here
+        """
+        return _BatchGuard(self)
 
     def _snapshot_state(self) -> tuple[List[ToolEntry], Dict[str, Callable]]:
         """Return a coherent snapshot of registry entries and toolset checks."""
@@ -338,6 +388,7 @@ class ToolRegistry:
             if check_fn and toolset not in self._toolset_checks:
                 self._toolset_checks[toolset] = check_fn
             self._generation += 1
+        self._fire_tools_changed()
 
     def deregister(self, name: str) -> None:
         """Remove a tool from the registry.
@@ -362,7 +413,8 @@ class ToolRegistry:
                     for alias, target in self._toolset_aliases.items()
                     if target != entry.toolset
                 }
-            self._generation += 1
+                self._generation += 1
+        self._fire_tools_changed()
         logger.debug("Deregistered tool: %s", name)
 
     # ------------------------------------------------------------------
@@ -573,6 +625,24 @@ class ToolRegistry:
                     "tools": [e.name for e in entries if e.toolset == ts],
                 })
         return available, unavailable
+
+
+class _BatchGuard:
+    """Context manager that defers tools-changed callbacks to batch exit."""
+
+    def __init__(self, registry: ToolRegistry):
+        self._reg = registry
+
+    def __enter__(self):
+        self._reg._batch_depth += 1
+        return self
+
+    def __exit__(self, *args):
+        self._reg._batch_depth = max(0, self._reg._batch_depth - 1)
+        if self._reg._batch_depth == 0 and self._reg._batch_dirty:
+            self._reg._batch_dirty = False
+            self._reg._fire_tools_changed()
+        return False
 
 
 # Module-level singleton

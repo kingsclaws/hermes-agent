@@ -3793,12 +3793,13 @@ def reload_lexitool_tools() -> dict:
     """Hot-reload all lexitool tools by re-importing this module."""
     before = set(registry.get_tool_names_for_toolset("lexitool"))
 
-    for name in list(before):
-        registry.deregister(name)
+    with registry.batch_tools_changed():
+        for name in list(before):
+            registry.deregister(name)
 
-    import importlib
-    import tools.lexitool_tool
-    importlib.reload(tools.lexitool_tool)
+        import importlib
+        import tools.lexitool_tool
+        importlib.reload(tools.lexitool_tool)
 
     invalidate_check_fn_cache()
 

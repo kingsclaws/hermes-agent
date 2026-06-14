@@ -1875,6 +1875,17 @@ class GatewayRunner:
         # Track background tasks to prevent garbage collection mid-execution
         self._background_tasks: set = set()
 
+        # Register a tools-changed callback so that hot-reloaded lexitool (and
+        # any other) tool modifications propagate to existing cached agent
+        # sessions — not just new sessions.  Without this, `/lex_heal` and
+        # `lexitool_tool.reload_lexitool_tools()` update the shared registry but
+        # existing gateway sessions continue using stale agent.tools snapshots.
+        try:
+            from tools.registry import registry as _tool_registry
+            _tool_registry.add_tools_changed_callback(self._refresh_cached_agent_tools)
+        except Exception:
+            pass
+
 
     def _wire_teams_pipeline_runtime(self) -> None:
         """Bind the Teams meeting pipeline runtime to Graph webhook ingress.
@@ -15464,6 +15475,44 @@ class GatewayRunner:
                 self._cleanup_agent_resources(agent)
         except Exception:
             pass
+
+    def _refresh_cached_agent_tools(self) -> None:
+        """Refresh tool definitions for all cached agent sessions.
+
+        Called by the registry's tools-changed callback so that hot-reloaded
+        lexitool (or any other) tool modifications propagate to existing
+        sessions — not just to new ones built after the reload.
+        """
+        from model_tools import get_tool_definitions
+        _cache = getattr(self, "_agent_cache", None)
+        _cache_lock = getattr(self, "_agent_cache_lock", None)
+        if _cache_lock is None or not _cache:
+            return
+        try:
+            with _cache_lock:
+                for _sess_key, _entry in list(_cache.items()):
+                    try:
+                        _agent = _entry[0] if isinstance(_entry, tuple) else _entry
+                    except Exception:
+                        continue
+                    if _agent is None:
+                        continue
+                    try:
+                        new_defs = get_tool_definitions(
+                            enabled_toolsets=getattr(_agent, "enabled_toolsets", None),
+                            disabled_toolsets=getattr(_agent, "disabled_toolsets", None),
+                            quiet_mode=True,
+                        )
+                        _agent.tools = new_defs
+                        _agent.valid_tool_names = {
+                            t["function"]["name"] for t in new_defs
+                        } if new_defs else set()
+                    except Exception:
+                        continue
+        except Exception as exc:
+            logger.debug(
+                "Failed to refresh cached agent tools after registry change: %s", exc
+            )
 
     def _enforce_agent_cache_cap(self) -> None:
         """Evict oldest cached agents when cache exceeds _AGENT_CACHE_MAX_SIZE.
