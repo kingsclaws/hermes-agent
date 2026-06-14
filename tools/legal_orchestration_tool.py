@@ -318,6 +318,13 @@ def _review_contract(review_type: str, document_path: str) -> str:
 def _draft_contract(document_path: Optional[str]) -> str:
     target = document_path or ""
     return (
+        "\n## Mandatory Revision Verification Protocol\n"
+        "Before reporting completion for any legal document revision:\n"
+        "1. Use lex_scan to discover all occurrences of each old/problem term or clause pattern that the instruction changes.\n"
+        "2. Read all affected ranges with lex_read before editing; do not rely on blind keyword replacement.\n"
+        "3. Edit narrowly with Track Changes where possible.\n"
+        "4. Run lex_revision_guard with required_absent for obsolete/problem terms and required_present for required replacement terms.\n"
+        "5. If lex_revision_guard has failures, status must be failed unless every residual is explicitly listed as intentionally retained with a legal reason.\n"
         "\n## Output Contract\n"
         "Return ONLY valid JSON. No markdown fences. Use this schema exactly:\n"
         "{\n"
@@ -325,10 +332,14 @@ def _draft_contract(document_path: Optional[str]) -> str:
         '  "summary": "short summary",\n'
         '  "modified_files": ["absolute/or-relative-path"],\n'
         '  "modified_locations": ["clause or paragraph references"],\n'
+        '  "scan_queries": {"obsolete_or_problem_terms": [], "required_terms": []},\n'
+        '  "revision_guard": {"ok": true, "failures": []},\n'
+        '  "intentional_residuals": [],\n'
         '  "verification_passed": true,\n'
         '  "verification_report": ["checks you ran"],\n'
         '  "primary_document": "' + target.replace('"', '\\"') + '"\n'
         "}\n"
+        "verification_passed must be false if revision_guard.ok is false and intentional_residuals does not fully explain every failure.\n"
     )
 
 
@@ -343,9 +354,11 @@ def _iterative_draft_contract(document_path: Optional[str], start_para: int, end
         "2. Compare that range against the term sheet, project context, and user instructions.\n"
         "3. Decide as a lawyer whether content, defined terms, parties, amounts, dates, conditions, liability, cross-references, comments, and formatting need changes.\n"
         "4. For each paragraph/table cell that needs changes, use native lex_edit/lex_table_list only.\n"
-        "5. After edits, read back the same paragraph range with lex_read.\n"
-        "6. Verify that no placeholder, bracket option, wrong party, amount/date, broken definition, unresolved comment, cross-reference issue, or unexplained template note remains in the range.\n"
-        "7. If no edit is needed, explicitly say so and explain why.\n"
+        "5. If the instruction changes names, roles, defined terms, amounts, dates, governing concepts, or template tokens, use lex_scan to find all matching occurrences in the whole document before editing your range.\n"
+        "6. After edits, read back the same paragraph range with lex_read.\n"
+        "7. Run lex_revision_guard for any obsolete/problem terms and required replacement terms created by your edits.\n"
+        "8. Verify that no placeholder, bracket option, wrong party, amount/date, broken definition, unresolved comment, cross-reference issue, unexplained template note, or unresolved guard failure remains in the range.\n"
+        "9. If no edit is needed, explicitly say so and explain why.\n"
         "Do not use terminal/python/docx/lxml workarounds.\n\n"
         "## Output Contract\n"
         "Return ONLY valid JSON. No markdown fences. Use this schema exactly:\n"
@@ -356,12 +369,15 @@ def _iterative_draft_contract(document_path: Optional[str], start_para: int, end
         '  "modified_files": ["absolute/or-relative-path"],\n'
         '  "modified_locations": ["§N or table references"],\n'
         '  "unchanged_locations": ["§N references reviewed but not changed"],\n'
+        '  "scan_queries": {"obsolete_or_problem_terms": [], "required_terms": []},\n'
+        '  "revision_guard": {"ok": true, "failures": []},\n'
+        '  "intentional_residuals": [],\n'
         '  "verification_passed": true,\n'
         '  "verification_report": ["readback and checks performed"],\n'
         '  "remaining_issues": [],\n'
         '  "primary_document": "' + target.replace('"', '\\"') + '"\n'
         "}\n"
-        "If verification_passed is false or remaining_issues is non-empty, status must be failed."
+        "If verification_passed is false, remaining_issues is non-empty, or revision_guard.ok is false without fully justified intentional_residuals, status must be failed."
     )
 
 
@@ -389,6 +405,25 @@ def _extract_json_payload(text: str) -> Optional[Dict[str, Any]]:
     except Exception:
         return None
     return parsed if isinstance(parsed, dict) else None
+
+
+def _revision_guard_failed(parsed: Optional[Dict[str, Any]]) -> bool:
+    if not isinstance(parsed, dict):
+        return False
+    guard = parsed.get("revision_guard")
+    if not isinstance(guard, dict):
+        return False
+    if bool(guard.get("ok", True)):
+        return False
+    failures = guard.get("failures")
+    if not isinstance(failures, list) or not failures:
+        return True
+    intentional = parsed.get("intentional_residuals")
+    if not isinstance(intentional, list):
+        return True
+    # This is deliberately conservative: if the child claims intentional
+    # residuals, it must account for at least every failed guard item.
+    return len(intentional) < len(failures)
 
 
 def _fallback_finding(review_type: str, document_path: Optional[str], summary: str) -> Dict[str, Any]:
@@ -690,19 +725,29 @@ def _run_iterative_drafting(
             if isinstance(structured, dict)
             else ""
         )
-        verification_passed = bool((structured or {}).get("verification_passed")) if isinstance(structured, dict) else False
+        guard_failed = _revision_guard_failed(structured if isinstance(structured, dict) else None)
+        verification_passed = (
+            bool((structured or {}).get("verification_passed")) and not guard_failed
+            if isinstance(structured, dict)
+            else False
+        )
         chunk_result = {
             "chunk_index": index,
             "paragraph_range": f"§{start_para}-§{end_para}",
-            "status": status or ("error" if delegated.get("error") or structured is None else "completed"),
+            "status": (
+                "failed"
+                if guard_failed
+                else status or ("error" if delegated.get("error") or structured is None else "completed")
+            ),
             "delegate_error": delegated.get("error"),
+            "guard_failed": guard_failed,
             "structured": structured,
             "summary": delegated.get("summary"),
             "verification_passed": verification_passed,
             "parent_readback": post_read[:12000],
         }
         chunk_results.append(chunk_result)
-        if delegated.get("error") or structured is None or status == "failed" or not verification_passed:
+        if delegated.get("error") or structured is None or status == "failed" or guard_failed or not verification_passed:
             return {
                 "status": "failed",
                 "error": "Iterative drafting stopped because a chunk failed structured verification.",
@@ -1331,6 +1376,16 @@ def _handle_legal_orchestrate(args: dict, **kwargs) -> str:
     }
     payload["project_dir"] = str(project_root)
     payload["task_type"] = task_type
+    if task_type in ("draft", "revise") and _revision_guard_failed(payload):
+        payload["status"] = "failed"
+        payload["verification_passed"] = False
+        report = payload.get("verification_report")
+        if not isinstance(report, list):
+            report = []
+        report.append(
+            "lex_revision_guard failed and residuals were not fully justified; parent workflow blocks completion."
+        )
+        payload["verification_report"] = report
     return _tool_ok(payload)
 
 

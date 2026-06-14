@@ -282,6 +282,144 @@ def _handle_scan(args: dict, **kwargs) -> str:
     return tool_result(result)
 
 
+LEX_REVISION_GUARD_SCHEMA = {
+    "name": "lex_revision_guard",
+    "description": (
+        "Run document-wide residual checks for legal revision tasks. Use after "
+        "editing but before reporting completion. It verifies that specified "
+        "old/problem terms are absent in final Track Changes view and that "
+        "specified required terms are present. Returns every failing paragraph "
+        "and table-cell so the agent must resolve or explicitly justify each "
+        "residual before delivery."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "path": {"type": "string", "description": "Path to the .docx file."},
+            "required_absent": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "Terms/phrases that must have zero final-view matches after "
+                    "revision, e.g. old party names or obsolete defined terms."
+                ),
+            },
+            "required_present": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "Terms/phrases that must appear at least once after revision, "
+                    "e.g. new party names or replacement defined terms."
+                ),
+            },
+            "case_sensitive": {
+                "type": "boolean",
+                "description": "Case-sensitive matching. Default: true.",
+            },
+            "flexible_whitespace": {
+                "type": "boolean",
+                "description": (
+                    "Treat spaces/NBSP/newlines as equivalent runs. Default: true."
+                ),
+            },
+            "include_tables": {
+                "type": "boolean",
+                "description": "Also scan body-level table cells. Default: true.",
+            },
+            "context_chars": {
+                "type": "integer",
+                "description": "Characters of context around each match. Default: 80.",
+            },
+            "max_results_per_query": {
+                "type": "integer",
+                "description": "Maximum result rows per query. Default: 100.",
+            },
+        },
+        "required": ["path"],
+    },
+}
+
+
+def _handle_revision_guard(args: dict, **kwargs) -> str:
+    from lexitool.scan import scan_text
+
+    path = _resolve_path(args["path"])
+    required_absent = [
+        str(item).strip()
+        for item in (args.get("required_absent") or [])
+        if str(item).strip()
+    ]
+    required_present = [
+        str(item).strip()
+        for item in (args.get("required_present") or [])
+        if str(item).strip()
+    ]
+    if not required_absent and not required_present:
+        return tool_error("lex_revision_guard requires required_absent and/or required_present.")
+
+    common = {
+        "regex": False,
+        "case_sensitive": bool(args.get("case_sensitive", True)),
+        "flexible_whitespace": bool(args.get("flexible_whitespace", True)),
+        "view": "final",
+        "include_tables": bool(args.get("include_tables", True)),
+        "context_chars": int(args.get("context_chars", 80) or 80),
+        "max_results": int(args.get("max_results_per_query", 100) or 100),
+    }
+
+    checks = []
+    failures = []
+    for query in required_absent:
+        scan = scan_text(path, query, **common)
+        count = int(scan.get("total_matches", 0) or 0)
+        check = {
+            "query": query,
+            "expectation": "absent",
+            "passed": count == 0,
+            "matches": count,
+            "paragraph_targets": scan.get("paragraph_targets", []),
+            "table_targets": scan.get("table_targets", []),
+            "sample_results": scan.get("results", [])[:10],
+        }
+        checks.append(check)
+        if not check["passed"]:
+            failures.append(check)
+
+    for query in required_present:
+        scan = scan_text(path, query, **common)
+        count = int(scan.get("total_matches", 0) or 0)
+        check = {
+            "query": query,
+            "expectation": "present",
+            "passed": count > 0,
+            "matches": count,
+            "paragraph_targets": scan.get("paragraph_targets", []),
+            "table_targets": scan.get("table_targets", []),
+            "sample_results": scan.get("results", [])[:10],
+        }
+        checks.append(check)
+        if not check["passed"]:
+            failures.append(check)
+
+    passed = not failures
+    return tool_result(
+        {
+            "ok": passed,
+            "path": path,
+            "view": "final",
+            "checks": checks,
+            "failures": failures,
+            "failure_count": len(failures),
+            "next_step": (
+                "Revision guard passed; proceed to readback/gate checks."
+                if passed
+                else "Do not report completion. Read every failing target with lex_read, "
+                "then edit or explicitly document why the residual is intentional."
+            ),
+        }
+    )
+
+
 # ── 3. lex_edit ───────────────────────────────────────────────────────────────
 
 LEX_EDIT_SCHEMA = {
@@ -3594,6 +3732,7 @@ _TOOLS = [
     # Read
     ("lex_read",     "lexitool", LEX_READ_SCHEMA,     _handle_read),
     ("lex_scan",     "lexitool", LEX_SCAN_SCHEMA,     _handle_scan),
+    ("lex_revision_guard", "lexitool", LEX_REVISION_GUARD_SCHEMA, _handle_revision_guard),
     ("lex_stats",    "lexitool", LEX_STATS_SCHEMA,    _handle_stats),
     ("lex_table_list", "lexitool", LEX_TABLE_LIST_SCHEMA, _handle_table_list),
     # Write

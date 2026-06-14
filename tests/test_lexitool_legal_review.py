@@ -16,7 +16,7 @@ from hermes_cli.project_commands import (
     legal_review_plan,
     lex_convention_profile,
 )
-from tools.lexitool_tool import _handle_edit
+from tools.lexitool_tool import _handle_edit, _handle_revision_guard, _handle_scan
 
 
 W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
@@ -121,6 +121,39 @@ def test_replace_all_requires_confirmation_for_high_risk_bulk_legal_edits(tmp_pa
     })
 
     assert "LEGAL_BULK_REPLACE_REVIEW_REQUIRED" in result
+
+
+def test_revision_guard_blocks_unresolved_final_view_residuals(tmp_path):
+    path = tmp_path / "share-mortgage.docx"
+    doc = Document()
+    doc.add_paragraph("“Secured Assets” means assets created in favour of the Security  Trustee.")
+    doc.add_paragraph("The Chargee may enforce the Security.")
+    doc.save(path)
+
+    scan = _handle_scan({"path": str(path), "query": "Security Trustee"})
+    assert '"total_matches": 1' in scan
+    assert '"paragraph_targets": [1]' in scan
+
+    failed = _handle_revision_guard(
+        {
+            "path": str(path),
+            "required_absent": ["Security Trustee"],
+            "required_present": ["Chargee"],
+        }
+    )
+    assert '"ok": false' in failed
+    assert '"failure_count": 1' in failed
+    assert '"paragraph_targets": [1]' in failed
+
+    passed = _handle_revision_guard(
+        {
+            "path": str(path),
+            "required_absent": ["Security Agent"],
+            "required_present": ["Chargee"],
+        }
+    )
+    assert '"ok": true' in passed
+    assert '"failure_count": 0' in passed
 
 
 def test_legal_harness_primitives_persist_project_state(tmp_path):
