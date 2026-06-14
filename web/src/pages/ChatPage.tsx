@@ -31,7 +31,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useSearchParams } from "react-router-dom";
 
-import { ResizablePanelGroup, ResizablePanel, ResizableHandle } from "@/components/ResizablePanel";
+import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "@/components/ResizablePanel";
 import { loadPanelSize, savePanelSize } from "@/lib/layout-persistence";
 import { ChatSidebar } from "@/components/ChatSidebar";
 import {
@@ -848,41 +848,24 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
         </div>
       )}
 
-      <ResizablePanelGroup orientation="horizontal" className="flex-1">
-        <ResizablePanel
-          defaultSize={loadPanelSize("chat-main")}
-          minSize={30}
-          onResize={(panelSize) => {
-            savePanelSize("chat-main", panelSize.asPercentage);
-          }}
-        >
+      {chatMode === "native" ? (
         <div
-            className={cn(
-              "hermes-desktop-pane",
-              "relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-lg",
-              chatMode === "terminal" && "p-2 sm:p-3",
+          className={cn(
+            "hermes-desktop-pane",
+            "relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-lg",
           )}
-          style={{
-            backgroundColor:
-              chatMode === "terminal" ? TERMINAL_THEME.background : undefined,
-            boxShadow: "0 8px 32px rgba(0, 0, 0, 0.25)",
-          }}
+          style={{ boxShadow: "0 8px 32px rgba(0, 0, 0, 0.25)" }}
         >
           <div
             className={cn(
               "hermes-desktop-pane-header",
               "mb-2 flex shrink-0 items-center justify-between gap-2 rounded border",
               "px-2 py-1 text-[0.65rem] tracking-wide",
-              chatMode === "terminal"
-                ? "border-white/10 bg-white/[0.035]"
-                : "border-current/10 bg-background-base/70",
+              "border-current/10 bg-background-base/70",
             )}
-            style={{ color: chatMode === "terminal" ? TERMINAL_THEME.foreground : undefined }}
           >
             <span className="truncate opacity-75">
-              {chatMode === "native"
-                ? "Native Web Chat · structured legal workspace"
-                : "Terminal fallback · PTY/TUI compatibility mode"}
+              Native Web Chat · structured legal workspace
             </span>
             <span className="inline-flex shrink-0 gap-1">
               <button
@@ -890,9 +873,7 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
                 onClick={() => setChatMode("native")}
                 className={cn(
                   "rounded border px-2 py-0.5",
-                  chatMode === "native"
-                    ? "border-primary/50 bg-primary/10 text-primary"
-                    : "border-current/15 opacity-60 hover:opacity-100",
+                  "border-primary/50 bg-primary/10 text-primary",
                 )}
               >
                 Native
@@ -902,9 +883,7 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
                 onClick={() => setChatMode("terminal")}
                 className={cn(
                   "rounded border px-2 py-0.5",
-                  chatMode === "terminal"
-                    ? "border-primary/50 bg-primary/10 text-primary"
-                    : "border-current/15 opacity-60 hover:opacity-100",
+                  "border-current/15 opacity-60 hover:opacity-100",
                 )}
               >
                 Terminal
@@ -912,72 +891,116 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
             </span>
           </div>
 
-          {chatMode === "native" && (
-            <div className="flex min-h-0 min-w-0 flex-1">
-              <NativeChatSurface resumeTarget={resumeParam} />
-            </div>
-          )}
-
-          {chatMode === "terminal" && (
-            <div
-              ref={hostRef}
-              className="hermes-chat-xterm-host min-h-0 min-w-0 flex-1"
-            />
-          )}
-
-          {chatMode === "terminal" && (
-            <Button
-              ghost
-              onClick={handleCopyLast}
-              title="Copy last assistant response as raw markdown"
-              aria-label="Copy last assistant response"
-              className={cn(
-                "absolute z-10",
-                "rounded border border-current/30",
-                "bg-black/20 backdrop-blur-sm",
-                "opacity-60 hover:opacity-100 hover:border-current/60",
-                "transition-opacity duration-150 normal-case font-normal tracking-normal",
-                "bottom-2 right-2 px-2 py-1 text-[0.65rem] sm:bottom-3 sm:right-3 sm:px-2.5 sm:py-1.5 sm:text-xs",
-                "lg:bottom-4 lg:right-4",
-              )}
-              style={{ color: TERMINAL_THEME.foreground }}
-            >
-              <span className="inline-flex items-center gap-1.5">
-                <Copy className="h-3 w-3 shrink-0" />
-                <span className="hidden min-[400px]:inline tracking-wide">
-                  {copyState === "copied" ? "copied" : "copy last response"}
-                </span>
-              </span>
-            </Button>
-          )}
+          <div className="flex min-h-0 min-w-0 flex-1">
+            <NativeChatSurface resumeTarget={resumeParam} />
+          </div>
         </div>
-        </ResizablePanel>
-
-        {!narrow && (
-          <>
-            <ResizableHandle className="hidden lg:flex mx-0" />
-            <ResizablePanel
-              defaultSize={loadPanelSize("chat-sidebar")}
-              minSize={15}
-              maxSize={50}
-            >
+      ) : (
+        <ResizablePanelGroup orientation="horizontal" className="flex-1">
+          <ResizablePanel
+            defaultSize={loadPanelSize("chat-main")}
+            minSize={30}
+            onResize={(panelSize) => {
+              savePanelSize("chat-main", panelSize.asPercentage);
+            }}
+          >
             <div
-              id="chat-side-panel"
-              role="complementary"
-              aria-label={modelToolsLabel}
-              className="flex min-h-0 shrink-0 flex-col overflow-hidden lg:h-full"
+              className={cn(
+                "hermes-desktop-pane",
+                "relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-lg p-2 sm:p-3",
+              )}
+              style={{
+                backgroundColor: TERMINAL_THEME.background,
+                boxShadow: "0 8px 32px rgba(0, 0, 0, 0.25)",
+              }}
             >
-              <div className="min-h-0 flex-1 overflow-hidden">
-                <ChatSidebar
-                  channel={channel}
-                  onRunWorkflowPrompt={handleRunWorkflowPrompt}
-                />
+              <div
+                className={cn(
+                  "hermes-desktop-pane-header",
+                  "mb-2 flex shrink-0 items-center justify-between gap-2 rounded border",
+                  "border-white/10 bg-white/[0.035]",
+                  "px-2 py-1 text-[0.65rem] tracking-wide",
+                )}
+                style={{ color: TERMINAL_THEME.foreground }}
+              >
+                <span className="truncate opacity-75">
+                  Terminal fallback · PTY/TUI compatibility mode
+                </span>
+                <span className="inline-flex shrink-0 gap-1">
+                  <button
+                    type="button"
+                    onClick={() => setChatMode("native")}
+                    className="rounded border border-current/15 px-2 py-0.5 opacity-60 hover:opacity-100"
+                  >
+                    Native
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setChatMode("terminal")}
+                    className="rounded border border-primary/50 bg-primary/10 px-2 py-0.5 text-primary"
+                  >
+                    Terminal
+                  </button>
+                </span>
               </div>
+
+              <div
+                ref={hostRef}
+                className="hermes-chat-xterm-host min-h-0 min-w-0 flex-1"
+              />
+
+              <Button
+                ghost
+                onClick={handleCopyLast}
+                title="Copy last assistant response as raw markdown"
+                aria-label="Copy last assistant response"
+                className={cn(
+                  "absolute z-10",
+                  "rounded border border-current/30",
+                  "bg-black/20 backdrop-blur-sm",
+                  "opacity-60 hover:opacity-100 hover:border-current/60",
+                  "transition-opacity duration-150 normal-case font-normal tracking-normal",
+                  "bottom-2 right-2 px-2 py-1 text-[0.65rem] sm:bottom-3 sm:right-3 sm:px-2.5 sm:py-1.5 sm:text-xs",
+                  "lg:bottom-4 lg:right-4",
+                )}
+                style={{ color: TERMINAL_THEME.foreground }}
+              >
+                <span className="inline-flex items-center gap-1.5">
+                  <Copy className="h-3 w-3 shrink-0" />
+                  <span className="hidden min-[400px]:inline tracking-wide">
+                    {copyState === "copied" ? "copied" : "copy last response"}
+                  </span>
+                </span>
+              </Button>
             </div>
-            </ResizablePanel>
-          </>
-        )}
-      </ResizablePanelGroup>
+          </ResizablePanel>
+
+          {!narrow && (
+            <>
+              <ResizableHandle className="hidden lg:flex mx-0" />
+              <ResizablePanel
+                defaultSize={loadPanelSize("chat-sidebar")}
+                minSize={15}
+                maxSize={50}
+              >
+              <div
+                id="chat-side-panel"
+                role="complementary"
+                aria-label={modelToolsLabel}
+                className="flex min-h-0 shrink-0 flex-col overflow-hidden lg:h-full"
+              >
+                <div className="min-h-0 flex-1 overflow-hidden">
+                  <ChatSidebar
+                    channel={channel}
+                    onRunWorkflowPrompt={handleRunWorkflowPrompt}
+                  />
+                </div>
+              </div>
+              </ResizablePanel>
+            </>
+          )}
+        </ResizablePanelGroup>
+      )}
       <PluginSlot name="chat:bottom" />
     </div>
   );

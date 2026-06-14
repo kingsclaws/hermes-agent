@@ -92,6 +92,9 @@ import { useKeyboardShortcuts } from "@/contexts/KeyboardShortcutsContext";
 import { KeyboardShortcutsDialog } from "@/components/KeyboardShortcutsDialog";
 
 function RootRedirect() {
+  if (isDashboardEmbeddedChatEnabled()) {
+    return <Navigate to="/chat" replace />;
+  }
   return <Navigate to="/sessions" replace />;
 }
 
@@ -183,6 +186,26 @@ const BUILTIN_NAV_REST: NavItem[] = [
     label: "Documentation",
     icon: BookOpen,
   },
+];
+
+const LEX_WORKSPACE_NAV: NavItem[] = [
+  CHAT_NAV_ITEM,
+  {
+    path: "/projects",
+    labelKey: "projects",
+    label: "Projects",
+    icon: FolderKanban,
+  },
+  {
+    path: "/sessions",
+    labelKey: "sessions",
+    label: "Sessions",
+    icon: MessageSquare,
+  },
+  { path: "/logs", labelKey: "logs", label: "Logs", icon: FileText },
+  { path: "/skills", labelKey: "skills", label: "Skills", icon: Package },
+  { path: "/config", labelKey: "config", label: "Config", icon: Settings },
+  { path: "/env", labelKey: "keys", label: "Keys", icon: KeyRound },
 ];
 
 const ICON_MAP: Record<string, ComponentType<{ className?: string }>> = {
@@ -420,6 +443,9 @@ export default function App() {
   );
 
   const builtinNav = useMemo(() => {
+    if (embeddedChat) {
+      return LEX_WORKSPACE_NAV;
+    }
     const base = embeddedChat
       ? [CHAT_NAV_ITEM, ...BUILTIN_NAV_REST]
       : BUILTIN_NAV_REST;
