@@ -12,8 +12,11 @@ from lexitool.diff import summary
 from lexitool.markup import lex_read
 from hermes_cli.project_commands import (
     edit_verification_record,
+    legal_handoff_record,
     legal_harness_migrate,
+    legal_harness_workflow,
     legal_review_plan,
+    legal_scorecard,
     lex_convention_profile,
 )
 from tools.lexitool_tool import _handle_edit, _handle_revision_guard, _handle_scan
@@ -195,3 +198,93 @@ def test_legal_harness_primitives_persist_project_state(tmp_path):
     assert (hp / "legal-review-plans.json").exists()
     assert (hp / "edit-verification-records.json").exists()
     assert "Edit verification passed" in (hp / "project-context.md").read_text(encoding="utf-8")
+
+
+def test_legal_harness_workflows_handoffs_and_scorecard(tmp_path):
+    project = tmp_path / "matter"
+    hp = project / ".hermes-project"
+    hp.mkdir(parents=True)
+    (hp / "project-meta.json").write_text('{"name":"测试项目"}', encoding="utf-8")
+    doc_path = project / "support.docx"
+    doc = Document()
+    doc.add_paragraph("支持函")
+    doc.add_paragraph("一、本公司承诺")
+    doc.add_paragraph("本函不构成担保或债务承担，但本公司承诺提供流动性支持。")
+    doc.save(doc_path)
+
+    migrated = legal_harness_migrate(project_dirs=[str(project)])
+    workflows = legal_harness_workflow(str(project))
+    workflow = legal_harness_workflow(str(project), action="get", workflow_id="contract_revision")
+
+    assert migrated["ok"] is True
+    assert (hp / "workflows" / "contract_revision.yaml").exists()
+    assert workflows["count"] >= 4
+    assert workflow["workflow"]["nodes"]
+
+    failed_handoff = legal_handoff_record(
+        str(project),
+        workflow_id="contract_revision",
+        node_id="revise",
+        handoff={"status": "completed", "evidence": {}},
+    )
+    assert failed_handoff["ok"] is False
+    assert "modified_files" in failed_handoff["error"]
+
+    good_handoff = legal_handoff_record(
+        str(project),
+        workflow_id="contract_revision",
+        node_id="revise",
+        handoff={
+            "status": "completed",
+            "modified_files": [str(doc_path)],
+            "modified_locations": ["§3"],
+            "guards": {"revision_guard": {"ok": True}},
+            "evidence": {"readback": "§3 checked"},
+        },
+    )
+    assert good_handoff["ok"] is True
+    run_id = good_handoff["record"]["run_id"]
+    assert (hp / "harness-runs" / run_id / "nodes" / "revise.json").exists()
+
+    failing_scorecard = legal_scorecard(
+        str(project),
+        document_path=str(doc_path),
+        workflow_id="contract_revision",
+        run_id=run_id,
+    )
+    assert failing_scorecard["ok"] is False
+    assert any(item["check"] == "convention_profile" for item in failing_scorecard["failures"])
+
+    lex_convention_profile(str(doc_path), project_dir=str(project))
+    legal_review_plan(str(doc_path), project_dir=str(project))
+    edit_verification_record(
+        str(project),
+        str(doc_path),
+        target="§3",
+        edit_summary="确认支持义务",
+        before_text="本函不构成担保。",
+        after_text="本函不构成担保或债务承担，但本公司承诺提供流动性支持。",
+        checks=["lex_read readback", "lex_revision_guard"],
+        status="passed",
+    )
+    passing_scorecard = legal_scorecard(
+        str(project),
+        document_path=str(doc_path),
+        workflow_id="contract_revision",
+        run_id=run_id,
+    )
+    assert passing_scorecard["ok"] is True
+    assert passing_scorecard["status"] == "passed"
+
+
+def test_legal_harness_tools_are_exposed_in_lex_toolsets():
+    from toolsets import resolve_toolset
+
+    lex_tools = set(resolve_toolset("lexitool"))
+    coordinator_tools = set(resolve_toolset("lex-docx-coordinator"))
+    worker_tools = set(resolve_toolset("lex-docx-worker"))
+
+    for name in {"legal_harness_workflow", "legal_handoff_record", "legal_scorecard"}:
+        assert name in lex_tools
+        assert name in coordinator_tools
+        assert name in worker_tools

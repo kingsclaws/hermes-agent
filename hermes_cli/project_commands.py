@@ -11,14 +11,22 @@ from __future__ import annotations
 import json
 import os
 import re
+import threading
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+
+import yaml
+
+from utils import atomic_json_write
 
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Master SOP resolution — reads from the canonical role files instead of
 # using hardcoded lightweight templates.
 # ═══════════════════════════════════════════════════════════════════════════
+
+_HARNESS_PROCESS_LOCK = threading.RLock()
 
 def _resolve_master_roles_dir() -> Path | None:
     """Resolve the master role files directory.
@@ -1227,8 +1235,117 @@ def _read_project_json(project_dir: str, filename: str, default: dict | None = N
 
 def _write_project_json(project_dir: str, filename: str, data: dict) -> None:
     path = Path(project_dir) / ".hermes-project" / filename
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    atomic_json_write(path, data)
+
+
+@contextmanager
+def _project_harness_lock(project_dir: str):
+    """Serialize read/modify/write cycles for legal harness sidecar state."""
+    lock_path = Path(project_dir) / ".hermes-project" / ".legal-harness.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with _HARNESS_PROCESS_LOCK:
+        try:
+            import fcntl  # type: ignore[import-not-found]
+        except Exception:
+            yield
+            return
+        with lock_path.open("a+", encoding="utf-8") as fh:
+            try:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+                yield
+            finally:
+                try:
+                    fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+                except Exception:
+                    pass
+
+
+_LEGAL_WORKFLOW_TEMPLATES: dict[str, dict] = {
+    "contract_revision": {
+        "id": "contract_revision",
+        "version": 1,
+        "description": "Bounded legal document revision with machine gates.",
+        "nodes": [
+            {"id": "profile", "kind": "analysis", "profile": "lex-coordinator", "requires": [], "output_required": ["status", "evidence", "guards"]},
+            {"id": "revise", "kind": "worker", "profile": "lex-drafter", "requires": ["profile"], "output_required": ["status", "modified_files", "modified_locations", "guards", "evidence"]},
+            {"id": "review", "kind": "fanout", "profiles": ["lex-reviewer-content", "lex-reviewer-format", "lex-reviewer-xref"], "requires": ["revise"], "output_required": ["status", "findings", "evidence"]},
+            {"id": "scorecard", "kind": "gate", "profile": "lex-coordinator", "requires": ["review"], "checks": ["convention_profile", "revision_guard", "edit_verification", "review_plan"]},
+        ],
+        "scorecard": {"required": ["convention_profile", "edit_verification"], "block_on_failed_verification": True, "block_on_invalid_handoff": True},
+    },
+    "full_review": {
+        "id": "full_review",
+        "version": 1,
+        "description": "Whole-document review with content, format, xref, and delivery gates.",
+        "nodes": [
+            {"id": "plan", "kind": "analysis", "profile": "lex-coordinator", "requires": [], "output_required": ["status", "evidence"]},
+            {"id": "content", "kind": "worker", "profile": "lex-reviewer-content", "requires": ["plan"], "output_required": ["status", "findings", "evidence"]},
+            {"id": "format", "kind": "worker", "profile": "lex-reviewer-format", "requires": ["plan"], "output_required": ["status", "findings", "evidence"]},
+            {"id": "xref", "kind": "worker", "profile": "lex-reviewer-xref", "requires": ["plan"], "output_required": ["status", "findings", "evidence"]},
+            {"id": "scorecard", "kind": "gate", "profile": "lex-coordinator", "requires": ["content", "format", "xref"], "checks": ["review_plan", "edit_verification"]},
+        ],
+        "scorecard": {"required": ["review_plan"], "block_on_failed_verification": True, "block_on_invalid_handoff": True},
+    },
+    "translation_qa": {
+        "id": "translation_qa",
+        "version": 1,
+        "description": "Bilingual legal translation quality review.",
+        "nodes": [
+            {"id": "segment", "kind": "analysis", "profile": "lex-coordinator", "requires": [], "output_required": ["status", "evidence"]},
+            {"id": "translation_review", "kind": "worker", "profile": "lex-reviewer-translation", "requires": ["segment"], "output_required": ["status", "findings", "evidence"]},
+            {"id": "scorecard", "kind": "gate", "profile": "lex-coordinator", "requires": ["translation_review"], "checks": ["review_plan"]},
+        ],
+        "scorecard": {"required": ["review_plan"], "block_on_invalid_handoff": True},
+    },
+    "template_fill": {
+        "id": "template_fill",
+        "version": 1,
+        "description": "Template audit, fill, cleanup, and delivery gate.",
+        "nodes": [
+            {"id": "audit", "kind": "tool", "tool": "lex_template_audit", "requires": [], "output_required": ["status", "evidence"]},
+            {"id": "fill", "kind": "tool", "tool": "lex_template_fill", "requires": ["audit"], "output_required": ["status", "modified_files", "evidence"]},
+            {"id": "scorecard", "kind": "gate", "profile": "lex-coordinator", "requires": ["fill"], "checks": ["edit_verification"]},
+        ],
+        "scorecard": {"required": ["edit_verification"], "block_on_failed_verification": True, "block_on_invalid_handoff": True},
+    },
+}
+
+
+def _ensure_legal_workflow_templates(project_dir: str) -> list[str]:
+    workflows_dir = Path(project_dir) / ".hermes-project" / "workflows"
+    workflows_dir.mkdir(parents=True, exist_ok=True)
+    created: list[str] = []
+    for workflow_id, spec in _LEGAL_WORKFLOW_TEMPLATES.items():
+        path = workflows_dir / f"{workflow_id}.yaml"
+        if path.is_file():
+            continue
+        path.write_text(yaml.safe_dump(spec, allow_unicode=True, sort_keys=False), encoding="utf-8")
+        created.append(str(path))
+    return created
+
+
+def _load_legal_workflow(project_dir: str, workflow_id: str) -> dict:
+    _ensure_legal_workflow_templates(project_dir)
+    path = Path(project_dir) / ".hermes-project" / "workflows" / f"{workflow_id}.yaml"
+    if not path.is_file():
+        return {}
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _append_harness_event(project_dir: str, run_id: str, event_type: str, payload: dict) -> None:
+    run_dir = Path(project_dir) / ".hermes-project" / "harness-runs" / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    entry = {
+        "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "event": event_type,
+        "payload": payload,
+    }
+    with (run_dir / "events.jsonl").open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
 
 def _ensure_legal_harness_files(project_dir: str, *, project_name: str = "", client: str = "", goal: str = "") -> dict:
@@ -1283,6 +1400,9 @@ def _ensure_legal_harness_files(project_dir: str, *, project_name: str = "", cli
         if not path.is_file():
             _write_project_json(str(src), filename, default_data)
             created.append(str(path))
+    created.extend(_ensure_legal_workflow_templates(str(src)))
+    runs_dir = hermes_dir / "harness-runs"
+    runs_dir.mkdir(parents=True, exist_ok=True)
 
     memory_path = memories_dir / "legal_harness.md"
     if not memory_path.is_file():
@@ -1859,6 +1979,208 @@ def _sync_legal_harness_memory(project_dir: str) -> None:
     (memories_dir / "legal_harness.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def legal_harness_workflow(
+    project_dir: str,
+    *,
+    action: str = "list",
+    workflow_id: str | None = None,
+) -> dict:
+    """List/get declarative legal harness workflow templates."""
+    root = str(Path(project_dir).expanduser().resolve())
+    _ensure_legal_harness_files(root)
+    workflows_dir = Path(root) / ".hermes-project" / "workflows"
+    if action == "list":
+        workflows = []
+        for path in sorted(workflows_dir.glob("*.yaml")):
+            data = _load_legal_workflow(root, path.stem)
+            workflows.append({
+                "id": data.get("id") or path.stem,
+                "description": data.get("description", ""),
+                "path": str(path),
+                "nodes": len(data.get("nodes", [])) if isinstance(data.get("nodes"), list) else 0,
+            })
+        return {"ok": True, "project_dir": root, "workflows": workflows, "count": len(workflows)}
+    if action == "get":
+        if not workflow_id:
+            return {"ok": False, "error": "workflow_id is required for action=get"}
+        data = _load_legal_workflow(root, workflow_id)
+        if not data:
+            return {"ok": False, "error": f"Workflow not found: {workflow_id}"}
+        return {"ok": True, "project_dir": root, "workflow": data}
+    return {"ok": False, "error": "action must be list or get"}
+
+
+def _new_harness_run_id() -> str:
+    return "run_" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ_") + __import__("secrets").token_hex(4)
+
+
+def _validate_handoff_envelope(handoff: dict, required: list[str] | None = None) -> list[str]:
+    errors: list[str] = []
+    if not isinstance(handoff, dict):
+        return ["handoff must be an object"]
+    base_required = ["status", "evidence"]
+    for key in [*base_required, *(required or [])]:
+        if key not in handoff:
+            errors.append(f"missing required field: {key}")
+    status = str(handoff.get("status") or "").lower()
+    if status and status not in {"completed", "failed", "blocked", "skipped", "partial"}:
+        errors.append("status must be completed, failed, blocked, skipped, or partial")
+    evidence = handoff.get("evidence")
+    if "evidence" in handoff and not isinstance(evidence, (dict, list)):
+        errors.append("evidence must be an object or array")
+    return errors
+
+
+def legal_handoff_record(
+    project_dir: str,
+    *,
+    workflow_id: str = "contract_revision",
+    node_id: str = "",
+    handoff: dict | None = None,
+    run_id: str | None = None,
+    action: str = "add",
+) -> dict:
+    """Persist/list/get structured handoff envelopes for a harness run."""
+    root = str(Path(project_dir).expanduser().resolve())
+    _ensure_legal_harness_files(root)
+    if action == "list":
+        runs_root = Path(root) / ".hermes-project" / "harness-runs"
+        runs = []
+        for run_dir in sorted(runs_root.glob("run_*")):
+            nodes = sorted(p.stem for p in (run_dir / "nodes").glob("*.json")) if (run_dir / "nodes").is_dir() else []
+            runs.append({"run_id": run_dir.name, "nodes": nodes, "path": str(run_dir)})
+        return {"ok": True, "project_dir": root, "runs": runs, "count": len(runs)}
+    if action == "get":
+        if not run_id:
+            return {"ok": False, "error": "run_id is required for action=get"}
+        run_dir = Path(root) / ".hermes-project" / "harness-runs" / run_id
+        if node_id:
+            path = run_dir / "nodes" / f"{node_id}.json"
+            if not path.is_file():
+                return {"ok": False, "error": f"Handoff node not found: {node_id}"}
+            return {"ok": True, "project_dir": root, "run_id": run_id, "node": _read_project_json(root, f"harness-runs/{run_id}/nodes/{node_id}.json", {})}
+        nodes = []
+        for path in sorted((run_dir / "nodes").glob("*.json")) if (run_dir / "nodes").is_dir() else []:
+            try:
+                nodes.append(json.loads(path.read_text(encoding="utf-8")))
+            except Exception:
+                nodes.append({"node_id": path.stem, "invalid_json": True})
+        return {"ok": True, "project_dir": root, "run_id": run_id, "nodes": nodes}
+    if action != "add":
+        return {"ok": False, "error": "action must be add, list, or get"}
+    if not node_id:
+        return {"ok": False, "error": "node_id is required"}
+    run_id = run_id or _new_harness_run_id()
+    workflow = _load_legal_workflow(root, workflow_id)
+    node = next((n for n in workflow.get("nodes", []) if isinstance(n, dict) and n.get("id") == node_id), {})
+    required = node.get("output_required", []) if isinstance(node, dict) else []
+    envelope = handoff or {}
+    validation_errors = _validate_handoff_envelope(envelope, required if isinstance(required, list) else [])
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    record = {
+        "run_id": run_id,
+        "workflow_id": workflow_id,
+        "node_id": node_id,
+        "handoff": envelope,
+        "valid": not validation_errors,
+        "validation_errors": validation_errors,
+        "created_at": now,
+        "updated_at": now,
+    }
+    with _project_harness_lock(root):
+        _write_project_json(root, f"harness-runs/{run_id}/nodes/{node_id}.json", record)
+        _append_harness_event(root, run_id, "handoff_recorded", {"node_id": node_id, "valid": record["valid"]})
+    return {"ok": record["valid"], "record": record, "error": "; ".join(validation_errors) if validation_errors else None}
+
+
+def _doc_matches(record_path: str, document_path: str | None) -> bool:
+    if not document_path:
+        return True
+    try:
+        return str(Path(record_path).expanduser().resolve()) == str(Path(document_path).expanduser().resolve())
+    except Exception:
+        return str(record_path) == str(document_path)
+
+
+def legal_scorecard(
+    project_dir: str,
+    *,
+    document_path: str | None = None,
+    workflow_id: str = "contract_revision",
+    run_id: str | None = None,
+    strict: bool = True,
+) -> dict:
+    """Evaluate persisted legal harness evidence before delivery/completion."""
+    root = str(Path(project_dir).expanduser().resolve())
+    _ensure_legal_harness_files(root)
+    doc_path = str(Path(document_path).expanduser().resolve()) if document_path else None
+    workflow = _load_legal_workflow(root, workflow_id)
+    score_cfg = workflow.get("scorecard", {}) if isinstance(workflow, dict) else {}
+    required = set(score_cfg.get("required") or [])
+    failures: list[dict] = []
+    warnings: list[dict] = []
+    checks: list[dict] = []
+
+    profiles = _read_project_json(root, "convention-profiles.json", {"profiles": []}).get("profiles", [])
+    matching_profiles = [p for p in profiles if _doc_matches(str(p.get("document_path") or ""), doc_path)]
+    passed = bool(matching_profiles)
+    checks.append({"name": "convention_profile", "passed": passed, "count": len(matching_profiles)})
+    if "convention_profile" in required and not passed:
+        failures.append({"check": "convention_profile", "message": "No convention profile found for document."})
+
+    plans = _read_project_json(root, "legal-review-plans.json", {"plans": []}).get("plans", [])
+    matching_plans = [p for p in plans if _doc_matches(str(p.get("document_path") or ""), doc_path)]
+    active_or_done = [p for p in matching_plans if p.get("status") not in {"archived"}]
+    passed = bool(active_or_done)
+    checks.append({"name": "review_plan", "passed": passed, "count": len(active_or_done)})
+    if "review_plan" in required and not passed:
+        failures.append({"check": "review_plan", "message": "No review plan found for document."})
+
+    records = _read_project_json(root, "edit-verification-records.json", {"records": []}).get("records", [])
+    matching_records = [r for r in records if _doc_matches(str(r.get("document_path") or ""), doc_path)]
+    failed_records = [r for r in matching_records if r.get("status") in {"failed", "partial"}]
+    passed_records = [r for r in matching_records if r.get("status") in {"passed", "not_applicable"}]
+    checks.append({"name": "edit_verification", "passed": bool(passed_records) and not failed_records, "passed_count": len(passed_records), "failed_count": len(failed_records)})
+    if "edit_verification" in required and not passed_records:
+        failures.append({"check": "edit_verification", "message": "No passed edit verification record found."})
+    if score_cfg.get("block_on_failed_verification", True) and failed_records:
+        failures.append({"check": "edit_verification", "message": f"{len(failed_records)} verification record(s) failed or partial."})
+
+    node_records = []
+    if run_id:
+        run_dir = Path(root) / ".hermes-project" / "harness-runs" / run_id / "nodes"
+        for path in sorted(run_dir.glob("*.json")) if run_dir.is_dir() else []:
+            try:
+                node_records.append(json.loads(path.read_text(encoding="utf-8")))
+            except Exception:
+                node_records.append({"node_id": path.stem, "valid": False, "validation_errors": ["invalid JSON"]})
+        invalid = [n for n in node_records if not n.get("valid")]
+        checks.append({"name": "handoff_envelopes", "passed": not invalid and bool(node_records), "count": len(node_records), "invalid_count": len(invalid)})
+        if score_cfg.get("block_on_invalid_handoff", True) and invalid:
+            failures.append({"check": "handoff_envelopes", "message": f"{len(invalid)} invalid handoff envelope(s)."})
+        if strict and not node_records:
+            failures.append({"check": "handoff_envelopes", "message": f"No handoff records found for run {run_id}."})
+    else:
+        warnings.append({"check": "handoff_envelopes", "message": "No run_id supplied; skipped node handoff validation."})
+
+    if not (Path(root) / ".git").exists():
+        warnings.append({"check": "git_snapshot", "message": "Project is not a git repository; lex_git snapshot evidence unavailable."})
+
+    ok = not failures
+    return {
+        "ok": ok,
+        "status": "passed" if ok else "failed",
+        "project_dir": root,
+        "document_path": doc_path,
+        "workflow_id": workflow_id,
+        "run_id": run_id,
+        "checks": checks,
+        "failures": failures,
+        "warnings": warnings,
+        "node_records": node_records,
+    }
+
+
 def _text_counts(text: str, needles: list[str]) -> int:
     return sum(text.count(n) for n in needles)
 
@@ -1868,15 +2190,16 @@ def lex_convention_profile(document_path: str, *, project_dir: str | None = None
     doc_path = str(Path(document_path).expanduser().resolve())
     root = _find_project_root_for_doc(doc_path, project_dir)
     _ensure_legal_harness_files(root)
-    store = _read_project_json(root, "convention-profiles.json", {"profiles": []})
-    profiles = store.setdefault("profiles", [])
-    if action == "list":
-        return {"ok": True, "profiles": profiles, "count": len(profiles)}
-    if action == "get":
-        for item in reversed(profiles):
-            if item.get("document_path") == doc_path:
-                return {"ok": True, "profile": item}
-        return {"ok": False, "error": "No convention profile for document"}
+    with _project_harness_lock(root):
+        store = _read_project_json(root, "convention-profiles.json", {"profiles": []})
+        profiles = store.setdefault("profiles", [])
+        if action == "list":
+            return {"ok": True, "profiles": profiles, "count": len(profiles)}
+        if action == "get":
+            for item in reversed(profiles):
+                if item.get("document_path") == doc_path:
+                    return {"ok": True, "profile": item}
+            return {"ok": False, "error": "No convention profile for document"}
     if action != "create":
         return {"ok": False, "error": "action must be create, get, or list"}
 
@@ -1932,13 +2255,15 @@ def lex_convention_profile(document_path: str, *, project_dir: str | None = None
         "created_at": now,
         "updated_at": now,
     }
-    profiles = [p for p in profiles if p.get("document_path") != doc_path]
-    profiles.append(profile)
-    store["profiles"] = profiles
-    store["updated_at"] = now
-    _write_project_json(root, "convention-profiles.json", store)
-    _sync_legal_harness_memory(root)
-    _append_journal_entry(root, f"**Convention profile updated:** `{Path(doc_path).name}` ({likely_system})", category="harness")
+    with _project_harness_lock(root):
+        store = _read_project_json(root, "convention-profiles.json", {"profiles": []})
+        profiles = [p for p in store.setdefault("profiles", []) if p.get("document_path") != doc_path]
+        profiles.append(profile)
+        store["profiles"] = profiles
+        store["updated_at"] = now
+        _write_project_json(root, "convention-profiles.json", store)
+        _sync_legal_harness_memory(root)
+        _append_journal_entry(root, f"**Convention profile updated:** `{Path(doc_path).name}` ({likely_system})", category="harness")
     return {"ok": True, "profile": profile}
 
 
@@ -1956,25 +2281,29 @@ def legal_review_plan(
     doc_path = str(Path(document_path).expanduser().resolve())
     root = _find_project_root_for_doc(doc_path, project_dir)
     _ensure_legal_harness_files(root)
-    store = _read_project_json(root, "legal-review-plans.json", {"plans": []})
-    plans = store.setdefault("plans", [])
-    if action == "list":
-        return {"ok": True, "plans": plans, "count": len(plans)}
-    if action == "get":
-        for plan in plans:
-            if plan.get("id") == plan_id:
-                return {"ok": True, "plan": plan}
-        return {"ok": False, "error": "Plan not found"}
+    with _project_harness_lock(root):
+        store = _read_project_json(root, "legal-review-plans.json", {"plans": []})
+        plans = store.setdefault("plans", [])
+        if action == "list":
+            return {"ok": True, "plans": plans, "count": len(plans)}
+        if action == "get":
+            for plan in plans:
+                if plan.get("id") == plan_id:
+                    return {"ok": True, "plan": plan}
+            return {"ok": False, "error": "Plan not found"}
     if action not in {"create", "update_status"}:
         return {"ok": False, "error": "action must be create, list, get, or update_status"}
     if action == "update_status":
-        for plan in plans:
-            if plan.get("id") == plan_id:
-                plan["status"] = scope
-                plan["updated_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-                _write_project_json(root, "legal-review-plans.json", store)
-                _sync_legal_harness_memory(root)
-                return {"ok": True, "plan": plan}
+        with _project_harness_lock(root):
+            store = _read_project_json(root, "legal-review-plans.json", {"plans": []})
+            plans = store.setdefault("plans", [])
+            for plan in plans:
+                if plan.get("id") == plan_id:
+                    plan["status"] = scope
+                    plan["updated_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                    _write_project_json(root, "legal-review-plans.json", store)
+                    _sync_legal_harness_memory(root)
+                    return {"ok": True, "plan": plan}
         return {"ok": False, "error": "Plan not found"}
 
     from lexitool.markup import lex_read
@@ -2025,11 +2354,14 @@ def legal_review_plan(
         "created_at": now,
         "updated_at": now,
     }
-    plans.append(plan)
-    store["updated_at"] = now
-    _write_project_json(root, "legal-review-plans.json", store)
-    _sync_legal_harness_memory(root)
-    _append_journal_entry(root, f"**Legal review plan created:** `{Path(doc_path).name}` ({len(steps)} steps)", category="harness")
+    with _project_harness_lock(root):
+        store = _read_project_json(root, "legal-review-plans.json", {"plans": []})
+        plans = store.setdefault("plans", [])
+        plans.append(plan)
+        store["updated_at"] = now
+        _write_project_json(root, "legal-review-plans.json", store)
+        _sync_legal_harness_memory(root)
+        _append_journal_entry(root, f"**Legal review plan created:** `{Path(doc_path).name}` ({len(steps)} steps)", category="harness")
     return {"ok": True, "plan": plan}
 
 
@@ -2050,15 +2382,16 @@ def edit_verification_record(
     """Record/list/get edit verification records for material legal document edits."""
     root = str(Path(project_dir).expanduser().resolve())
     _ensure_legal_harness_files(root)
-    store = _read_project_json(root, "edit-verification-records.json", {"records": []})
-    records = store.setdefault("records", [])
-    if action == "list":
-        return {"ok": True, "records": records, "count": len(records)}
-    if action == "get":
-        for rec in records:
-            if rec.get("id") == record_id:
-                return {"ok": True, "record": rec}
-        return {"ok": False, "error": "Record not found"}
+    with _project_harness_lock(root):
+        store = _read_project_json(root, "edit-verification-records.json", {"records": []})
+        records = store.setdefault("records", [])
+        if action == "list":
+            return {"ok": True, "records": records, "count": len(records)}
+        if action == "get":
+            for rec in records:
+                if rec.get("id") == record_id:
+                    return {"ok": True, "record": rec}
+            return {"ok": False, "error": "Record not found"}
     if action != "add":
         return {"ok": False, "error": "action must be add, list, or get"}
     if status not in {"passed", "failed", "partial", "not_applicable"}:
@@ -2078,11 +2411,14 @@ def edit_verification_record(
         "created_at": now,
         "updated_at": now,
     }
-    records.append(rec)
-    store["updated_at"] = now
-    _write_project_json(root, "edit-verification-records.json", store)
-    _sync_legal_harness_memory(root)
-    _append_journal_entry(root, f"**Edit verification {status}:** `{Path(document_path).name}` {target} — {edit_summary}", category="harness")
+    with _project_harness_lock(root):
+        store = _read_project_json(root, "edit-verification-records.json", {"records": []})
+        records = store.setdefault("records", [])
+        records.append(rec)
+        store["updated_at"] = now
+        _write_project_json(root, "edit-verification-records.json", store)
+        _sync_legal_harness_memory(root)
+        _append_journal_entry(root, f"**Edit verification {status}:** `{Path(document_path).name}` {target} — {edit_summary}", category="harness")
     return {"ok": True, "record": rec}
 
 

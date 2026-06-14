@@ -212,12 +212,14 @@ class ToolRegistry:
 
         Returns a remover function so callers can unregister easily.
         """
-        self._on_tools_changed.append(cb)
+        with self._lock:
+            self._on_tools_changed.append(cb)
         def _remove():
-            try:
-                self._on_tools_changed.remove(cb)
-            except ValueError:
-                pass
+            with self._lock:
+                try:
+                    self._on_tools_changed.remove(cb)
+                except ValueError:
+                    pass
         return _remove
 
     def notify_tools_changed(self) -> None:
@@ -228,10 +230,12 @@ class ToolRegistry:
         self._fire_tools_changed()
 
     def _fire_tools_changed(self) -> None:
-        if self._batch_depth > 0:
-            self._batch_dirty = True
-            return
-        for cb in self._on_tools_changed:
+        with self._lock:
+            if self._batch_depth > 0:
+                self._batch_dirty = True
+                return
+            callbacks = list(self._on_tools_changed)
+        for cb in callbacks:
             try:
                 cb()
             except Exception:
@@ -634,13 +638,18 @@ class _BatchGuard:
         self._reg = registry
 
     def __enter__(self):
-        self._reg._batch_depth += 1
+        with self._reg._lock:
+            self._reg._batch_depth += 1
         return self
 
     def __exit__(self, *args):
-        self._reg._batch_depth = max(0, self._reg._batch_depth - 1)
-        if self._reg._batch_depth == 0 and self._reg._batch_dirty:
-            self._reg._batch_dirty = False
+        should_fire = False
+        with self._reg._lock:
+            self._reg._batch_depth = max(0, self._reg._batch_depth - 1)
+            if self._reg._batch_depth == 0 and self._reg._batch_dirty:
+                self._reg._batch_dirty = False
+                should_fire = True
+        if should_fire:
             self._reg._fire_tools_changed()
         return False
 

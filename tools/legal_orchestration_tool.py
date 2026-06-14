@@ -27,13 +27,24 @@ _ROLE_FILE_BY_TASK_TYPE: Dict[str, str] = {
 }
 
 _TOOLSETS_BY_TASK_TYPE: Dict[str, List[str]] = {
-    "draft": ["lex-docx", "file", "project_management"],
-    "revise": ["lex-docx", "file", "project_management"],
-    "review_content": ["lex-docx", "file", "project_management"],
-    "review_format": ["lex-docx", "file", "project_management"],
-    "review_ts": ["lex-docx", "file", "project_management"],
-    "review_xref": ["lex-docx", "file", "project_management"],
-    "review_translation": ["lex-docx", "file", "project_management"],
+    "draft": ["lex-docx-worker", "file", "project_management"],
+    "revise": ["lex-docx-worker", "file", "project_management"],
+    "review_content": ["lex-docx-coordinator", "file", "project_management"],
+    "review_format": ["lex-docx-coordinator", "file", "project_management"],
+    "review_ts": ["lex-docx-coordinator", "file", "project_management"],
+    "review_xref": ["lex-docx-coordinator", "file", "project_management"],
+    "review_translation": ["lex-docx-coordinator", "file", "project_management"],
+}
+
+_PROFILE_BY_TASK_TYPE: Dict[str, str] = {
+    "draft": "lex-drafter",
+    "revise": "lex-drafter",
+    "draft_iterative": "lex-drafter",
+    "review_content": "lex-reviewer-content",
+    "review_format": "lex-reviewer-format",
+    "review_ts": "lex-reviewer-ts",
+    "review_xref": "lex-reviewer-xref",
+    "review_translation": "lex-reviewer-translation",
 }
 
 _REVIEW_TASK_TYPES = {
@@ -713,6 +724,10 @@ def _run_iterative_drafting(
         )
         delegated = _dispatch_single_child(
             parent_agent=parent_agent,
+            project_root=project_root,
+            workflow_id="contract_revision",
+            run_id=chunk_results[-1].get("run_id") if chunk_results else None,
+            node_id=f"draft_iterative_{index}",
             task_type="draft_iterative",
             goal=goal,
             context=context,
@@ -741,6 +756,7 @@ def _run_iterative_drafting(
             ),
             "delegate_error": delegated.get("error"),
             "guard_failed": guard_failed,
+            "run_id": delegated.get("run_id"),
             "structured": structured,
             "summary": delegated.get("summary"),
             "verification_passed": verification_passed,
@@ -778,6 +794,10 @@ def _run_iterative_drafting(
 def _dispatch_single_child(
     *,
     parent_agent,
+    project_root: Path | None = None,
+    workflow_id: str = "contract_revision",
+    run_id: str | None = None,
+    node_id: str | None = None,
     task_type: str,
     goal: str,
     context: str,
@@ -787,6 +807,7 @@ def _dispatch_single_child(
         goal=goal,
         context=context,
         toolsets=toolsets,
+        profile=_PROFILE_BY_TASK_TYPE.get(task_type),
         role="leaf",
         parent_agent=parent_agent,
     )
@@ -797,12 +818,33 @@ def _dispatch_single_child(
     result = results[0]
     summary = str(result.get("summary") or result.get("error") or "")
     structured = _extract_json_payload(summary)
-    return {
+    payload = {
         "delegate_result": result,
         "structured": structured,
         "summary": summary,
         "task_type": task_type,
     }
+    if project_root is not None:
+        try:
+            from hermes_cli.project_commands import legal_handoff_record
+
+            handoff = structured if isinstance(structured, dict) else {
+                "status": "failed" if result.get("error") else "completed",
+                "summary": summary,
+                "evidence": {"delegate_summary": summary[:4000]},
+            }
+            handoff_result = legal_handoff_record(
+                str(project_root),
+                workflow_id=workflow_id,
+                node_id=node_id or task_type,
+                handoff=handoff,
+                run_id=run_id,
+            )
+            payload["handoff_record"] = handoff_result.get("record")
+            payload["run_id"] = (handoff_result.get("record") or {}).get("run_id") or run_id
+        except Exception as exc:
+            payload["handoff_error"] = str(exc)
+    return payload
 
 
 def _build_review_subtasks(
@@ -853,6 +895,7 @@ def _build_review_subtasks(
                 "machine_error": (preflight or {}).get("error"),
                 "machine_findings": (preflight or {}).get("findings", []),
                 "machine_summary": (preflight or {}).get("summary", ""),
+                "profile": _PROFILE_BY_TASK_TYPE.get(review_type),
                 "role": "leaf",
                 "toolsets": _TOOLSETS_BY_TASK_TYPE[review_type],
             }
@@ -1095,6 +1138,7 @@ def _handle_legal_orchestrate(args: dict, **kwargs) -> str:
             return tool_error(batch["error"])
         findings: List[Dict[str, Any]] = []
         subtasks: List[Dict[str, Any]] = []
+        review_run_id: str | None = None
         for task, result in zip_longest(tasks, batch.get("results") or [], fillvalue={}):
             if not task:
                 continue
@@ -1109,10 +1153,33 @@ def _handle_legal_orchestrate(args: dict, **kwargs) -> str:
             )
             task_findings = _dedupe_findings(list(task.get("machine_findings") or []) + task_findings)
             findings.extend(task_findings)
+            handoff_record = None
+            try:
+                from hermes_cli.project_commands import legal_handoff_record
+
+                handoff = structured if isinstance(structured, dict) else {
+                    "status": "failed" if result.get("error") else "completed",
+                    "summary": summary,
+                    "findings": task_findings,
+                    "evidence": {"delegate_summary": summary[:4000]},
+                }
+                handoff_result = legal_handoff_record(
+                    str(project_root),
+                    workflow_id="full_review",
+                    node_id=review_type.replace("review_", "") or "review",
+                    handoff=handoff,
+                    run_id=review_run_id,
+                )
+                handoff_record = handoff_result.get("record")
+                review_run_id = (handoff_record or {}).get("run_id") or review_run_id
+            except Exception:
+                handoff_record = None
             subtasks.append(
                 {
                     "review_type": review_type,
                     "status": result.get("status"),
+                    "run_id": review_run_id,
+                    "handoff_valid": (handoff_record or {}).get("valid"),
                     "summary": (
                         (structured or {}).get("summary")
                         if isinstance(structured, dict)
@@ -1136,6 +1203,7 @@ def _handle_legal_orchestrate(args: dict, **kwargs) -> str:
                 "learning": learning,
                 "learning_candidates": learning.get("candidates", []),
                 "project_dir": str(project_root),
+                "run_id": review_run_id,
                 "status": "completed",
                 "subtasks": subtasks,
                 "task_type": task_type,
@@ -1316,6 +1384,9 @@ def _handle_legal_orchestrate(args: dict, **kwargs) -> str:
     ).strip()
     delegated = _dispatch_single_child(
         parent_agent=parent_agent,
+        project_root=project_root,
+        workflow_id=learning_workflow_type,
+        node_id=task_type,
         task_type=task_type,
         goal=_make_goal(
             task_type,

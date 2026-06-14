@@ -3346,6 +3346,107 @@ def _handle_legal_harness_migrate(args: dict, **kwargs) -> str:
     return tool_result(result) if result.get("ok") else tool_error(result.get("error", "legal harness migration failed"), **result)
 
 
+LEGAL_HARNESS_WORKFLOW_SCHEMA = {
+    "name": "legal_harness_workflow",
+    "description": (
+        "List or read declarative legal harness workflow YAML templates. "
+        "These templates define graph nodes, dependencies, worker profiles, "
+        "required structured handoff fields, and scorecard checks for reusable "
+        "legal workflows such as contract_revision and full_review."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "project_dir": {"type": "string", "description": "Project root containing .hermes-project/."},
+            "action": {"type": "string", "enum": ["list", "get"], "description": "Workflow operation. Default: list."},
+            "workflow_id": {"type": "string", "description": "Workflow ID for get, e.g. contract_revision."},
+        },
+        "required": ["project_dir"],
+    },
+}
+
+
+def _handle_legal_harness_workflow(args: dict, **kwargs) -> str:
+    from hermes_cli.project_commands import legal_harness_workflow
+
+    result = legal_harness_workflow(
+        _resolve_path(args["project_dir"]),
+        action=args.get("action", "list"),
+        workflow_id=args.get("workflow_id"),
+    )
+    return tool_result(result) if result.get("ok") else tool_error(result.get("error", "legal harness workflow failed"), **result)
+
+
+LEGAL_HANDOFF_RECORD_SCHEMA = {
+    "name": "legal_handoff_record",
+    "description": (
+        "Persist/list/get a structured handoff envelope for a legal harness run. "
+        "Use this when a workflow node completes so later scorecards can verify "
+        "machine-readable evidence instead of trusting free-form agent prose."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "project_dir": {"type": "string", "description": "Project root containing .hermes-project/."},
+            "workflow_id": {"type": "string", "description": "Workflow template ID. Default: contract_revision."},
+            "node_id": {"type": "string", "description": "Workflow node ID, e.g. revise or review."},
+            "handoff": {"type": "object", "description": "Structured handoff envelope with status, evidence, guards, modified files, findings, etc."},
+            "run_id": {"type": "string", "description": "Existing run ID. Omit on add to create a new run."},
+            "action": {"type": "string", "enum": ["add", "list", "get"], "description": "Record operation. Default: add."},
+        },
+        "required": ["project_dir"],
+    },
+}
+
+
+def _handle_legal_handoff_record(args: dict, **kwargs) -> str:
+    from hermes_cli.project_commands import legal_handoff_record
+
+    result = legal_handoff_record(
+        _resolve_path(args["project_dir"]),
+        workflow_id=args.get("workflow_id", "contract_revision"),
+        node_id=args.get("node_id", ""),
+        handoff=args.get("handoff") if isinstance(args.get("handoff"), dict) else None,
+        run_id=args.get("run_id"),
+        action=args.get("action", "add"),
+    )
+    return tool_result(result) if result.get("ok") else tool_error(result.get("error", "legal handoff record failed"), **result)
+
+
+LEGAL_SCORECARD_SCHEMA = {
+    "name": "legal_scorecard",
+    "description": (
+        "Evaluate persisted legal harness evidence before completion or delivery. "
+        "Checks convention profiles, review plans, edit verification records, "
+        "structured handoff envelopes, and git snapshot availability."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "project_dir": {"type": "string", "description": "Project root containing .hermes-project/."},
+            "document_path": {"type": "string", "description": "Optional DOCX path to scope evidence checks."},
+            "workflow_id": {"type": "string", "description": "Workflow template ID. Default: contract_revision."},
+            "run_id": {"type": "string", "description": "Optional harness run ID for handoff envelope validation."},
+            "strict": {"type": "boolean", "description": "If true, missing run handoffs fail when run_id is provided. Default: true."},
+        },
+        "required": ["project_dir"],
+    },
+}
+
+
+def _handle_legal_scorecard(args: dict, **kwargs) -> str:
+    from hermes_cli.project_commands import legal_scorecard
+
+    result = legal_scorecard(
+        _resolve_path(args["project_dir"]),
+        document_path=_resolve_path(args["document_path"]) if args.get("document_path") else None,
+        workflow_id=args.get("workflow_id", "contract_revision"),
+        run_id=args.get("run_id"),
+        strict=bool(args.get("strict", True)),
+    )
+    return tool_result(result) if result.get("ok") else tool_error(result.get("failures", "legal scorecard failed"), **result)
+
+
 # ── 18. refine_goal ─────────────────────────────────────────────────────────
 
 REFINE_GOAL_SCHEMA = {
@@ -3768,6 +3869,9 @@ _TOOLS = [
     ("legal_review_plan",      "lexitool", LEGAL_REVIEW_PLAN_SCHEMA,      _handle_legal_review_plan),
     ("edit_verification_record", "lexitool", EDIT_VERIFICATION_RECORD_SCHEMA, _handle_edit_verification_record),
     ("legal_harness_migrate",  "lexitool", LEGAL_HARNESS_MIGRATE_SCHEMA,  _handle_legal_harness_migrate),
+    ("legal_harness_workflow", "lexitool", LEGAL_HARNESS_WORKFLOW_SCHEMA, _handle_legal_harness_workflow),
+    ("legal_handoff_record",   "lexitool", LEGAL_HANDOFF_RECORD_SCHEMA,   _handle_legal_handoff_record),
+    ("legal_scorecard",        "lexitool", LEGAL_SCORECARD_SCHEMA,        _handle_legal_scorecard),
     # Goal
     ("refine_goal",            "lexitool", REFINE_GOAL_SCHEMA,            _handle_refine_goal),
     # Task Board
