@@ -11,6 +11,10 @@ RUN set -eux; \
     mkdir -p /opt/lexitool/lexitool; \
     cp -a /tmp/patch_src/vendor/lexitool/lexitool/. /opt/lexitool/lexitool/; \
     cp /tmp/patch_src/vendor/lexitool/pyproject.toml /opt/lexitool/; \
+    for root in /opt/lex-hermes /opt/hermes; do \
+      mkdir -p "$root/vendor/lexitool"; \
+      cp -a /tmp/patch_src/vendor/lexitool/. "$root/vendor/lexitool/"; \
+    done; \
     rm -rf /opt/lex-hermes/web/src /opt/hermes/web/src; \
     for d in tools hermes_cli agent tui_gateway web; do \
       for root in /opt/lex-hermes /opt/hermes; do \
@@ -54,8 +58,9 @@ RUN set -eux; \
     (cp /tmp/patch_src/profiles/*.soul.md /opt/lex-hermes/profiles/ 2>/dev/null || true); \
     (cp /tmp/patch_src/profiles/*.soul.md /opt/hermes/profiles/ 2>/dev/null || true); \
     rm -rf /tmp/patch_src; \
-    mkdir -p /opt/hermes/.venv/lib/python3.11/site-packages; \
-    printf '%s\n' /opt/lexitool > /opt/hermes/.venv/lib/python3.11/site-packages/lexitool.pth; \
+    site_dir=$(/opt/hermes/.venv/bin/python3 -c 'import site; print(site.getsitepackages()[0])'); \
+    mkdir -p "$site_dir"; \
+    printf '%s\n' /opt/lexitool > "$site_dir/lexitool.pth"; \
     printf '%s\n' '#!/bin/sh' 'exec /opt/hermes/.venv/bin/python3 -c "from lexitool.cli import main; raise SystemExit(main())" "$@"' > /usr/local/bin/lexitool; \
     cp /usr/local/bin/lexitool /usr/local/bin/lex-docx; \
     printf '%s\n' '#!/bin/sh' 'exec /opt/hermes/.venv/bin/python3 -c "from lexitool.ocr_cli import main; raise SystemExit(main())" "$@"' > /usr/local/bin/lex-ocr; \
