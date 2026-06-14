@@ -255,15 +255,13 @@ def replace_text(docx_path: str, para: int, old: str, new: str, *,
             char_pos += len(text)
 
         full_text = "".join(t for _, t, _, _ in run_texts)
-        full_text_norm = _normalize_quotes(full_text)
-        old_norm = _normalize_quotes(old)
-        if old_norm not in full_text_norm:
+        located = _locate_replacement_span(full_text, old)
+        if located is None:
             return EditResult(ok=False, para=para, text=old,
                               message=f"段落 {para} 中未找到 '{old}'",
                               path=docx_path)
 
-        pos = full_text_norm.find(old_norm)
-        end_pos = pos + len(old)
+        pos, end_pos, actual_old = located
 
         # Classify w:r elements relative to the match
         before_runs = []
@@ -308,7 +306,7 @@ def replace_text(docx_path: str, para: int, old: str, new: str, *,
         del_el.set(f"{W}id", str(tid))
         del_el.set(f"{W}author", author)
         del_el.set(f"{W}date", dt)
-        d_run = _make_run(old, font=font, sz=sz)
+        d_run = _make_run(actual_old, font=font, sz=sz)
         for t in d_run.iter(f"{W}t"):
             t.tag = f"{W}delText"
         del_el.append(d_run)
@@ -331,7 +329,7 @@ def replace_text(docx_path: str, para: int, old: str, new: str, *,
         _write_docx(docx_path, etree.tostring(root, xml_declaration=True,
                                               encoding="UTF-8", standalone=True),
                     other, output=output)
-        return EditResult(ok=True, para=para, text=f"{old}→{new}", tc_mode=True, tc_applied=True,
+        return EditResult(ok=True, para=para, text=f"{actual_old}→{new}", tc_mode=True, tc_applied=True,
                           tc_id=tid, message=f"TC 替换段落 {para}：{old}→{new}",
                           path=output or docx_path)
     else:
@@ -341,16 +339,15 @@ def replace_text(docx_path: str, para: int, old: str, new: str, *,
         texts = [(i, t.text or "") for i, t in enumerate(t_elements)]
         full_text = "".join(t for _, t in texts)
 
-        full_text_norm = _normalize_quotes(full_text)
-        old_norm = _normalize_quotes(old)
-        if old_norm not in full_text_norm:
+        located = _locate_replacement_span(full_text, old)
+        if located is None:
             return EditResult(ok=False, para=para, text=old,
                               message=f"段落 {para} 中未找到 '{old}'",
                               path=docx_path)
 
         # 执行替换（保持在原始文本上的位置，只标准化引号用于匹配）
-        pos = full_text_norm.find(old_norm)
-        new_full = full_text[:pos] + new + full_text[pos + len(old):]
+        pos, end_pos, actual_old = located
+        new_full = full_text[:pos] + new + full_text[end_pos:]
 
         # 重新分配文本到 w:t 元素
         # 策略：将新文本放入第一个 w:t，清空其余
@@ -362,7 +359,7 @@ def replace_text(docx_path: str, para: int, old: str, new: str, *,
         _write_docx(docx_path, etree.tostring(root, xml_declaration=True,
                                               encoding="UTF-8", standalone=True),
                     other, output=output)
-        return EditResult(ok=True, para=para, text=f"{old}→{new}", tc_mode=False, tc_applied=False,
+        return EditResult(ok=True, para=para, text=f"{actual_old}→{new}", tc_mode=False, tc_applied=False,
                           message=f"直接替换段落 {para}：{old}→{new}",
                           path=output or docx_path)
 
@@ -530,6 +527,38 @@ def trim_paragraph(docx_path: str, para: int, *,
 def _normalize_quotes(text: str) -> str:
     """将弯引号（Word自动弯引号）标准化为直引号以匹配搜索。"""
     return text.replace('\u201c', '\u0022').replace('\u201d', '\u0022').replace('\u2018', '\u0027').replace('\u2019', '\u0027')
+
+
+def _locate_replacement_span(full_text: str, old: str) -> tuple[int, int, str] | None:
+    """Locate replacement text with quote and whitespace tolerance.
+
+    Returns (start, end, actual_text).  The span always indexes the original
+    full_text, so callers can preserve exactly what Word contains in <w:del>.
+    """
+    if old in full_text:
+        pos = full_text.find(old)
+        return pos, pos + len(old), old
+
+    full_norm = _normalize_quotes(full_text)
+    old_norm = _normalize_quotes(old)
+    if old_norm in full_norm:
+        pos = full_norm.find(old_norm)
+        return pos, pos + len(old_norm), full_text[pos:pos + len(old_norm)]
+
+    stripped = (old or "").strip()
+    if stripped and stripped != old:
+        located = _locate_replacement_span(full_text, stripped)
+        if located:
+            return located
+
+    if re.search(r"\s", old or ""):
+        parts = [re.escape(_normalize_quotes(part)) for part in re.split(r"\s+", old_norm.strip()) if part]
+        if parts:
+            m = re.search(r"[\s\u00a0]+".join(parts), full_norm)
+            if m:
+                return m.start(), m.end(), full_text[m.start():m.end()]
+
+    return None
 
 
 def _locate_text_in_para(p: etree._Element, target: str) -> list[tuple]:

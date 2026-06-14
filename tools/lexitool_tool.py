@@ -216,6 +216,72 @@ def _handle_table_list(args: dict, **kwargs) -> str:
     return tool_result(result)
 
 
+LEX_SCAN_SCHEMA = {
+    "name": "lex_scan",
+    "description": (
+        "Scan an entire .docx for exact text or regex matches and return every "
+        "affected paragraph/table-cell with context. Use this before legal "
+        "revision to discover all affected clauses, and after editing to verify "
+        "no unintended residual text remains. Default view='final' ignores "
+        "track-deleted text so residual checks do not count already-deleted "
+        "material."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "path": {"type": "string", "description": "Path to the .docx file."},
+            "query": {"type": "string", "description": "Exact text or regex to find."},
+            "regex": {"type": "boolean", "description": "Treat query as regex. Default: false."},
+            "case_sensitive": {"type": "boolean", "description": "Case-sensitive matching. Default: true."},
+            "flexible_whitespace": {
+                "type": "boolean",
+                "description": (
+                    "For exact-text scans, treat spaces/NBSP/newlines as equivalent "
+                    "runs so 'Security Trustee' also matches 'Security  Trustee'. "
+                    "Default: true."
+                ),
+            },
+            "view": {
+                "type": "string",
+                "enum": ["final", "original", "all"],
+                "description": "Track Changes view for scanning. Default: final.",
+            },
+            "include_tables": {
+                "type": "boolean",
+                "description": "Also scan body-level table cells. Default: true.",
+            },
+            "context_chars": {
+                "type": "integer",
+                "description": "Characters of context around each match. Default: 80.",
+            },
+            "max_results": {
+                "type": "integer",
+                "description": "Maximum result rows to return. Default: 200.",
+            },
+        },
+        "required": ["path", "query"],
+    },
+}
+
+
+def _handle_scan(args: dict, **kwargs) -> str:
+    from lexitool.scan import scan_text
+
+    path = _resolve_path(args["path"])
+    result = scan_text(
+        path,
+        str(args.get("query", "")),
+        regex=bool(args.get("regex", False)),
+        case_sensitive=bool(args.get("case_sensitive", True)),
+        flexible_whitespace=bool(args.get("flexible_whitespace", True)),
+        view=str(args.get("view", "final") or "final"),
+        include_tables=bool(args.get("include_tables", True)),
+        context_chars=int(args.get("context_chars", 80) or 80),
+        max_results=int(args.get("max_results", 200) or 200),
+    )
+    return tool_result(result)
+
+
 # ── 3. lex_edit ───────────────────────────────────────────────────────────────
 
 LEX_EDIT_SCHEMA = {
@@ -224,7 +290,9 @@ LEX_EDIT_SCHEMA = {
         "Atomically edit text in a .docx file. Supports paragraph-level, "
         "table-level, and block-level operations with optional Track Changes.\n\n"
         "Legal drafting rule: edit only after reading the relevant § range with "
-        "lex_read. Prefer narrow paragraph/table-cell edits. Avoid broad keyword "
+        "lex_scan/lex_read. For cross-document term revisions, first call "
+        "lex_scan to discover ALL occurrences, then read affected ranges, then "
+        "edit. Prefer narrow paragraph/table-cell edits. Avoid broad keyword "
         "replacement unless the task is explicitly mechanical and the affected "
         "ranges have been reviewed. After every material edit, read back the same "
         "range and verify content, formatting, parties, amounts, dates, defined "
@@ -291,8 +359,8 @@ LEX_EDIT_SCHEMA = {
                 "items": {"type": "integer"},
                 "description": (
                     "List of paragraph numbers (1-indexed §N) for replace_all. "
-                    "These must come from prior lex_read review; do not use this "
-                    "as whole-document keyword replacement."
+                    "These should come from prior lex_scan + lex_read review; "
+                    "do not use this as blind whole-document keyword replacement."
                 ),
             },
             "bulk_confirmed": {
@@ -602,12 +670,37 @@ def _handle_edit(args: dict, **kwargs) -> str:
             )
         try:
             from lexitool.edit_ops import replace_text_all
+            from lexitool.scan import scan_text
             para_indices = [int(t) - 1 for t in targets]  # convert 1-indexed to 0-indexed
             result = replace_text_all(
                 path, para_indices, old_text, new_text,
                 tc=tc, author=author, font_size=font_size,
                 output=path,
             )
+            remaining = scan_text(
+                path,
+                old_text,
+                regex=False,
+                case_sensitive=True,
+                flexible_whitespace=True,
+                view="final",
+                include_tables=True,
+                context_chars=80,
+                max_results=50,
+            )
+            result["post_edit_scan"] = {
+                "query": old_text,
+                "view": "final",
+                "remaining_matches": remaining.get("total_matches", 0),
+                "remaining_paragraph_targets": remaining.get("paragraph_targets", []),
+                "remaining_table_targets": remaining.get("table_targets", []),
+                "sample_results": remaining.get("results", [])[:10],
+                "warning": (
+                    "Residual matches remain in final view. Do not report completion "
+                    "until each residual is intentionally retained or edited."
+                    if remaining.get("total_matches", 0) else ""
+                ),
+            }
             return tool_result(result)
         except Exception as e:
             return tool_error(str(e))
@@ -3500,6 +3593,7 @@ def _handle_comment(args: dict, **kwargs) -> str:
 _TOOLS = [
     # Read
     ("lex_read",     "lexitool", LEX_READ_SCHEMA,     _handle_read),
+    ("lex_scan",     "lexitool", LEX_SCAN_SCHEMA,     _handle_scan),
     ("lex_stats",    "lexitool", LEX_STATS_SCHEMA,    _handle_stats),
     ("lex_table_list", "lexitool", LEX_TABLE_LIST_SCHEMA, _handle_table_list),
     # Write

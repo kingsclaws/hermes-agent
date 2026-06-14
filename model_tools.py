@@ -257,14 +257,15 @@ def _append_legal_doc_next_step_guidance(function_name: str, function_args: dict
     payload.setdefault("legal_document_next_step_required", {
         "requirement": (
             "Before any further non-verification tool call, verify this legal "
-            "document edit with lex_read on the edited range/document, or use "
+            "document edit with lex_read on the edited range/document and "
+            "lex_scan for any revised key term/residual text, or use "
             "lex_proofread/lex_template_audit/lex_xref_audit as appropriate. "
             "If the edit reflected newly discovered or corrected matter facts, "
             "update project_facts as the live project facts database. For "
             "material legal edits, record the readback checks with "
             "edit_verification_record."
         ),
-        "recommended_tools": ["lex_read", "lex_proofread", "lex_template_audit", "lex_xref_audit", "project_facts", "edit_verification_record"],
+        "recommended_tools": ["lex_read", "lex_scan", "lex_proofread", "lex_template_audit", "lex_xref_audit", "project_facts", "edit_verification_record"],
     })
     return json.dumps(payload, ensure_ascii=False)
 
