@@ -44,6 +44,16 @@ type ResumeResult = {
   messages?: unknown[];
 };
 
+export type NativeProjectContext = {
+  id: string;
+  name: string;
+  client?: string;
+  goal?: string;
+  directory?: string;
+  cwd?: string;
+  status?: string;
+} | null;
+
 function textFromMessage(raw: unknown): string {
   if (!raw || typeof raw !== "object") return "";
   const content = (raw as { content?: unknown }).content;
@@ -87,8 +97,10 @@ function messagesFromResume(result: ResumeResult, fallback: string): ChatMessage
 }
 
 export function NativeChatSurface({
+  projectContext,
   resumeTarget,
 }: {
+  projectContext?: NativeProjectContext;
   resumeTarget?: string | null;
 }) {
   const gw = useMemo(() => new GatewayClient(), []);
@@ -319,9 +331,12 @@ export function NativeChatSurface({
         if (resumeTarget) {
           return gw.request<ResumeResult>("session.resume", {
             session_id: resumeTarget,
+            project_context: projectContext,
           });
         }
-        return gw.request<{ session_id: string }>("session.create", {});
+        return gw.request<{ session_id: string }>("session.create", {
+          project_context: projectContext,
+        });
       })
       .then((created) => {
         if (cancelled || !created?.session_id) return;
@@ -358,7 +373,7 @@ export function NativeChatSurface({
       offSubagentComplete();
       gw.close();
     };
-  }, [gw, resumeTarget]);
+  }, [gw, projectContext, resumeTarget]);
 
   useEffect(() => {
     const el = scrollRef.current ?? scrollRefNarrow.current;
@@ -402,7 +417,10 @@ export function NativeChatSurface({
               session_id: string;
               resumed?: string;
               messages?: unknown[];
-            }>("session.resume", { session_id: arg });
+            }>("session.resume", {
+              session_id: arg,
+              project_context: projectContext,
+            });
             setSessionId(resumed.session_id);
             setMessages(messagesFromResume(resumed, arg));
             return;
@@ -447,13 +465,14 @@ export function NativeChatSurface({
         await gw.request("prompt.submit", {
           session_id: sessionId,
           text: trimmed,
+          project_context: projectContext,
         });
       } catch (e) {
         setRunning(false);
         setError(e instanceof Error ? e.message : String(e));
       }
     },
-    [gw, running, sessionId],
+    [gw, projectContext, running, sessionId],
   );
 
   const interrupt = useCallback(async () => {
@@ -522,6 +541,14 @@ export function NativeChatSurface({
             <div className="truncate text-sm text-muted-foreground">
               JSON-RPC session · tools and workflow rendered by Web UI
             </div>
+            {projectContext && (
+              <div
+                className="hidden max-w-[18rem] truncate rounded border border-primary/25 bg-primary/5 px-2 py-0.5 text-[0.65rem] text-primary sm:block"
+                title={projectContext.directory || projectContext.cwd || projectContext.name}
+              >
+                {projectContext.name}
+              </div>
+            )}
             {sessionId && (
               <div className="hidden truncate font-mono-ui text-[0.65rem] text-muted-foreground/70 sm:block">
                 {sessionId}

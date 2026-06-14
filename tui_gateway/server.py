@@ -523,6 +523,120 @@ def _wait_agent(session: dict, rid: str, timeout: float = 30.0) -> dict | None:
     return _err(rid, 5032, err) if err else None
 
 
+def _project_context_from_params(params: dict, fallback_session_id: str | None = None) -> dict | None:
+    """Resolve a Web-selected legal project into the DB project shape.
+
+    The dashboard sends a lightweight project_context object.  Trust the
+    database when possible so downstream tools see canonical paths/status.
+    """
+    raw = params.get("project_context") if isinstance(params, dict) else None
+    project_id = ""
+    project_name = ""
+    project_path = ""
+    if isinstance(raw, dict):
+        project_id = str(raw.get("id") or "").strip()
+        project_name = str(raw.get("name") or "").strip()
+        project_path = str(raw.get("directory") or raw.get("cwd") or "").strip()
+
+    db = _get_db()
+    project = None
+    if db is not None:
+        for key in (project_id, project_name):
+            if not key:
+                continue
+            try:
+                project = db.get_project(key)
+            except Exception:
+                project = None
+            if project:
+                break
+        if project is None and project_path:
+            try:
+                project = db.get_project_by_path(project_path)
+            except Exception:
+                project = None
+        if project is None and fallback_session_id:
+            try:
+                project = db.get_session_project(fallback_session_id)
+            except Exception:
+                project = None
+
+    if project:
+        return dict(project)
+    if isinstance(raw, dict) and (project_id or project_name or project_path):
+        return {
+            "id": project_id or project_name or project_path,
+            "name": project_name or project_id or project_path,
+            "client": str(raw.get("client") or ""),
+            "goal": str(raw.get("goal") or ""),
+            "path": project_path,
+            "cwd": project_path,
+            "status": str(raw.get("status") or ""),
+        }
+    return None
+
+
+def _project_path(project: dict | None) -> str:
+    if not project:
+        return ""
+    return str(project.get("path") or project.get("directory") or project.get("cwd") or "")
+
+
+def _apply_project_context(session: dict, project: dict | None, agent=None, db_session_id: str | None = None) -> None:
+    """Attach selected project to the gateway session, agent, and session DB."""
+    if not project:
+        return
+    session["project_context"] = project
+    project_id = str(project.get("id") or "").strip()
+    project_path = _project_path(project)
+    if agent is None:
+        agent = session.get("agent")
+    if agent is not None:
+        try:
+            agent._selected_project_id = project_id
+            agent.selected_project_id = project_id
+            agent._selected_project_cwd = project_path
+            agent.selected_project_cwd = project_path
+            agent._selected_project_name = str(project.get("name") or "")
+        except Exception:
+            pass
+    if project_id and db_session_id:
+        db = _get_db()
+        if db is not None:
+            try:
+                db.set_session_project(db_session_id, project_id)
+            except Exception:
+                logger.debug("failed to link session %s to project %s", db_session_id, project_id, exc_info=True)
+
+
+def _project_system_context(project: dict | None) -> str | None:
+    if not project:
+        return None
+    name = str(project.get("name") or project.get("id") or "").strip()
+    client = str(project.get("client") or "").strip()
+    goal = str(project.get("goal") or "").strip()
+    status = str(project.get("status") or "").strip()
+    path = _project_path(project)
+    notes = str(project.get("notes") or "").strip()
+    parts = [
+        "[Lex legal project context]",
+        f"Project: {name}" if name else "",
+        f"Client: {client}" if client else "",
+        f"Status: {status}" if status else "",
+        f"Directory: {path}" if path else "",
+        f"Goal: {goal}" if goal else "",
+        f"Notes: {notes[:1200]}" if notes else "",
+        "",
+        "Operational rules for this legal project:",
+        "1. Treat this project as the active working matter unless the user explicitly changes it.",
+        "2. Before revising legal documents, read the whole relevant document or a complete planned section, identify every affected clause, then revise precisely.",
+        "3. For Word/DOCX edits, prefer native lexitool tools and precise run-level track changes; avoid broad paragraph replacement unless the user asks for wholesale redrafting.",
+        "4. Maintain project facts and project status when new reliable information emerges; do not rely on chat memory alone.",
+        "5. When a requested legal revision is under-specified, surface the issue and propose a concrete revision plan before making irreversible broad edits.",
+    ]
+    return "\n".join(part for part in parts if part is not None).strip()
+
+
 def _start_agent_build(sid: str, session: dict) -> None:
     """Start building the real AIAgent for a TUI session, once.
 
@@ -557,6 +671,12 @@ def _start_agent_build(sid: str, session: dict) -> None:
                 agent = _make_agent(sid, key)
             finally:
                 _clear_session_context(tokens)
+            _apply_project_context(
+                current,
+                current.get("project_context"),
+                agent=agent,
+                db_session_id=key,
+            )
 
             # Session DB row deferred to first run_conversation() call.
             # pending_title applied post-first-message (see cli.exec handler).
@@ -2299,6 +2419,7 @@ def _(rid, params: dict) -> dict:
     key = _new_session_key()
     cols = int(params.get("cols", 80))
     _enable_gateway_prompts()
+    project_context = _project_context_from_params(params)
 
     ready = threading.Event()
     now = time.time()
@@ -2318,6 +2439,7 @@ def _(rid, params: dict) -> dict:
         "inflight_turn": None,
         "last_active": now,
         "pending_title": None,
+        "project_context": project_context,
         "running": False,
         "session_key": key,
         "show_reasoning": _load_show_reasoning(),
@@ -2344,6 +2466,7 @@ def _(rid, params: dict) -> dict:
         rid,
         {
             "session_id": sid,
+            "project": project_context,
             "info": {
                 "model": _resolve_model(),
                 "tools": {},
@@ -2465,6 +2588,7 @@ def _(rid, params: dict) -> dict:
     _enable_gateway_prompts()
     try:
         db.reopen_session(target)
+        project_context = _project_context_from_params(params, fallback_session_id=target)
         history = db.get_messages_as_conversation(target)
         display_history = db.get_messages_as_conversation(
             target, include_ancestors=True
@@ -2476,6 +2600,9 @@ def _(rid, params: dict) -> dict:
         finally:
             _clear_session_context(tokens)
         _init_session(sid, target, agent, history, cols=int(params.get("cols", 80)))
+        session = _sessions.get(sid)
+        if session is not None:
+            _apply_project_context(session, project_context, agent=agent, db_session_id=target)
     except Exception as e:
         return _err(rid, 5000, f"resume failed: {e}")
     return _ok(
@@ -2483,6 +2610,7 @@ def _(rid, params: dict) -> dict:
         {
             "session_id": sid,
             "resumed": target,
+            "project": project_context,
             "message_count": len(messages),
             "messages": messages,
             "info": _session_info(agent),
@@ -3390,6 +3518,17 @@ def _(rid, params: dict) -> dict:
     session, err = _sess_nowait(params, rid)
     if err:
         return err
+    project_context = _project_context_from_params(
+        params,
+        fallback_session_id=str(session.get("session_key") or ""),
+    )
+    if project_context:
+        _apply_project_context(
+            session,
+            project_context,
+            agent=session.get("agent"),
+            db_session_id=str(session.get("session_key") or ""),
+        )
     with session["history_lock"]:
         if session.get("running"):
             return _err(rid, 4009, "session busy")
@@ -3528,7 +3667,14 @@ def _run_prompt_submit(rid, sid: str, session: dict, text: Any) -> None:
         session["attached_images"] = []
         if not isinstance(session.get("inflight_turn"), dict):
             _start_inflight_turn(session, text)
+        project_context = session.get("project_context")
     agent = session["agent"]
+    _apply_project_context(
+        session,
+        project_context,
+        agent=agent,
+        db_session_id=str(session.get("session_key") or ""),
+    )
     _emit("message.start", sid)
 
     def run():
@@ -3645,8 +3791,16 @@ def _run_prompt_submit(rid, sid: str, session: dict, text: Any) -> None:
 
             result = agent.run_conversation(
                 run_message,
+                system_message=_project_system_context(project_context),
                 conversation_history=list(history),
                 stream_callback=_stream,
+            )
+            _apply_project_context(
+                session,
+                project_context,
+                agent=agent,
+                db_session_id=getattr(agent, "session_id", None)
+                or str(session.get("session_key") or ""),
             )
 
             last_reasoning = None

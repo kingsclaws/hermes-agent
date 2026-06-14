@@ -36,6 +36,7 @@ import { loadPanelSize, savePanelSize } from "@/lib/layout-persistence";
 import { ChatSidebar } from "@/components/ChatSidebar";
 import {
   dispatchWorkflowPrompt,
+  type NativeProjectContext,
   NativeChatSurface,
 } from "@/components/NativeChatSurface";
 import { usePageHeader } from "@/contexts/usePageHeader";
@@ -314,6 +315,23 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
     },
     [updateChatSearch],
   );
+
+  const selectedProject = useMemo<NativeProjectContext>(() => {
+    if (!selectedProjectId) return null;
+    const project = projects.find((item) => item.id === selectedProjectId);
+    if (!project) {
+      return { id: selectedProjectId, name: selectedProjectId };
+    }
+    return {
+      id: project.id,
+      name: project.name,
+      client: project.client,
+      goal: project.goal,
+      directory: project.directory,
+      cwd: project.cwd,
+      status: project.status,
+    };
+  }, [projects, selectedProjectId]);
 
   useEffect(() => {
     const mql = window.matchMedia("(max-width: 1023px)");
@@ -1060,7 +1078,10 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
           </div>
 
           <div className="flex min-h-0 min-w-0 flex-1">
-            <NativeChatSurface resumeTarget={resumeParam} />
+            <NativeChatSurface
+              projectContext={selectedProject}
+              resumeTarget={resumeParam}
+            />
           </div>
         </div>
       ) : (
