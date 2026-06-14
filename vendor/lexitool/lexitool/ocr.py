@@ -1,9 +1,10 @@
 """
 ocr.py — MinerU PDF OCR client for lex-hermes.
 
-Two API tiers:
-  - AgentAPI: free, no token required, suitable for AI agent use
+Three API tiers (tried in order):
+  - LocalMinerU: self-hosted MinerU instance (MINERU_LOCAL_URL), no token
   - PreciseAPI: token required (MINERU_API_KEY), VLM/pipeline models
+  - AgentAPI: free, no token required, suitable for AI agent use
 
 Fallback: local Tesseract OCR (if tesseract + pdftoppm are installed).
 """
@@ -49,6 +50,54 @@ def _poll(url: str, headers: dict, field: str = "state",
         elif elapsed >= timeout:
             return "timeout", data
         time.sleep(interval)
+
+
+# ── Local MinerU API (self-hosted, no token) ─────────────────────────────────
+
+LOCAL_MINERU_URL = os.environ.get("MINERU_LOCAL_URL", "http://192.168.11.5:9987")
+
+
+class LocalMinerUAPI:
+    """Self-hosted MinerU FastAPI instance — synchronous, no polling needed."""
+
+    def __init__(self, base_url: str = None):
+        self.base_url = (base_url or LOCAL_MINERU_URL).rstrip("/")
+
+    def parse_file(self, file_path: str, language: str = "ch",
+                   page_range: str = None, timeout: int = _DEFAULT_TIMEOUT) -> str | None:
+        """POST file to /file_parse, return markdown text or None."""
+        start_page = 0
+        end_page = 99999
+        if page_range:
+            parts = page_range.split("-")
+            start_page = int(parts[0]) - 1  # local API uses 0-based
+            end_page = int(parts[-1]) - 1
+
+        try:
+            with open(file_path, "rb") as f:
+                r = requests.post(
+                    f"{self.base_url}/file_parse",
+                    files={"files": (os.path.basename(file_path), f)},
+                    data={
+                        "lang_list": language,
+                        "start_page_id": str(start_page),
+                        "end_page_id": str(end_page),
+                        "return_md": "true",
+                        "return_images": "false",
+                        "return_content_list": "false",
+                    },
+                    timeout=timeout,
+                )
+            r.raise_for_status()
+            result = r.json()
+            results = result.get("results", {})
+            for filename, data in results.items():
+                md = data.get("md_content", "")
+                if md:
+                    return md
+            return None
+        except Exception:
+            return None
 
 
 # ── Agent API (free, no token) ──────────────────────────────────────────────
@@ -256,6 +305,8 @@ def parse_pdf(
 ) -> dict:
     """Convert PDF to markdown via MinerU API.
 
+    Tries: LocalMinerU → PreciseAPI → AgentAPI → Tesseract.
+
     Args:
         file_path: Path to PDF file.
         language: Document language ('ch', 'en', etc.).
@@ -265,8 +316,8 @@ def parse_pdf(
         timeout: Maximum seconds to wait.
 
     Returns:
-        {"ok": True, "markdown": "...", "api": "agent"|"precise", "file": "...",
-         "char_count": N}
+        {"ok": True, "markdown": "...", "api": "local"|"precise"|"agent"|"tesseract",
+         "file": "...", "char_count": N}
         or {"ok": False, "error": "..."}
     """
     if not os.path.exists(file_path):
@@ -277,23 +328,35 @@ def parse_pdf(
 
     try:
         md_text = None
-        if token and prefer_precise:
+
+        # 1) Local self-hosted MinerU (fastest, no token)
+        local = LocalMinerUAPI()
+        md_text = local.parse_file(file_path, language=language,
+                                   page_range=page_range, timeout=timeout)
+        if md_text:
+            api_used = "local"
+
+        # 2) Remote PreciseAPI (best quality, needs token)
+        if md_text is None and token and prefer_precise:
             api = PreciseAPI(token)
             md_text = api.parse_file(
                 file_path, model_version=model_version,
                 language=language, page_ranges=page_range, timeout=timeout,
             )
-            api_used = "precise"
+            if md_text:
+                api_used = "precise"
 
+        # 3) Remote AgentAPI (free, no token)
         if md_text is None:
             api = AgentAPI()
             md_text = api.parse_file(
                 file_path, language=language,
                 page_range=page_range, timeout=timeout,
             )
-            api_used = "agent"
+            if md_text:
+                api_used = "agent"
 
-        # Tesseract fallback if MinerU returned nothing
+        # 4) Tesseract fallback
         if md_text is None and _check_tesseract():
             md_text = _tesseract_pdf(file_path, language=language, page_range=page_range)
             if md_text:
