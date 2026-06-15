@@ -139,6 +139,9 @@ def _build_task_body(
     profile = node.get("profile", "")
     checks = node.get("checks") or []
     output_required = node.get("output_required") or []
+    input_schema = node.get("input_schema") or []
+    timeout_mins = node.get("timeout_minutes")
+    node_retry = node.get("retry") or {}
 
     parts: list[str] = [
         f"## Legal Swarm Task — {workflow_id} / {run_id}",
@@ -147,6 +150,14 @@ def _build_task_body(
         f"**Kind:** `{kind}`  ",
         f"**Profile:** `{profile}`  ",
         f"**Root / Blackboard:** `{root_task_id}`  ",
+    ]
+    if timeout_mins:
+        parts.append(f"**Timeout:** {timeout_mins} min  ")
+    if node_retry:
+        max_att = node_retry.get("max_attempts", "?")
+        parts.append(f"**Max Retries:** {max_att}  ")
+
+    parts += [
         "",
         "## Swarm Protocol",
         f"- Swarm root (shared blackboard): `{root_task_id}`",
@@ -160,6 +171,12 @@ def _build_task_body(
         parts.append("## Parameters")
         for k, v in params.items():
             parts.append(f"- **{k}:** {v}")
+
+    if input_schema:
+        parts.append("")
+        parts.append("## Expected Inputs")
+        for field in input_schema:
+            parts.append(f"- `{field}`")
 
     if output_required:
         parts.append("")
@@ -298,6 +315,12 @@ def compile_workflow(
         checks: list[str] = node.get("checks") or []
         title = node.get("title") or f"[{workflow_id}] {node_id}"
 
+        # Optional node-level runtime config
+        timeout_mins = node.get("timeout_minutes")
+        max_runtime = int(timeout_mins * 60) if isinstance(timeout_mins, (int, float)) else None
+        node_retry = node.get("retry") or {}
+        max_retries = int(node_retry.get("max_attempts")) if isinstance(node_retry, dict) and "max_attempts" in node_retry else None
+
         if kind == "fanout":
             if not profiles:
                 raise ValueError(
@@ -324,6 +347,8 @@ def compile_workflow(
                     idempotency_key=_node_idempotency_key(workflow_id, run_id, node_id, fanout_suffix),
                     workspace_kind=workspace_kind,
                     workspace_path=workspace_path,
+                    max_runtime_seconds=max_runtime,
+                    max_retries=max_retries,
                 )
                 task_ids.append(tid)
             node_task_map[node_id] = NodeTaskMapping(
@@ -351,6 +376,8 @@ def compile_workflow(
                 idempotency_key=_node_idempotency_key(workflow_id, run_id, node_id),
                 workspace_kind=workspace_kind,
                 workspace_path=workspace_path,
+                max_runtime_seconds=max_runtime,
+                max_retries=max_retries,
             )
             node_task_map[node_id] = NodeTaskMapping(
                 node_id=node_id,
