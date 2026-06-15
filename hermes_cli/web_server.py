@@ -24,6 +24,7 @@ import time
 import urllib.parse
 import urllib.request
 from pathlib import Path
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
 import yaml
@@ -2999,6 +3000,43 @@ async def get_swarm_run_status(run_id: str, board: str = ""):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.post("/api/projects/{project_id}/workflows/{workflow_id}/compile")
+async def compile_swarm_workflow(project_id: str, workflow_id: str, request: Request):
+    """Compile a YAML workflow definition into a kanban swarm run."""
+    project = _resolve_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    body: dict = {}
+    try:
+        body = await request.json() or {}
+    except Exception:
+        pass
+
+    project_dir = str(project.get("cwd") or project.get("directory") or "")
+
+    try:
+        from hermes_cli.kanban_legal_swarm import compile_workflow
+        run = compile_workflow(
+            project_dir=project_dir,
+            workflow_id=workflow_id,
+            params=body.get("params") or {},
+        )
+        return {
+            "ok": True,
+            "board": run.board,
+            "run_id": run.run_id,
+            "workflow_id": run.workflow_id,
+            "root_task_id": run.root_task_id,
+            "node_count": len(run.node_mappings),
+        }
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        _log.exception("POST /api/projects/.../compile failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # ---------------------------------------------------------------------------
 # Project file browsing / upload / download endpoints
 # ---------------------------------------------------------------------------
@@ -4334,6 +4372,219 @@ async def create_project_workflow(project_id: str, request: Request):
     except Exception as e:
         _log.exception("POST project workflow failed")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/workflows/definitions")
+async def list_workflow_definitions():
+    """Return available YAML workflow definitions (the 4 swarm templates)."""
+    try:
+        from hermes_cli.project_commands import _LEGAL_WORKFLOW_TEMPLATES
+        defs = []
+        for wid, spec in _LEGAL_WORKFLOW_TEMPLATES.items():
+            nodes = spec.get("nodes", [])
+            pipeline = " → ".join(n["id"] for n in nodes)
+            defs.append({
+                "id": wid,
+                "version": spec.get("version", 1),
+                "description": spec.get("description", ""),
+                "node_count": len(nodes),
+                "pipeline": pipeline,
+                "input_schema": spec.get("input_schema", []),
+                "timeout_minutes": spec.get("timeout_minutes"),
+            })
+        return {"ok": True, "definitions": defs}
+    except Exception as e:
+        _log.exception("GET /api/workflows/definitions failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ---------------------------------------------------------------------------
+# Chat Room REST endpoints
+# ---------------------------------------------------------------------------
+
+
+@app.post("/api/rooms")
+async def create_room(request: Request):
+    """Create a legal swarm chat room by compiling a workflow.
+
+    Body: ``{project_id, workflow_id, params?}``
+    Returns: ``{ok, board, run_id, workflow_id, node_count}``
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+
+    project_id = str(body.get("project_id", "")).strip()
+    workflow_id = str(body.get("workflow_id", "")).strip()
+    params = body.get("params") or {}
+
+    if not project_id:
+        raise HTTPException(status_code=400, detail="project_id is required")
+    if not workflow_id:
+        raise HTTPException(status_code=400, detail="workflow_id is required")
+
+    project = _resolve_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    project_dir = project.get("cwd") or project.get("directory") or ""
+
+    try:
+        from hermes_cli.kanban_legal_swarm import compile_workflow
+
+        run = compile_workflow(
+            project_dir=project_dir,
+            workflow_id=workflow_id,
+            params=params,
+        )
+        return {
+            "ok": True,
+            "board": run.board,
+            "run_id": run.run_id,
+            "workflow_id": run.workflow_id,
+            "root_task_id": run.root_task_id,
+            "node_count": len(run.node_mappings),
+        }
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        _log.exception("create_room failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/rooms/{board}/{run_id}/messages")
+async def get_room_messages(board: str, run_id: str, since: str = ""):
+    """Return historical chat room messages from kanban DB."""
+    room_id = f"{board}/{run_id}"
+    if not _ROOM_ID_RE.match(room_id):
+        raise HTTPException(status_code=400, detail="Invalid board/run_id")
+
+    import sqlite3 as _sql
+    from hermes_cli.kanban_db import (
+        kanban_db_path,
+        list_comments_for_tasks,
+        list_events_for_tasks,
+    )
+    from hermes_cli.kanban_legal_swarm import get_run_task_ids
+
+    db_path = kanban_db_path(board=board)
+    if not db_path.exists():
+        return {"ok": True, "messages": []}
+
+    conn = _sql.connect(str(db_path))
+    conn.row_factory = _sql.Row
+    try:
+        # Find root task for this run
+        row = conn.execute(
+            "SELECT id FROM tasks WHERE idempotency_key LIKE ? "
+            "AND status != 'archived' ORDER BY created_at DESC LIMIT 1",
+            (f"%:{run_id}:%",),
+        ).fetchone()
+        if not row:
+            return {"ok": True, "messages": []}
+        task_ids = get_run_task_ids(conn, row["id"])
+
+        since_id = 0
+        if since and since.isdigit():
+            since_id = int(since)
+
+        messages: list[dict] = []
+        for c in list_comments_for_tasks(conn, task_ids, since_id=since_id):
+            body = c.body or ""
+            if body.startswith("[swarm:blackboard] "):
+                continue
+            messages.append(
+                _format_room_message(
+                    f"comment-{c.id}", "bot", body,
+                    sender=c.author, task_id=c.task_id,
+                    timestamp=c.created_at,
+                )
+            )
+
+        for ev in list_events_for_tasks(conn, task_ids, since_id=since_id):
+            kind = ev.kind or ""
+            if kind == "commented":
+                continue
+            messages.append(
+                _format_room_message(
+                    f"event-{ev.id}", "status",
+                    f"Task {ev.task_id}: {kind}",
+                    task_id=ev.task_id,
+                    timestamp=ev.created_at,
+                )
+            )
+
+        messages.sort(key=lambda m: m["timestamp"])
+        return {"ok": True, "messages": messages}
+    finally:
+        conn.close()
+
+
+@app.get("/api/rooms/{board}/{run_id}/status")
+async def get_room_status(board: str, run_id: str):
+    """Return combined room status: run progress, bot list, topology."""
+    room_id = f"{board}/{run_id}"
+    if not _ROOM_ID_RE.match(room_id):
+        raise HTTPException(status_code=400, detail="Invalid board/run_id")
+
+    import sqlite3 as _sql
+    from hermes_cli.kanban_db import kanban_db_path
+    from hermes_cli.kanban_legal_swarm import get_run_task_ids, run_status
+
+    db_path = kanban_db_path(board=board)
+    if not db_path.exists():
+        raise HTTPException(status_code=404, detail="Board not found")
+
+    conn = _sql.connect(str(db_path))
+    conn.row_factory = _sql.Row
+    try:
+        row = conn.execute(
+            "SELECT id FROM tasks WHERE idempotency_key LIKE ? "
+            "AND status != 'archived' ORDER BY created_at DESC LIMIT 1",
+            (f"%:{run_id}:%",),
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Run not found")
+
+        root_id = row["id"]
+        status = run_status(conn, root_id)
+
+        # Build bot list from node topology
+        bots: list[dict] = []
+        for nid, nstatus in status.get("nodes", {}).items():
+            for t in nstatus.get("tasks", []):
+                bots.append({
+                    "id": nid,
+                    "name": t.get("assignee", nid) or nid,
+                    "profile": t.get("assignee", ""),
+                    "status": t.get("status", "pending"),
+                    "taskId": t.get("task_id", ""),
+                    "kind": nstatus.get("kind", "worker"),
+                })
+
+        return {
+            "ok": True,
+            "run_status": status,
+            "bots": bots,
+        }
+    finally:
+        conn.close()
+
+
+@app.get("/api/bots")
+async def list_bot_profiles():
+    """Return available legal bot profiles for the chat room."""
+    bots = [
+        {"id": "lex-coordinator", "name": "Lex Coordinator", "description": "Orchestrates workflows and runs scorecard gates.", "profile": "lex-coordinator"},
+        {"id": "lex-drafter", "name": "Lex Drafter", "description": "Drafts and revises legal documents with Track Changes.", "profile": "lex-drafter"},
+        {"id": "lex-reviewer-content", "name": "Lex Reviewer (Content)", "description": "Reviews legal substance, completeness, and consistency.", "profile": "lex-reviewer-content"},
+        {"id": "lex-reviewer-format", "name": "Lex Reviewer (Format)", "description": "Reviews fonts, spacing, numbering, and page layout.", "profile": "lex-reviewer-format"},
+        {"id": "lex-reviewer-xref", "name": "Lex Reviewer (XRef)", "description": "Reviews internal citations, bookmarks, and defined terms.", "profile": "lex-reviewer-xref"},
+        {"id": "lex-reviewer-ts", "name": "Lex Reviewer (TS)", "description": "Checks contract vs term sheet consistency.", "profile": "lex-reviewer-ts"},
+        {"id": "lex-reviewer-translation", "name": "Lex Reviewer (Translation)", "description": "Reviews bilingual accuracy and terminology.", "profile": "lex-reviewer-translation"},
+    ]
+    return {"ok": True, "bots": bots}
 
 
 @app.get("/api/workflows/{run_id}")
@@ -5747,6 +5998,30 @@ _event_channels: dict[str, set] = {}
 _event_lock = asyncio.Lock()
 
 
+# Per-room subscriber registry for /ws/room/{board}/{run_id}.  Each room has a
+# background poller that bridges kanban comments/events to chat.  Rooms
+# garbage-collect 5 min after the last subscriber disconnects.
+@dataclass
+class RoomState:
+    board: str
+    run_id: str
+    subscribers: set[WebSocket] = field(default_factory=set)
+    poller_task: "asyncio.Task | None" = None
+    last_comment_id: int = 0
+    last_event_id: int = 0
+    task_ids: list[str] = field(default_factory=list)
+    gc_timer: "asyncio.Task | None" = None
+    created_at: float = field(default_factory=time.time)
+
+
+_rooms: dict[str, RoomState] = {}
+_rooms_lock = asyncio.Lock()
+
+_ROOM_ID_RE = re.compile(r"^[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+$")
+_ROOM_GC_SECONDS = 300  # 5 min
+_ROOM_POLL_SECONDS = 3
+
+
 def _resolve_chat_argv(
     resume: Optional[str] = None,
     sidecar_url: Optional[str] = None,
@@ -6068,6 +6343,324 @@ async def events_ws(ws: WebSocket) -> None:
 
                 if not subs:
                     _event_channels.pop(channel, None)
+
+
+# ---------------------------------------------------------------------------
+# Chat Room WebSocket — multi-participant legal swarm chat
+# ---------------------------------------------------------------------------
+
+
+def _format_room_message(
+    msg_id: str,
+    kind: str,
+    text: str,
+    *,
+    sender: str = "",
+    sender_profile: str = "",
+    task_id: str = "",
+    timestamp: float | None = None,
+) -> dict:
+    """Build a RoomMessage-compatible JSON dict for WS broadcast."""
+    return {
+        "id": msg_id,
+        "kind": kind,
+        "text": text,
+        "sender": sender or "",
+        "senderProfile": sender_profile or "",
+        "taskId": task_id or "",
+        "timestamp": timestamp or time.time(),
+    }
+
+
+async def _room_poller(room_id: str) -> None:
+    """Background task: poll kanban DB for new events/comments, push to room subscribers."""
+    while True:
+        await asyncio.sleep(_ROOM_POLL_SECONDS)
+        async with _rooms_lock:
+            room = _rooms.get(room_id)
+            if room is None or not room.subscribers:
+                return
+
+        try:
+            from hermes_cli.kanban_db import (
+                kanban_db_path,
+                list_comments_for_tasks,
+                list_events_for_tasks,
+            )
+            db_path = kanban_db_path(board=room.board)
+            if not db_path.exists():
+                continue
+            import sqlite3
+
+            conn = sqlite3.connect(str(db_path))
+            try:
+                # Fetch new comments and events since last cursor
+                new_comments = list_comments_for_tasks(
+                    conn, room.task_ids, since_id=room.last_comment_id,
+                )
+                new_events = list_events_for_tasks(
+                    conn, room.task_ids, since_id=room.last_event_id,
+                )
+
+                if not new_comments and not new_events:
+                    continue
+
+                # Build room messages
+                messages: list[dict] = []
+                for c in new_comments:
+                    # Determine sender from comment metadata
+                    sender = c.author or "bot"
+                    sender_profile = ""
+                    # Try to extract profile from blackboard-style comments
+                    body = c.body or ""
+                    if body.startswith("[swarm:blackboard] "):
+                        continue  # skip blackboard entries, they're internal
+                    messages.append(
+                        _format_room_message(
+                            f"comment-{c.id}",
+                            "bot",
+                            body,
+                            sender=sender,
+                            sender_profile=sender_profile,
+                            task_id=c.task_id,
+                            timestamp=c.created_at,
+                        )
+                    )
+                    if c.id > room.last_comment_id:
+                        room.last_comment_id = c.id
+
+                for ev in new_events:
+                    kind = ev.kind or ""
+                    # Map kanban event kinds to room message text
+                    text_map: dict[str, str] = {
+                        "completed": f"Task {ev.task_id} completed",
+                        "blocked": f"Task {ev.task_id} blocked",
+                        "commented": f"Task {ev.task_id} has a new comment",
+                        "heartbeat": f"Task {ev.task_id} heartbeat received",
+                        "claimed": f"Task {ev.task_id} claimed",
+                        "gave_up": f"Task {ev.task_id} gave up",
+                        "crashed": f"Task {ev.task_id} worker crashed",
+                        "timed_out": f"Task {ev.task_id} timed out",
+                    }
+                    text = text_map.get(kind, f"Task {ev.task_id}: {kind}")
+                    # Include payload details if available
+                    if ev.payload and isinstance(ev.payload, dict):
+                        if "summary" in ev.payload:
+                            text += f" — {ev.payload['summary'][:200]}"
+                        elif "comment" in ev.payload:
+                            text += f" — {ev.payload['comment'][:200]}"
+                    messages.append(
+                        _format_room_message(
+                            f"event-{ev.id}",
+                            "status",
+                            text,
+                            task_id=ev.task_id,
+                            timestamp=ev.created_at,
+                        )
+                    )
+                    if ev.id > room.last_event_id:
+                        room.last_event_id = ev.id
+
+            finally:
+                conn.close()
+
+            # Broadcast to all subscribers
+            if messages:
+                dead: list[WebSocket] = []
+                for ws in list(room.subscribers):
+                    try:
+                        for msg in messages:
+                            await ws.send_json(msg)
+                    except Exception:
+                        dead.append(ws)
+                for ws in dead:
+                    room.subscribers.discard(ws)
+
+        except Exception:
+            _log.exception("room poller error for %s", room_id)
+
+
+def _ensure_room_poller(room: RoomState, room_id: str) -> None:
+    """Start the poller for *room* if not already running."""
+    if room.poller_task is None or room.poller_task.done():
+        room.poller_task = asyncio.create_task(_room_poller(room_id))
+
+
+async def _cancel_room_gc(room: RoomState) -> None:
+    """Cancel a pending GC timer for *room*."""
+    if room.gc_timer is not None and not room.gc_timer.done():
+        room.gc_timer.cancel()
+    room.gc_timer = None
+
+
+def _schedule_room_gc(room_id: str) -> None:
+    """Schedule garbage collection for a room after a delay of inactivity.
+
+    Caller must hold ``_rooms_lock``.
+    """
+    async def _gc_after_delay():
+        await asyncio.sleep(_ROOM_GC_SECONDS)
+        async with _rooms_lock:
+            room = _rooms.get(room_id)
+            if room is None:
+                return
+            if room.subscribers:
+                return  # someone reconnected
+            if room.poller_task and not room.poller_task.done():
+                room.poller_task.cancel()
+            _rooms.pop(room_id, None)
+
+    room = _rooms.get(room_id)
+    if room is not None:
+        room.gc_timer = asyncio.create_task(_gc_after_delay())
+
+
+@app.websocket("/ws/room/{board}/{run_id}")
+async def room_ws(ws: WebSocket, board: str, run_id: str) -> None:
+    """Chat room WebSocket — multi-participant legal swarm conversation.
+
+    Clients send ``{type: "user_msg", text: "..."}`` to broadcast to all
+    subscribers. The server pushes ``RoomMessage`` objects as JSON for every
+    new kanban comment/event. On first connect the client should send
+    ``{type: "reply"}`` to receive a full replay.
+    """
+    room_id = f"{board}/{run_id}"
+
+    if not _ROOM_ID_RE.match(room_id):
+        await ws.close(code=4400)
+        return
+
+    if not _ws_auth_ok(ws):
+        await ws.close(code=4401)
+        return
+
+    await ws.accept()
+
+    # Register subscriber
+    async with _rooms_lock:
+        if room_id not in _rooms:
+            # Try to populate task_ids from the kanban DB
+            import sqlite3
+            from hermes_cli.kanban_db import kanban_db_path
+            from hermes_cli.kanban_legal_swarm import get_run_task_ids
+
+            db_path = kanban_db_path(board=board)
+            task_ids: list[str] = []
+            if db_path.exists():
+                conn = sqlite3.connect(str(db_path))
+                conn.row_factory = sqlite3.Row
+                try:
+                    # Find root task — it has idempotency_key matching the run
+                    row = conn.execute(
+                        "SELECT id FROM tasks WHERE idempotency_key LIKE ? "
+                        "AND status != 'archived' ORDER BY created_at DESC LIMIT 1",
+                        (f"%:{run_id}:%",),
+                    ).fetchone()
+                    if row:
+                        task_ids = get_run_task_ids(conn, row["id"])
+                finally:
+                    conn.close()
+
+            _rooms[room_id] = RoomState(
+                board=board,
+                run_id=run_id,
+                task_ids=task_ids,
+            )
+
+        room = _rooms[room_id]
+        room.subscribers.add(ws)
+        await _cancel_room_gc(room)
+        _ensure_room_poller(room, room_id)
+
+    try:
+        while True:
+            raw = await ws.receive_text()
+            try:
+                msg = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+
+            msg_type = msg.get("type", "")
+
+            if msg_type == "user_msg":
+                text = str(msg.get("text", "")).strip()
+                if not text:
+                    continue
+                payload = _format_room_message(
+                    f"user-{int(time.time() * 1000)}",
+                    "user",
+                    text,
+                )
+                # Broadcast to all subscribers including sender
+                dead: list[WebSocket] = []
+                async with _rooms_lock:
+                    subs = list(room.subscribers) if room_id in _rooms else []
+                for sub in subs:
+                    try:
+                        await sub.send_json(payload)
+                    except Exception:
+                        dead.append(sub)
+                if dead:
+                    async with _rooms_lock:
+                        if room_id in _rooms:
+                            for d in dead:
+                                _rooms[room_id].subscribers.discard(d)
+
+            elif msg_type == "replay":
+                # Send full message history from kanban DB
+                from hermes_cli.kanban_db import (
+                    kanban_db_path,
+                    list_comments_for_tasks,
+                    list_events_for_tasks,
+                )
+                import sqlite3 as _sql
+
+                db_path = kanban_db_path(board=board)
+                msgs: list[dict] = []
+                if db_path.exists():
+                    conn = _sql.connect(str(db_path))
+                    try:
+                        async with _rooms_lock:
+                            tids = list(_rooms[room_id].task_ids) if room_id in _rooms else []
+                        for c in list_comments_for_tasks(conn, tids):
+                            body = c.body or ""
+                            if body.startswith("[swarm:blackboard] "):
+                                continue
+                            msgs.append(
+                                _format_room_message(
+                                    f"comment-{c.id}", "bot", body,
+                                    sender=c.author, task_id=c.task_id,
+                                    timestamp=c.created_at,
+                                )
+                            )
+                        for ev in list_events_for_tasks(conn, tids):
+                            kind = ev.kind or ""
+                            if kind == "commented":
+                                continue  # comment already captured above
+                            msgs.append(
+                                _format_room_message(
+                                    f"event-{ev.id}", "status",
+                                    f"Task {ev.task_id}: {kind}",
+                                    task_id=ev.task_id,
+                                    timestamp=ev.created_at,
+                                )
+                            )
+                    finally:
+                        conn.close()
+
+                # Send as individual messages
+                for m in sorted(msgs, key=lambda x: x["timestamp"]):
+                    await ws.send_json(m)
+
+    except WebSocketDisconnect:
+        pass
+    finally:
+        # Unregister subscriber
+        async with _rooms_lock:
+            if room_id in _rooms:
+                _rooms[room_id].subscribers.discard(ws)
+                if not _rooms[room_id].subscribers:
+                    _schedule_room_gc(room_id)
 
 
 def _normalise_prefix(raw: Optional[str]) -> str:

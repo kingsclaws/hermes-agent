@@ -540,6 +540,47 @@ export const api = {
     ),
 
   // Project legal workflows
+  // ── Swarm workflow definitions (YAML templates) ──
+
+  fetchWorkflowDefinitions: () =>
+    fetchJSON<WorkflowDefinitionsResponse>("/api/workflows/definitions"),
+
+  compileSwarmWorkflow: (projectId: string, workflowId: string, params?: Record<string, unknown>) =>
+    fetchJSON<CompileSwarmResponse>(
+      `/api/projects/${encodeURIComponent(projectId)}/workflows/${encodeURIComponent(workflowId)}/compile`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ params: params || {} }),
+      },
+    ),
+
+  // ── Chat Room ──
+
+  createRoom: (projectId: string, workflowId: string, params?: Record<string, unknown>) =>
+    fetchJSON<CreateRoomResponse>("/api/rooms", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ project_id: projectId, workflow_id: workflowId, params: params || {} }),
+    }),
+
+  getRoomMessages: (board: string, runId: string, since?: string) => {
+    const qs = since ? `?since=${encodeURIComponent(since)}` : "";
+    return fetchJSON<RoomMessagesResponse>(
+      `/api/rooms/${encodeURIComponent(board)}/${encodeURIComponent(runId)}/messages${qs}`,
+    );
+  },
+
+  getRoomStatus: (board: string, runId: string) =>
+    fetchJSON<RoomStatusResponse>(
+      `/api/rooms/${encodeURIComponent(board)}/${encodeURIComponent(runId)}/status`,
+    ),
+
+  listBots: () =>
+    fetchJSON<BotListResponse>("/api/bots"),
+
+  // ── SessionDB legal workflows (persistent step-based) ──
+
   fetchProjectWorkflows: (projectId: string, limit?: number) => {
     const qs = limit ? `?limit=${encodeURIComponent(String(limit))}` : "";
     return fetchJSON<WorkflowListResponse>(
@@ -1053,6 +1094,92 @@ export interface SwarmRunStatusResponse {
     node_count: number;
   };
   error?: string;
+}
+
+// ── Workflow definition types (YAML swarm templates) ──
+
+export interface WorkflowDefinition {
+  id: string;
+  version: number;
+  description: string;
+  node_count: number;
+  pipeline: string;
+  input_schema: string[];
+  timeout_minutes?: number;
+}
+
+export interface WorkflowDefinitionsResponse {
+  ok: boolean;
+  definitions: WorkflowDefinition[];
+}
+
+export interface CompileSwarmResponse {
+  ok: boolean;
+  board: string;
+  run_id: string;
+  workflow_id: string;
+  root_task_id: string;
+  node_count: number;
+}
+
+// ── Chat Room types ──
+
+export interface RoomMessage {
+  id: string;
+  kind: "user" | "bot" | "status" | "system";
+  text: string;
+  sender?: string;
+  senderProfile?: string;
+  taskId?: string;
+  timestamp: number;
+}
+
+export interface BotInfo {
+  id: string;
+  name: string;
+  description: string;
+  profile: string;
+  status?: string;
+  taskId?: string;
+  kind?: string;
+}
+
+export interface CreateRoomResponse {
+  ok: boolean;
+  board: string;
+  run_id: string;
+  workflow_id: string;
+  root_task_id: string;
+  node_count: number;
+}
+
+export interface RoomMessagesResponse {
+  ok: boolean;
+  messages: RoomMessage[];
+}
+
+export interface RoomStatusResponse {
+  ok: boolean;
+  run_status: {
+    ok: boolean;
+    root_task_id: string;
+    root_status: string;
+    workflow_id: string;
+    run_id: string;
+    nodes: Record<string, {
+      node_id: string;
+      kind: string;
+      task_ids: string[];
+      tasks: Array<{ task_id: string; title: string; status: string; assignee: string }>;
+      status: string;
+    }>;
+  };
+  bots: BotInfo[];
+}
+
+export interface BotListResponse {
+  ok: boolean;
+  bots: BotInfo[];
 }
 
 export interface FileEntry {

@@ -597,6 +597,23 @@ def run_status(
     }
 
 
+def get_run_task_ids(conn: sqlite3.Connection, root_task_id: str) -> list[str]:
+    """Return every task_id in a compiled workflow run (including the root).
+
+    Reads the blackboard topology stored on the root task. Returns an
+    empty list if *root_task_id* doesn't carry a legal-swarm topology.
+    """
+    bb = latest_blackboard(conn, root_task_id)
+    topo = bb.get("topology")
+    if not isinstance(topo, dict):
+        return []
+    ids: list[str] = [root_task_id]
+    for ndict in topo.get("node_mappings", {}).values():
+        if isinstance(ndict, dict):
+            ids.extend(ndict.get("task_ids", []))
+    return ids
+
+
 # ---------------------------------------------------------------------------
 # Handoff validation (called at kanban_complete time)
 # ---------------------------------------------------------------------------

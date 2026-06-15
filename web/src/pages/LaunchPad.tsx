@@ -18,13 +18,14 @@ import {
   Eye,
   ClipboardCheck,
   PackageOpen,
+  MessagesSquare,
 } from "lucide-react";
 import { api } from "@/lib/api";
 import type {
   ProjectInfo,
   ProjectDetail,
   SessionInfo,
-  WorkflowListResponse,
+  WorkflowDefinition,
   InventoryResponse,
 } from "@/lib/api";
 import { cn, timeAgo } from "@/lib/utils";
@@ -35,7 +36,6 @@ import { Spinner } from "@nous-research/ui/ui/components/spinner";
 import { Card, CardContent } from "@nous-research/ui/ui/components/card";
 import { ListItem } from "@nous-research/ui/ui/components/list-item";
 import { useToast } from "@nous-research/ui/hooks/use-toast";
-import { useI18n } from "@/i18n";
 import { usePageHeader } from "@/contexts/usePageHeader";
 import { PluginSlot } from "@/plugins";
 
@@ -70,16 +70,16 @@ export default function LaunchPad() {
   // Context panel state
   const [projectDetail, setProjectDetail] = useState<ProjectDetail | null>(null);
   const [inventory, setInventory] = useState<InventoryResponse | null>(null);
-  const [workflows, setWorkflows] = useState<WorkflowListResponse | null>(null);
+  const [workflowDefs, setWorkflowDefs] = useState<WorkflowDefinition[]>([]);
   const [contextLoading, setContextLoading] = useState(false);
 
   // Command bar
   const [commandText, setCommandText] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const [compiling, setCompiling] = useState<string | null>(null);
 
   const navigate = useNavigate();
   const { showToast } = useToast();
-  const { t } = useI18n();
   const { setAfterTitle, setEnd } = usePageHeader();
 
   // ── Load projects ──────────────────────────────────────────────────
@@ -138,18 +138,18 @@ export default function LaunchPad() {
     if (!selectedId) {
       setProjectDetail(null);
       setInventory(null);
-      setWorkflows(null);
+      setWorkflowDefs([]);
       return;
     }
     setContextLoading(true);
     Promise.all([
       api.getProject(selectedId).catch(() => null),
       api.fetchInventory(selectedId).catch(() => null),
-      api.fetchProjectWorkflows(selectedId, 10).catch(() => null),
-    ]).then(([detail, inv, wf]) => {
+      api.fetchWorkflowDefinitions().catch(() => ({ ok: true, definitions: [] })),
+    ]).then(([detail, inv, wfDefs]) => {
       setProjectDetail(detail as ProjectDetail | null);
       setInventory(inv as InventoryResponse | null);
-      setWorkflows(wf as WorkflowListResponse | null);
+      setWorkflowDefs((wfDefs as any)?.definitions ?? []);
       setContextLoading(false);
     });
   }, [selectedId]);
@@ -189,13 +189,40 @@ export default function LaunchPad() {
   );
 
   const handleRunWorkflow = useCallback(
-    (workflowId: string) => {
-      setCommandText(`/legal-swarm run ${workflowId}`);
+    async (workflowId: string) => {
+      if (!selectedId || compiling) return;
+      setCompiling(workflowId);
+      try {
+        const result = await api.compileSwarmWorkflow(selectedId, workflowId);
+        navigate(
+          `/swarm-board?board=${encodeURIComponent(result.board)}&run=${encodeURIComponent(result.run_id)}`,
+        );
+      } catch (e: any) {
+        showToast(e?.message ?? "Failed to compile workflow", "error");
+        setCompiling(null);
+      }
     },
-    [],
+    [selectedId, compiling, navigate, showToast],
   );
 
-  const handleKeyDown = useCallback(
+  const handleOpenChatRoom = useCallback(
+    async (workflowId: string) => {
+      if (!selectedId || compiling) return;
+      setCompiling(workflowId);
+      try {
+        const result = await api.createRoom(selectedId, workflowId);
+        navigate(
+          `/swarm-chat?board=${encodeURIComponent(result.board)}&run=${encodeURIComponent(result.run_id)}`,
+        );
+      } catch (e: any) {
+        showToast(e?.message ?? "Failed to create chat room", "error");
+        setCompiling(null);
+      }
+    },
+    [selectedId, compiling, navigate, showToast],
+  );
+
+  const handleKeyDown= useCallback(
     (e: React.KeyboardEvent<HTMLInputElement>) => {
       if (e.key === "Enter" && !e.shiftKey) {
         e.preventDefault();
@@ -216,7 +243,6 @@ export default function LaunchPad() {
         ...(entry as any),
       }))
     : [];
-  const workflowList = workflows?.workflows ?? [];
 
   // ── Loading state ──────────────────────────────────────────────────
 
@@ -303,7 +329,7 @@ export default function LaunchPad() {
                     {p.created && (
                       <span className="flex items-center gap-1">
                         <Calendar className="w-3 h-3" />
-                        {timeAgo(p.created)}
+                        {timeAgo(new Date(p.created).getTime())}
                       </span>
                     )}
                   </div>
@@ -370,35 +396,57 @@ export default function LaunchPad() {
               {/* Workflows */}
               <div className="flex-1 min-w-0">
                 <h3 className="text-xs font-semibold text-secondary mb-2 uppercase tracking-wide">
-                  Workflows
+                  Swarm Workflows
                 </h3>
-                {workflowList.length === 0 ? (
+                {workflowDefs.length === 0 ? (
                   <p className="text-xs text-secondary py-4">
-                    No workflow runs yet.
+                    No workflow definitions available.
                   </p>
                 ) : (
                   <div className="flex flex-col gap-1 max-h-48 overflow-y-auto">
-                    {workflowList.map((wf: any) => (
+                    {workflowDefs.map((wf: WorkflowDefinition) => (
                       <div
                         key={wf.id}
                         className="flex items-center gap-2 px-3 py-1.5 rounded-md hover:bg-secondary/5"
                       >
-                        <span className="text-xs truncate flex-1">{wf.id ?? wf.workflow_id}</span>
-                        <Badge
-                          tone={
-                            wf.status === "done" ? "success" : wf.status === "running" ? "warning" : "secondary"
-                          }
-                          className="text-[10px]"
-                        >
-                          {wf.status ?? "unknown"}
+                        <div className="min-w-0 flex-1">
+                          <span className="text-xs font-medium truncate block">
+                            {wf.id}
+                          </span>
+                          <span className="text-[10px] text-secondary truncate block">
+                            {wf.pipeline}
+                          </span>
+                        </div>
+                        <Badge tone="secondary" className="text-[10px] shrink-0">
+                          {wf.node_count} nodes
                         </Badge>
                         <Button
                           size="xs"
                           ghost
-                          onClick={() => handleRunWorkflow(wf.workflow_id ?? wf.id)}
+                          onClick={() => handleRunWorkflow(wf.id)}
+                          disabled={compiling === wf.id}
                           className="shrink-0"
+                          title="Run workflow"
                         >
-                          <Play className="w-3 h-3" />
+                          {compiling === wf.id ? (
+                            <Spinner className="w-3 h-3" />
+                          ) : (
+                            <Play className="w-3 h-3" />
+                          )}
+                        </Button>
+                        <Button
+                          size="xs"
+                          ghost
+                          onClick={() => handleOpenChatRoom(wf.id)}
+                          disabled={compiling === wf.id}
+                          className="shrink-0"
+                          title="Open chat room"
+                        >
+                          {compiling === wf.id ? (
+                            <Spinner className="w-3 h-3" />
+                          ) : (
+                            <MessagesSquare className="w-3 h-3" />
+                          )}
                         </Button>
                       </div>
                     ))}

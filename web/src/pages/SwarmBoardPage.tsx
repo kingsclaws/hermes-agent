@@ -17,14 +17,11 @@ import {
 } from "lucide-react";
 import { api } from "@/lib/api";
 import type { SwarmRunStatusResponse, SwarmNodeStatus, SwarmNodeTask } from "@/lib/api";
-import { timeAgo } from "@/lib/utils";
 import { Button } from "@nous-research/ui/ui/components/button";
 import { Badge } from "@nous-research/ui/ui/components/badge";
 import { Spinner } from "@nous-research/ui/ui/components/spinner";
 import { Card, CardContent } from "@nous-research/ui/ui/components/card";
 import { Segmented } from "@nous-research/ui/ui/components/segmented";
-import { useToast } from "@nous-research/ui/hooks/use-toast";
-import { useI18n } from "@/i18n";
 import { usePageHeader } from "@/contexts/usePageHeader";
 import { PluginSlot } from "@/plugins";
 
@@ -72,8 +69,6 @@ export default function SwarmBoardPage() {
   const [error, setError] = useState<string | null>(null);
   const [view, setView] = useState<"board" | "list">("board");
 
-  const { showToast } = useToast();
-  const { t } = useI18n();
   const { setAfterTitle, setEnd, setTitle } = usePageHeader();
 
   // ── Load ──────────────────────────────────────────────────────────

@@ -11,7 +11,6 @@ import {
 import { api } from "@/lib/api";
 import type { SwarmRunSummary } from "@/lib/api";
 import { timeAgo } from "@/lib/utils";
-import { Button } from "@nous-research/ui/ui/components/button";
 import { Badge } from "@nous-research/ui/ui/components/badge";
 import { Spinner } from "@nous-research/ui/ui/components/spinner";
 import { Card, CardContent } from "@nous-research/ui/ui/components/card";
@@ -40,13 +39,6 @@ const STATUS_ICONS: Record<string, typeof CheckCircle2> = {
   ready: Play as unknown as typeof CheckCircle2,  // won't be used
   pending: Clock,
   blocked: AlertTriangle,
-};
-
-const STATUS_TONES: Record<string, "success" | "warning" | "destructive" | "secondary"> = {
-  done: "success",
-  running: "warning",
-  blocked: "destructive",
-  pending: "secondary",
 };
 
 function RunStatusIcon({ status }: { status: string }) {

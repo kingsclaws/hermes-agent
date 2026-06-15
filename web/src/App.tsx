@@ -80,6 +80,7 @@ import ProjectFilesPage from "@/pages/ProjectFilesPage";
 import ProjectDashboardPage from "@/pages/ProjectDashboardPage";
 import LaunchPad from "@/pages/LaunchPad";
 import SwarmBoardPage from "@/pages/SwarmBoardPage";
+import LegalSwarmChat from "@/pages/LegalSwarmChat";
 import { LanguageSwitcher } from "@/components/LanguageSwitcher";
 import { ThemeSwitcher } from "@/components/ThemeSwitcher";
 import { useI18n } from "@/i18n";
@@ -129,6 +130,7 @@ const BUILTIN_ROUTES_CORE: Record<string, ComponentType> = {
   "/": RootRedirect,
   "/launch": LaunchPad,
   "/swarm-board": SwarmBoardPage,
+  "/swarm-chat": LegalSwarmChat,
   "/projects": ProjectsPage,
   "/projects/:projectId": ProjectDashboardPage,
   "/projects/:projectId/files": ProjectFilesPage,
@@ -159,6 +161,12 @@ const BUILTIN_NAV_REST: NavItem[] = [
     labelKey: "launchpad",
     label: "LaunchPad",
     icon: Rocket,
+  },
+  {
+    path: "/swarm-chat",
+    labelKey: "swarmChat",
+    label: "Swarm Chat",
+    icon: MessageSquare,
   },
   {
     path: "/projects",
@@ -206,6 +214,12 @@ const LEX_WORKSPACE_NAV: NavItem[] = [
     labelKey: "launchpad",
     label: "LaunchPad",
     icon: Rocket,
+  },
+  {
+    path: "/swarm-chat",
+    labelKey: "swarmChat",
+    label: "Swarm Chat",
+    icon: MessageSquare,
   },
   {
     path: "/projects",

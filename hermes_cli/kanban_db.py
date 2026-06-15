@@ -2267,6 +2267,63 @@ def list_events(conn: sqlite3.Connection, task_id: str) -> list[Event]:
     return out
 
 
+def list_comments_for_tasks(
+    conn: sqlite3.Connection, task_ids: list[str], since_id: int = 0,
+) -> list[Comment]:
+    """Return comments for multiple tasks, optionally since a cursor id."""
+    if not task_ids:
+        return []
+    conn.row_factory = sqlite3.Row
+    placeholders = ",".join("?" for _ in task_ids)
+    rows = conn.execute(
+        f"SELECT * FROM task_comments WHERE task_id IN ({placeholders}) "
+        "AND id > ? ORDER BY created_at ASC, id ASC",
+        (*task_ids, since_id),
+    ).fetchall()
+    return [
+        Comment(
+            id=r["id"],
+            task_id=r["task_id"],
+            author=r["author"],
+            body=r["body"],
+            created_at=r["created_at"],
+        )
+        for r in rows
+    ]
+
+
+def list_events_for_tasks(
+    conn: sqlite3.Connection, task_ids: list[str], since_id: int = 0,
+) -> list[Event]:
+    """Return events for multiple tasks, optionally since a cursor id."""
+    if not task_ids:
+        return []
+    conn.row_factory = sqlite3.Row
+    placeholders = ",".join("?" for _ in task_ids)
+    rows = conn.execute(
+        f"SELECT * FROM task_events WHERE task_id IN ({placeholders}) "
+        "AND id > ? ORDER BY created_at ASC, id ASC",
+        (*task_ids, since_id),
+    ).fetchall()
+    out = []
+    for r in rows:
+        try:
+            payload = json.loads(r["payload"]) if r["payload"] else None
+        except Exception:
+            payload = None
+        out.append(
+            Event(
+                id=r["id"],
+                task_id=r["task_id"],
+                kind=r["kind"],
+                payload=payload,
+                created_at=r["created_at"],
+                run_id=(int(r["run_id"]) if "run_id" in r.keys() and r["run_id"] is not None else None),
+            )
+        )
+    return out
+
+
 def _append_event(
     conn: sqlite3.Connection,
     task_id: str,
