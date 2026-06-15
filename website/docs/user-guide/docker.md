@@ -386,7 +386,7 @@ docker run -d \
 
 ## What the Dockerfile does
 
-The official image is based on `debian:13.4` and includes:
+The official image is based on `debian:13` and includes:
 
 - Python 3 with all Hermes dependencies (`uv pip install -e ".[all]"`)
 - Node.js + npm (for browser automation and WhatsApp bridge)

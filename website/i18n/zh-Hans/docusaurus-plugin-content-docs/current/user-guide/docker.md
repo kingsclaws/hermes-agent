@@ -281,7 +281,7 @@ docker run -d \
 
 ## Dockerfile 说明
 
-官方镜像基于 `debian:13.4`，包含：
+官方镜像基于 `debian:13`，包含：
 
 - Python 3 及所有 Hermes 依赖（`uv pip install -e ".[all]"`）
 - Node.js + npm（用于浏览器自动化和 WhatsApp 桥接）
