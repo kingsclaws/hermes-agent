@@ -1293,6 +1293,23 @@ def _handle_legal_orchestrate(args: dict, **kwargs) -> str:
             parent_agent=parent_agent,
         )
 
+    if task_type == "swarm":
+        workflow_id = str(args.get("workflow_id") or "contract_revision").strip()
+        if not project_root.exists():
+            return tool_error(f"project_dir does not exist: {project_root}")
+
+        from hermes_cli.kanban_legal_swarm import compile_workflow
+
+        run = compile_workflow(
+            project_dir=str(project_root),
+            workflow_id=workflow_id,
+            params={
+                "document_path": document_path or "",
+                "instructions": instructions or "",
+            },
+        )
+        return tool_result(json.dumps(run.as_dict(), ensure_ascii=False, indent=2))
+
     if task_type == "draft_iterative":
         if not document_path:
             return tool_error("draft_iterative requires document_path.")

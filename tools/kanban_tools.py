@@ -469,6 +469,18 @@ def _handle_complete(args: dict, **kw) -> str:
     try:
         kb, conn = _connect(board=board)
         try:
+            # --- legal swarm handoff validation ---
+            from hermes_cli.kanban_legal_swarm import validate_handoff
+
+            handoff_result = validate_handoff(conn, tid, metadata)
+            if not handoff_result.get("ok"):
+                return tool_error(
+                    f"Handoff rejected: {'; '.join(handoff_result.get('errors', []))}. "
+                    f"Expected fields: {handoff_result.get('expected', [])}. "
+                    f"{handoff_result.get('hint', '')}"
+                )
+            # --- end handoff validation ---
+
             try:
                 ok = kb.complete_task(
                     conn, tid,
@@ -500,6 +512,13 @@ def _handle_complete(args: dict, **kw) -> str:
                 return tool_error(
                     f"could not complete {tid} (unknown id or already terminal)"
                 )
+            # --- persist handoff for legal swarm tasks ---
+            try:
+                from hermes_cli.kanban_legal_swarm import persist_handoff_for_task
+                persist_handoff_for_task(conn, tid, metadata or {})
+            except Exception:
+                pass  # Handoff persistence is best-effort; completion already succeeded
+            # --- end handoff persistence ---
             run = kb.latest_run(conn, tid)
             return _ok(task_id=tid, run_id=run.id if run else None)
         finally:

@@ -370,7 +370,27 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
     p_swarm.add_argument("--idempotency-key", default=None, help="Dedup key for the root card")
     p_swarm.add_argument("--json", action="store_true", help="Emit JSON output")
 
-    # --- list ---
+    # --- legal-swarm ---
+    p_legal_swarm = sub.add_parser(
+        "legal-swarm",
+        help="Manage legal-swarm workflow runs",
+    )
+    ls_sub = p_legal_swarm.add_subparsers(dest="legal_swarm_action")
+    ls_run = ls_sub.add_parser("run", help="Compile a workflow YAML into kanban tasks")
+    ls_run.add_argument("workflow_id", help="Workflow id (contract_revision, full_review, ...)")
+    ls_run.add_argument("--project", "-p", required=True, help="Project directory")
+    ls_run.add_argument("--board", default=None, help="Kanban board slug")
+    ls_run.add_argument("--params", default="{}", help="JSON params (document_path, instructions, ...)")
+    ls_run.add_argument("--json", action="store_true", help="Emit JSON output")
+
+    ls_status = ls_sub.add_parser("status", help="Show per-node status for a run")
+    ls_status.add_argument("root_task_id", help="Root task id of the legal swarm run")
+    ls_status.add_argument("--board", default=None, help="Kanban board slug")
+    ls_status.add_argument("--json", action="store_true", help="Emit JSON output")
+
+    ls_list = ls_sub.add_parser("list", help="List legal-swarm runs on the board")
+    ls_list.add_argument("--board", default=None, help="Kanban board slug")
+    ls_list.add_argument("--json", action="store_true", help="Emit JSON output")
     p_list = sub.add_parser("list", aliases=["ls"], help="List tasks")
     p_list.add_argument("--mine", action="store_true",
                         help="Filter by $HERMES_PROFILE as assignee")
@@ -915,6 +935,7 @@ def kanban_command(args: argparse.Namespace) -> int:
         "init":     _cmd_init,
         "create":   _cmd_create,
         "swarm":    _cmd_swarm,
+        "legal-swarm": _cmd_legal_swarm,
         "list":     _cmd_list,
         "ls":       _cmd_list,
         "show":     _cmd_show,
@@ -1389,6 +1410,77 @@ def _cmd_swarm(args: argparse.Namespace) -> int:
         print(f"Verifier: {created.verifier_id}")
         print(f"Synthesizer: {created.synthesizer_id}")
     return 0
+
+
+def _cmd_legal_swarm(args: argparse.Namespace) -> int:
+    """Handle ``kanban legal-swarm run|status|list``."""
+    import json as _json
+
+    from hermes_cli.kanban_legal_swarm import (
+        compile_workflow,
+        run_status,
+        list_runs,
+    )
+
+    action = getattr(args, "legal_swarm_action", None)
+
+    if action == "run":
+        try:
+            params = _json.loads(args.params)
+        except _json.JSONDecodeError:
+            print(f"kanban legal-swarm: --params must be valid JSON", file=sys.stderr)
+            return 2
+        with kb.connect_closing(board=args.board) as conn:
+            run = compile_workflow(
+                project_dir=args.project,
+                workflow_id=args.workflow_id,
+                board=args.board,
+                params=params,
+            )
+        if getattr(args, "json", False):
+            print(_json.dumps(run.as_dict(), indent=2, ensure_ascii=False))
+        else:
+            print(f"Workflow: {run.workflow_id}")
+            print(f"Run:      {run.run_id}")
+            print(f"Board:    {run.board}")
+            print(f"Root:     {run.root_task_id}")
+            print("Nodes:")
+            for nid, m in run.node_mappings.items():
+                print(f"  {nid} ({m.kind}): {', '.join(m.task_ids)}")
+        return 0
+
+    if action == "status":
+        with kb.connect_closing(board=args.board) as conn:
+            status = run_status(conn, args.root_task_id)
+        if getattr(args, "json", False):
+            print(_json.dumps(status, indent=2, ensure_ascii=False))
+        else:
+            if not status.get("ok"):
+                print(f"Error: {status.get('error')}", file=sys.stderr)
+                return 1
+            print(f"Workflow: {status['workflow_id']}  Run: {status['run_id']}")
+            print(f"Root: {status['root_task_id']} ({status['root_status']})")
+            for nid, ns in status.get("nodes", {}).items():
+                tasks_summary = ", ".join(
+                    f"{t['task_id'][:12]}={t['status']}" for t in ns.get("tasks", [])
+                )
+                print(f"  {ns['status']:8s} {nid:20s} ({ns['kind']}) {tasks_summary}")
+        return 0
+
+    if action == "list":
+        with kb.connect_closing(board=args.board) as conn:
+            runs = list_runs(conn)
+        if getattr(args, "json", False):
+            print(_json.dumps(runs, indent=2, ensure_ascii=False))
+        else:
+            if not runs:
+                print("No legal-swarm runs found on this board.")
+            for r in runs:
+                print(f"  [{r['status']:8s}] {r['workflow_id']:25s} {r['run_id']}  root={r['root_task_id']}")
+        return 0
+
+    print(f"kanban legal-swarm: unknown action '{action}'. Try run, status, or list.", file=sys.stderr)
+    return 2
 
 
 def _cmd_list(args: argparse.Namespace) -> int:
