@@ -927,6 +927,12 @@ def init_agent(
                 print(f"   ❌ Disabled toolsets: {', '.join(disabled_toolsets)}")
     elif not agent.quiet_mode:
         print("🛠️  No tools loaded (all tools filtered out or unavailable)")
+    try:
+        from agent.tool_refresh import _tool_defs_fingerprint
+        agent._tool_definitions_fingerprint = _tool_defs_fingerprint(agent.tools)
+    except Exception:
+        agent._tool_definitions_fingerprint = None
+    agent._force_system_prompt_rebuild_once = False
 
     # Kanban worker/orchestrator lifecycle guidance is session-static:
     # the dispatcher decides at spawn time whether this process is a kanban
@@ -1517,6 +1523,11 @@ def init_agent(
                 agent.valid_tool_names.add(_tname)
                 agent._context_engine_tool_names.add(_tname)
                 _existing_tool_names.add(_tname)
+    try:
+        from agent.tool_refresh import _tool_defs_fingerprint
+        agent._tool_definitions_fingerprint = _tool_defs_fingerprint(agent.tools)
+    except Exception:
+        pass
 
     # Notify context engine of session start
     if hasattr(agent, "context_compressor") and agent.context_compressor:

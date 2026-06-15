@@ -255,7 +255,8 @@ def _restore_or_build_system_prompt(agent, system_message, conversation_history)
     """
     stored_prompt = None
     stored_state = "missing"
-    if conversation_history and agent._session_db:
+    force_rebuild = bool(getattr(agent, "_force_system_prompt_rebuild_once", False))
+    if conversation_history and agent._session_db and not force_rebuild:
         try:
             session_row = agent._session_db.get_session(agent.session_id)
             if session_row is not None:
@@ -280,6 +281,13 @@ def _restore_or_build_system_prompt(agent, system_message, conversation_history)
         # previous turn so the Anthropic cache prefix matches.
         agent._cached_system_prompt = stored_prompt
         return
+
+    if force_rebuild:
+        logger.info(
+            "Rebuilding system prompt for session %s after tool surface refresh.",
+            agent.session_id,
+        )
+        agent._force_system_prompt_rebuild_once = False
 
     if conversation_history and stored_state in ("null", "empty"):
         # Continuing session whose stored prompt is unusable.  The
@@ -390,6 +398,16 @@ def run_conversation(
     # Guard stdio against OSError from broken pipes (systemd/headless/daemon).
     # Installed once, transparent when streams are healthy, prevents crash on write.
     _install_safe_stdio()
+
+    # Long-lived sessions cache their tool schemas and system prompt. Refresh
+    # the effective tool surface at turn boundaries so hot-reloaded native
+    # tools (lexitool/MCP/plugins) become available without /new or history
+    # reset. Never mutate tools mid-turn.
+    try:
+        if hasattr(agent, "refresh_tools_if_needed"):
+            agent.refresh_tools_if_needed()
+    except Exception:
+        logger.debug("turn-boundary tool refresh failed", exc_info=True)
 
     agent._ensure_db_session()
 

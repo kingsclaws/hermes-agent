@@ -4402,6 +4402,11 @@ class AIAgent:
         from agent.conversation_loop import run_conversation
         return run_conversation(self, user_message, system_message, conversation_history, task_id, stream_callback, persist_user_message)
 
+    def refresh_tools_if_needed(self, *, force: bool = False) -> bool:
+        """Refresh live tool schemas without resetting session history."""
+        from agent.tool_refresh import refresh_agent_tools_if_needed
+        return refresh_agent_tools_if_needed(self, force=force)
+
     def chat(self, message: str, stream_callback: Optional[callable] = None) -> str:
         """
         Simple chat interface that returns just the final response.

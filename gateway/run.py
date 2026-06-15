@@ -15483,7 +15483,6 @@ class GatewayRunner:
         lexitool (or any other) tool modifications propagate to existing
         sessions — not just to new ones built after the reload.
         """
-        from model_tools import get_tool_definitions
         _cache = getattr(self, "_agent_cache", None)
         _cache_lock = getattr(self, "_agent_cache_lock", None)
         if _cache_lock is None or not _cache:
@@ -15498,6 +15497,10 @@ class GatewayRunner:
                     if _agent is None:
                         continue
                     try:
+                        if hasattr(_agent, "refresh_tools_if_needed"):
+                            _agent.refresh_tools_if_needed(force=True)
+                            continue
+                        from model_tools import get_tool_definitions
                         new_defs = get_tool_definitions(
                             enabled_toolsets=getattr(_agent, "enabled_toolsets", None),
                             disabled_toolsets=getattr(_agent, "disabled_toolsets", None),
@@ -15507,6 +15510,8 @@ class GatewayRunner:
                         _agent.valid_tool_names = {
                             t["function"]["name"] for t in new_defs
                         } if new_defs else set()
+                        _agent._cached_system_prompt = None
+                        _agent._force_system_prompt_rebuild_once = True
                     except Exception:
                         continue
         except Exception as exc:
