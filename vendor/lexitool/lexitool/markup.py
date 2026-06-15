@@ -569,6 +569,9 @@ def _collect_segments(para_el, tc_mode: str = "all") -> list[dict]:
     in_field = False
     field_instr = ""
     field_display = ""
+    pPr = para_el.find(f"{W}pPr")
+    para_rPr = pPr.find(f"{W}rPr") if pPr is not None else None
+    default_fmt = _extract_run_format(para_rPr) if para_rPr is not None else {}
 
     for child in para_el:
         # ── Field code detection ──
@@ -633,18 +636,18 @@ def _collect_segments(para_el, tc_mode: str = "all") -> list[dict]:
                     continue
 
             # Regular run
-            seg = _segment_from_run(child)
+            seg = _segment_from_run(child, default_fmt=default_fmt)
             segments.append(seg)
 
         elif child.tag == f"{W}ins":
             for r in child.findall(f"{W}r"):
-                seg = _segment_from_run(r)
+                seg = _segment_from_run(r, default_fmt=default_fmt)
                 seg["tc"] = "ins"
                 segments.append(seg)
 
         elif child.tag == f"{W}del":
             for r in child.findall(f"{W}r"):
-                seg = _segment_from_run(r, is_del=True)
+                seg = _segment_from_run(r, is_del=True, default_fmt=default_fmt)
                 seg["tc"] = "del"
                 segments.append(seg)
 
@@ -682,7 +685,7 @@ def _collect_segments(para_el, tc_mode: str = "all") -> list[dict]:
 
         # Recurse into wrapper elements that can contain w:r, w:ins, w:del
         elif child.tag in _TC_WRAPPER_TAGS:
-            _collect_segments_from_wrapper(child, segments)
+            _collect_segments_from_wrapper(child, segments, default_fmt=default_fmt)
 
     # Apply TC mode filtering
     if tc_mode == "final":
@@ -709,7 +712,7 @@ _TC_WRAPPER_TAGS = {
 }
 
 
-def _collect_segments_from_wrapper(wrapper_el, segments: list[dict]) -> None:
+def _collect_segments_from_wrapper(wrapper_el, segments: list[dict], default_fmt: dict | None = None) -> None:
     """Recurse into wrapper elements that may contain w:r, w:del, or w:ins."""
     children = wrapper_el
     # w:sdt wraps content in w:sdtContent
@@ -720,16 +723,16 @@ def _collect_segments_from_wrapper(wrapper_el, segments: list[dict]) -> None:
 
     for child in children:
         if child.tag == f"{W}r":
-            seg = _segment_from_run(child)
+            seg = _segment_from_run(child, default_fmt=default_fmt)
             segments.append(seg)
         elif child.tag == f"{W}ins":
             for r in child.findall(f"{W}r"):
-                seg = _segment_from_run(r)
+                seg = _segment_from_run(r, default_fmt=default_fmt)
                 seg["tc"] = "ins"
                 segments.append(seg)
         elif child.tag == f"{W}del":
             for r in child.findall(f"{W}r"):
-                seg = _segment_from_run(r, is_del=True)
+                seg = _segment_from_run(r, is_del=True, default_fmt=default_fmt)
                 seg["tc"] = "del"
                 segments.append(seg)
 
@@ -753,10 +756,12 @@ def _field_name_from_instr(instr: str) -> str:
     return ""
 
 
-def _segment_from_run(r_el, is_del: bool = False) -> dict:
+def _segment_from_run(r_el, is_del: bool = False, default_fmt: dict | None = None) -> dict:
     """Extract text and format from a w:r element."""
     rPr = r_el.find(f"{W}rPr")
-    fmt = _extract_run_format(rPr) if rPr is not None else {}
+    fmt = dict(default_fmt or {})
+    if rPr is not None:
+        fmt.update(_extract_run_format(rPr))
 
     text_tag = f"{W}delText" if is_del else f"{W}t"
     text_parts = []

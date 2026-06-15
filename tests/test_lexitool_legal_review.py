@@ -4,6 +4,8 @@ import zipfile
 from pathlib import Path
 
 from docx import Document
+from docx.enum.text import WD_COLOR_INDEX
+from docx.shared import Pt
 from lxml import etree
 
 sys.path.insert(0, str((Path(__file__).resolve().parents[1] / "vendor" / "lexitool").resolve()))
@@ -30,7 +32,7 @@ from hermes_cli.project_commands import (
     legal_scorecard,
     lex_convention_profile,
 )
-from tools.lexitool_tool import _handle_comment, _handle_edit, _handle_revision_guard, _handle_scan
+from tools.lexitool_tool import _handle_comment, _handle_edit, _handle_format, _handle_revision_guard, _handle_scan
 
 
 W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
@@ -311,6 +313,57 @@ def test_lex_comment_add_precisely_anchors_cross_run_range(tmp_path):
     assert any(rel.get("Type", "").endswith("/comments") and rel.get("Target") == "comments.xml" for rel in rels)
     overrides = ct_root.findall(f"{{{CT_NS}}}Override")
     assert any(ov.get("PartName") == "/word/comments.xml" for ov in overrides)
+
+
+def test_insert_paragraphs_inherits_anchor_format_and_skips_empty_items(tmp_path):
+    path = tmp_path / "insert-format.docx"
+    doc = Document()
+    anchor = doc.add_paragraph()
+    anchor.paragraph_format.first_line_indent = Pt(24)
+    run = anchor.add_run("锚点段落")
+    run.font.size = Pt(16)
+    run.font.highlight_color = WD_COLOR_INDEX.YELLOW
+    doc.add_paragraph("后续段落")
+    doc.save(path)
+
+    result = _handle_edit({
+        "path": str(path),
+        "op": "insert_paragraphs",
+        "after_para": 0,
+        "tc": False,
+        "paragraphs": [
+            {"text": "新增第一段"},
+            {"text": ""},
+            {"text": "新增第二段"},
+        ],
+    })
+
+    assert '"ok": true' in result
+    assert "skipped 1 empty paragraphs" in result
+
+    readback = lex_read(str(path), paras=[1, 2, 3, 4], mode="full", show_tc=True, show_format=True)
+    assert "§2 [indent:2ch][font:16pt]新增第一段[/font]" in readback
+    assert "§3 [indent:2ch][font:16pt]新增第二段[/font]" in readback
+    assert "[highlight:yellow]新增第一段" not in readback
+    assert "§4 后续段落" in readback
+
+
+def test_lex_format_accepts_indent_units_and_sets_paragraph_run_defaults(tmp_path):
+    path = tmp_path / "format-units.docx"
+    doc = Document()
+    doc.add_paragraph("第一段")
+    doc.add_paragraph("需要格式化")
+    doc.save(path)
+
+    result = _handle_format({
+        "path": str(path),
+        "target": "§2",
+        "properties": {"indent": "2.66667ch", "size": "16pt", "font": "宋体"},
+    })
+
+    assert '"ok": true' in result
+    readback = lex_read(str(path), paras=[2], mode="full", show_tc=True, show_format=True)
+    assert "§2 [indent:2.66667ch][font:宋体,16pt]需要格式化[/font]" in readback
 
 
 def test_lex_edit_header_footer_replace_handles_cross_run_text(tmp_path):

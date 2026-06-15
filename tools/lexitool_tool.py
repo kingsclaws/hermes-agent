@@ -524,7 +524,11 @@ LEX_EDIT_SCHEMA = {
             },
             "format": {
                 "type": "object",
-                "description": 'Format properties: {"bold": true, "font": "宋体", "size": "12pt"}. For set_format op.',
+                "description": (
+                    'Format properties: {"bold": true, "font": "宋体", "size": "12pt", '
+                    '"indent": "2.66667ch", "style": "Normal"}. For set_format and '
+                    "insert_paragraphs default formatting."
+                ),
             },
             "tc": {
                 "type": "boolean",
@@ -624,10 +628,27 @@ LEX_EDIT_SCHEMA = {
                         "text": {"type": "string"},
                         "bold": {"type": "boolean"},
                         "page_break_before": {"type": "boolean"},
+                        "style": {"type": "string"},
+                        "style_id": {"type": "string"},
+                        "format": {"type": "object"},
                     },
                     "required": ["text"],
                 },
-                "description": "List of {text, bold?, page_break_before?}. For insert_paragraphs.",
+                "description": (
+                    "List of {text, bold?, page_break_before?, style?, format?}. "
+                    "For insert_paragraphs. Empty text paragraphs are skipped by default."
+                ),
+            },
+            "inherit_format": {
+                "type": "boolean",
+                "description": (
+                    "For insert_paragraphs, inherit paragraph/run formatting from after_para "
+                    "without inheriting numbering. Default: true."
+                ),
+            },
+            "skip_empty": {
+                "type": "boolean",
+                "description": "For insert_paragraphs, skip blank text items. Default: true.",
             },
             "headers": {
                 "type": "array",
@@ -756,6 +777,9 @@ def _handle_edit(args: dict, **kwargs) -> str:
                     path, after_para, paragraphs,
                     tc=tc, author=author,
                     sz=int(font_size * 2),
+                    default_format=args.get("format") or {},
+                    inherit_format=args.get("inherit_format", True),
+                    skip_empty=args.get("skip_empty", True),
                     output=path,
                 )
 
@@ -1626,6 +1650,7 @@ def _apply_format_props(para_el, props, W, target):
     """
     from copy import deepcopy
     from lxml import etree
+    from lexitool.edit_ops import _parse_indent_twips, _parse_size_half_points
 
     # ── Paragraph-level properties ──
     pPr = para_el.find(f"{W}pPr")
@@ -1650,7 +1675,13 @@ def _apply_format_props(para_el, props, W, target):
         ind = pPr.find(f"{W}ind")
         if ind is None:
             ind = etree.SubElement(pPr, f"{W}ind")
-        ind.set(f"{W}firstLine", str(int(float(props["indent"]) * 240)))
+        ind.set(f"{W}firstLine", _parse_indent_twips(props["indent"]))
+
+    if props.get("style") or props.get("style_id"):
+        pStyle = pPr.find(f"{W}pStyle")
+        if pStyle is None:
+            pStyle = etree.SubElement(pPr, f"{W}pStyle")
+        pStyle.set(f"{W}val", str(props.get("style") or props.get("style_id")))
 
     if props.get("outlineLvl") is not None:
         ol = pPr.find(f"{W}outlineLvl")
@@ -1664,6 +1695,13 @@ def _apply_format_props(para_el, props, W, target):
                           "font", "size", "color", "highlight")}
     if not run_props:
         return
+
+    # Also write run defaults to paragraph mark formatting. This matters for
+    # empty paragraphs and for lex_read verification of paragraph-level defaults.
+    pPr_rPr = pPr.find(f"{W}rPr")
+    if pPr_rPr is None:
+        pPr_rPr = etree.SubElement(pPr, f"{W}rPr")
+    _apply_run_format_props(pPr_rPr, run_props, W, _parse_size_half_points)
 
     # Determine target runs
     all_runs = para_el.findall(f"{W}r")
@@ -1680,73 +1718,77 @@ def _apply_format_props(para_el, props, W, target):
         if rPr is None:
             rPr = etree.Element(f"{W}rPr")
             run_el.insert(0, rPr)
+        _apply_run_format_props(rPr, run_props, W, _parse_size_half_points)
 
-        if "bold" in run_props:
-            b = rPr.find(f"{W}b")
-            if run_props["bold"]:
-                if b is None:
-                    etree.SubElement(rPr, f"{W}b")
-            else:
-                if b is not None:
-                    rPr.remove(b)
 
-        if "italic" in run_props:
-            i = rPr.find(f"{W}i")
-            if run_props["italic"]:
-                if i is None:
-                    etree.SubElement(rPr, f"{W}i")
-            else:
-                if i is not None:
-                    rPr.remove(i)
+def _apply_run_format_props(rPr, run_props, W, parse_size_half_points):
+    from lxml import etree
 
-        if "underline" in run_props:
-            u = rPr.find(f"{W}u")
-            if run_props["underline"]:
-                if u is None:
-                    u = etree.SubElement(rPr, f"{W}u")
-                u.set(f"{W}val", "single")
-            else:
-                if u is not None:
-                    rPr.remove(u)
+    if "bold" in run_props:
+        b = rPr.find(f"{W}b")
+        if run_props["bold"]:
+            if b is None:
+                etree.SubElement(rPr, f"{W}b")
+        else:
+            if b is not None:
+                rPr.remove(b)
 
-        if "strikethrough" in run_props:
-            s = rPr.find(f"{W}strike")
-            if run_props["strikethrough"]:
-                if s is None:
-                    etree.SubElement(rPr, f"{W}strike")
-            else:
-                if s is not None:
-                    rPr.remove(s)
+    if "italic" in run_props:
+        i = rPr.find(f"{W}i")
+        if run_props["italic"]:
+            if i is None:
+                etree.SubElement(rPr, f"{W}i")
+        else:
+            if i is not None:
+                rPr.remove(i)
 
-        if "font" in run_props:
-            rf = rPr.find(f"{W}rFonts")
-            if rf is None:
-                rf = etree.SubElement(rPr, f"{W}rFonts")
-            font_name = run_props["font"]
-            rf.set(f"{W}ascii", font_name)
-            rf.set(f"{W}hAnsi", font_name)
-            rf.set(f"{W}eastAsia", font_name)
+    if "underline" in run_props:
+        u = rPr.find(f"{W}u")
+        if run_props["underline"]:
+            if u is None:
+                u = etree.SubElement(rPr, f"{W}u")
+            u.set(f"{W}val", "single")
+        else:
+            if u is not None:
+                rPr.remove(u)
 
-        if "size" in run_props:
-            size_str = run_props["size"].replace("pt", "").strip()
-            sz_half_pt = str(int(float(size_str) * 2))
-            for sz_tag in [f"{W}sz", f"{W}szCs"]:
-                sz_el = rPr.find(sz_tag)
-                if sz_el is None:
-                    sz_el = etree.SubElement(rPr, sz_tag)
-                sz_el.set(f"{W}val", sz_half_pt)
+    if "strikethrough" in run_props:
+        s = rPr.find(f"{W}strike")
+        if run_props["strikethrough"]:
+            if s is None:
+                etree.SubElement(rPr, f"{W}strike")
+        else:
+            if s is not None:
+                rPr.remove(s)
 
-        if "color" in run_props:
-            c = rPr.find(f"{W}color")
-            if c is None:
-                c = etree.SubElement(rPr, f"{W}color")
-            c.set(f"{W}val", run_props["color"].lstrip("#"))
+    if "font" in run_props:
+        rf = rPr.find(f"{W}rFonts")
+        if rf is None:
+            rf = etree.SubElement(rPr, f"{W}rFonts")
+        font_name = str(run_props["font"])
+        rf.set(f"{W}ascii", font_name)
+        rf.set(f"{W}hAnsi", font_name)
+        rf.set(f"{W}eastAsia", font_name)
 
-        if "highlight" in run_props:
-            hl = rPr.find(f"{W}highlight")
-            if hl is None:
-                hl = etree.SubElement(rPr, f"{W}highlight")
-            hl.set(f"{W}val", run_props["highlight"])
+    if "size" in run_props:
+        sz_half_pt = parse_size_half_points(run_props["size"])
+        for sz_tag in [f"{W}sz", f"{W}szCs"]:
+            sz_el = rPr.find(sz_tag)
+            if sz_el is None:
+                sz_el = etree.SubElement(rPr, sz_tag)
+            sz_el.set(f"{W}val", sz_half_pt)
+
+    if "color" in run_props:
+        c = rPr.find(f"{W}color")
+        if c is None:
+            c = etree.SubElement(rPr, f"{W}color")
+        c.set(f"{W}val", str(run_props["color"]).lstrip("#"))
+
+    if "highlight" in run_props:
+        hl = rPr.find(f"{W}highlight")
+        if hl is None:
+            hl = etree.SubElement(rPr, f"{W}highlight")
+        hl.set(f"{W}val", str(run_props["highlight"]))
 
 
 # ── 5. lex_list ───────────────────────────────────────────────────────────────

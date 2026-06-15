@@ -120,6 +120,133 @@ def _make_text_run_from_rpr(text: str, base_rPr=None, *, deleted: bool = False) 
     return r
 
 
+def _first_run_rpr(para: etree._Element):
+    for run in para.iter(f"{W}r"):
+        rPr = run.find(f"{W}rPr")
+        if rPr is not None:
+            return rPr
+    pPr = para.find(f"{W}pPr")
+    return pPr.find(f"{W}rPr") if pPr is not None else None
+
+
+def _clone_inheritable_ppr(source_para: etree._Element) -> etree._Element:
+    """Clone paragraph formatting that is safe for inserted body text.
+
+    Numbering and section properties are intentionally not inherited by default:
+    legal drafting often inserts explanatory paragraphs after numbered clauses,
+    and copying numPr/sectPr would silently change document structure.
+    """
+    pPr = etree.Element(f"{W}pPr")
+    src_pPr = source_para.find(f"{W}pPr")
+    if src_pPr is None:
+        return pPr
+    for child in src_pPr:
+        local = etree.QName(child).localname
+        if local in {
+            "pStyle", "ind", "spacing", "jc", "tabs", "keepNext",
+            "keepLines", "pageBreakBefore", "widowControl", "outlineLvl",
+            "contextualSpacing", "bidi", "rPr",
+        }:
+            pPr.append(copy.deepcopy(child))
+    return pPr
+
+
+def _ensure_child(parent: etree._Element, tag: str) -> etree._Element:
+    child = parent.find(tag)
+    if child is None:
+        child = etree.SubElement(parent, tag)
+    return child
+
+
+def _set_pstyle(pPr: etree._Element, style: str | None) -> None:
+    if not style:
+        return
+    pStyle = _ensure_child(pPr, f"{W}pStyle")
+    pStyle.set(f"{W}val", str(style))
+
+
+def _parse_size_half_points(value) -> str:
+    if value is None:
+        raise ValueError("size is required")
+    if isinstance(value, (int, float)):
+        numeric = float(value)
+        # Values above 80 are almost certainly already half-points.
+        half_points = numeric if numeric > 80 else numeric * 2
+    else:
+        text = str(value).strip().lower()
+        if text.endswith("pt"):
+            half_points = float(text[:-2].strip()) * 2
+        else:
+            numeric = float(text)
+            half_points = numeric if numeric > 80 else numeric * 2
+    return str(int(round(half_points)))
+
+
+def _parse_indent_twips(value) -> str:
+    if value is None:
+        raise ValueError("indent is required")
+    if isinstance(value, (int, float)):
+        return str(int(round(float(value) * 240)))
+    text = str(value).strip().lower()
+    if text.endswith("ch"):
+        return str(int(round(float(text[:-2].strip()) * 240)))
+    if text.endswith("cm"):
+        return str(int(round(float(text[:-2].strip()) * 567)))
+    if text.endswith("in"):
+        return str(int(round(float(text[:-2].strip()) * 1440)))
+    if text.endswith("pt"):
+        return str(int(round(float(text[:-2].strip()) * 20)))
+    return str(int(round(float(text) * 240)))
+
+
+def _apply_insert_format(pPr: etree._Element, rPr: etree._Element, fmt: dict | None) -> None:
+    if not fmt:
+        return
+
+    _set_pstyle(pPr, fmt.get("style") or fmt.get("style_id"))
+
+    if fmt.get("align"):
+        jc = _ensure_child(pPr, f"{W}jc")
+        jc.set(f"{W}val", str(fmt["align"]))
+
+    if fmt.get("spacing"):
+        spacing = _ensure_child(pPr, f"{W}spacing")
+        spacing.set(f"{W}line", str(int(float(fmt["spacing"]) * 240)))
+        spacing.set(f"{W}lineRule", "auto")
+
+    if fmt.get("indent") is not None:
+        ind = _ensure_child(pPr, f"{W}ind")
+        ind.set(f"{W}firstLine", _parse_indent_twips(fmt["indent"]))
+
+    font_name = fmt.get("font")
+    if font_name:
+        rFonts = _ensure_child(rPr, f"{W}rFonts")
+        rFonts.set(f"{W}ascii", str(font_name))
+        rFonts.set(f"{W}hAnsi", str(font_name))
+        rFonts.set(f"{W}eastAsia", str(font_name))
+
+    if fmt.get("size") is not None:
+        sz_val = _parse_size_half_points(fmt["size"])
+        _ensure_child(rPr, f"{W}sz").set(f"{W}val", sz_val)
+        _ensure_child(rPr, f"{W}szCs").set(f"{W}val", sz_val)
+
+    if fmt.get("color"):
+        _ensure_child(rPr, f"{W}color").set(f"{W}val", str(fmt["color"]).lstrip("#"))
+
+    if fmt.get("highlight"):
+        _ensure_child(rPr, f"{W}highlight").set(f"{W}val", str(fmt["highlight"]))
+
+
+def _strip_review_visuals(rPr: etree._Element, *, keep: set[str] | None = None) -> None:
+    keep = keep or set()
+    for local in ("highlight", "color"):
+        if local in keep:
+            continue
+        child = rPr.find(f"{W}{local}")
+        if child is not None:
+            rPr.remove(child)
+
+
 def _tc_tag(tag: str, tc_id: int, author: str, date: str) -> etree._Element:
     el = etree.Element(f"{W}{tag}")
     el.set(f"{W}id", str(tc_id))
@@ -1334,6 +1461,9 @@ def insert_paragraph_block(docx_path: str, after_para: int,
                            author: str = "agent",
                            font: str = "宋体",
                            sz: float = 22.0,
+                           default_format: dict | None = None,
+                           inherit_format: bool = True,
+                           skip_empty: bool = True,
                            output: str | None = None) -> EditResult:
 	"""
 	Insert a block of paragraphs after a specified paragraph number.
@@ -1342,6 +1472,8 @@ def insert_paragraph_block(docx_path: str, after_para: int,
 	  - text (str, required)
 	  - bold (bool, default False)
 	  - page_break_before (bool, default False): insert a page break before this paragraph
+	  - style / style_id (str, optional): paragraph style id
+	  - format (dict, optional): paragraph/run format overrides
 	  - font (str, optional): override font for this paragraph
 	  - sz (float, optional): override font size in half-points for this paragraph
 
@@ -1365,28 +1497,50 @@ def insert_paragraph_block(docx_path: str, after_para: int,
 
 	anchor = all_paras[after_para]
 	inserted = 0
+	skipped_empty = 0
 	tc_mode = tc
 
 	for pg in paragraphs:
 		text = pg.get("text", "")
+		if isinstance(text, str):
+			text = text.strip("\r\n")
 		bold = pg.get("bold", False)
 		page_break = pg.get("page_break_before", False)
-		pg_font = pg.get("font", font)
-		pg_sz = pg.get("sz", sz)
+		if skip_empty and not str(text).strip() and not page_break:
+			skipped_empty += 1
+			continue
 
 		new_p = etree.Element(f"{W}p")
+		pPr = _clone_inheritable_ppr(anchor) if inherit_format else etree.Element(f"{W}pPr")
+		new_p.append(pPr)
+		pPr_rPr = pPr.find(f"{W}rPr")
+		if pPr_rPr is None:
+			pPr_rPr = etree.SubElement(pPr, f"{W}rPr")
 
-		# Paragraph-level run properties: set font / size here so that
-		# individual runs don't need their own rPr, avoiding double-nesting
-		# with the document default style.
-		pPr = etree.SubElement(new_p, f"{W}pPr")
-		pPr_rPr = etree.SubElement(pPr, f"{W}rPr")
-		pPr_rFonts = etree.SubElement(pPr_rPr, f"{W}rFonts")
-		pPr_rFonts.set(f"{W}ascii", pg_font)
-		pPr_rFonts.set(f"{W}hAnsi", pg_font)
-		pPr_rFonts.set(f"{W}eastAsia", pg_font)
-		etree.SubElement(pPr_rPr, f"{W}sz").set(f"{W}val", str(int(pg_sz)))
-		etree.SubElement(pPr_rPr, f"{W}szCs").set(f"{W}val", str(int(pg_sz)))
+		base_rPr = _first_run_rpr(anchor)
+		run_rPr = copy.deepcopy(base_rPr) if base_rPr is not None else copy.deepcopy(pPr_rPr)
+		if run_rPr is None:
+			run_rPr = etree.Element(f"{W}rPr")
+
+		pg_format = dict(default_format or {})
+		pg_format.update(pg.get("format") or {})
+		if pg.get("style") or pg.get("style_id"):
+			pg_format["style"] = pg.get("style") or pg.get("style_id")
+		if pg.get("font"):
+			pg_format["font"] = pg.get("font")
+		elif not inherit_format and font:
+			pg_format.setdefault("font", font)
+		if pg.get("size") is not None:
+			pg_format["size"] = pg.get("size")
+		elif pg.get("sz") is not None:
+			pg_format["size"] = int(pg.get("sz")) / 2
+		elif not inherit_format and sz:
+			pg_format.setdefault("size", int(sz) / 2)
+		_apply_insert_format(pPr, pPr_rPr, pg_format)
+		_apply_insert_format(pPr, run_rPr, pg_format)
+		keep_visuals = {key for key in ("highlight", "color") if key in pg_format}
+		_strip_review_visuals(pPr_rPr, keep=keep_visuals)
+		_strip_review_visuals(run_rPr, keep=keep_visuals)
 
 		if page_break:
 			pB = etree.SubElement(pPr, f"{W}pageBreakBefore")
@@ -1395,12 +1549,14 @@ def insert_paragraph_block(docx_path: str, after_para: int,
 			br.set(f"{W}type", "page")
 
 		if text:
-			# Build the run with only bold in rPr — font / size are
-			# already set at the paragraph level above.
 			run = etree.Element(f"{W}r")
+			run.append(copy.deepcopy(run_rPr))
 			if bold:
-				run_rPr = etree.SubElement(run, f"{W}rPr")
-				etree.SubElement(run_rPr, f"{W}b")
+				run_rPr_actual = run.find(f"{W}rPr")
+				if run_rPr_actual is None:
+					run_rPr_actual = etree.SubElement(run, f"{W}rPr")
+				if run_rPr_actual.find(f"{W}b") is None:
+					etree.SubElement(run_rPr_actual, f"{W}b")
 			t_el = etree.SubElement(run, f"{W}t")
 			t_el.set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
 			t_el.text = text
@@ -1425,6 +1581,9 @@ def insert_paragraph_block(docx_path: str, after_para: int,
 	                                      encoding="UTF-8", standalone=True),
 	            other, output=output)
 	return EditResult(ok=True, tc_applied=tc,
-	                  message=f"Inserted {inserted} paragraphs after paragraph {after_para}",
+	                  message=(
+	                      f"Inserted {inserted} paragraphs after paragraph {after_para}"
+	                      + (f"; skipped {skipped_empty} empty paragraphs" if skipped_empty else "")
+	                  ),
 	                  tc_mode=tc_mode,
 	                  path=output or docx_path)
