@@ -254,6 +254,29 @@ def test_lex_edit_header_footer_replace_handles_cross_run_text(tmp_path):
     assert root.find(f".//{W}i") is not None
 
 
+def test_lex_scan_returns_header_footer_targets(tmp_path):
+    path = tmp_path / "header-scan.docx"
+    doc = Document()
+    section = doc.sections[0]
+    header_para = section.header.paragraphs[0]
+    header_para.add_run("Project ")
+    header_para.add_run("Security").bold = True
+    header_para.add_run(" Trustee").italic = True
+    doc.add_paragraph("Body without target")
+    doc.save(path)
+
+    result = _handle_scan({
+        "path": str(path),
+        "query": "Security Trustee",
+    })
+
+    assert '"total_matches": 1' in result
+    assert '"header_footer_targets"' in result
+    assert '"kind": "header"' in result
+    assert '"part_path": "word/header1.xml"' in result
+    assert '"ref_types": ["default"]' in result
+
+
 def test_revision_guard_blocks_unresolved_final_view_residuals(tmp_path):
     path = tmp_path / "share-mortgage.docx"
     doc = Document()

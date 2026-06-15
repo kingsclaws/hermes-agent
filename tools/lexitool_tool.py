@@ -250,6 +250,13 @@ LEX_SCAN_SCHEMA = {
                 "type": "boolean",
                 "description": "Also scan body-level table cells. Default: true.",
             },
+            "include_headers_footers": {
+                "type": "boolean",
+                "description": (
+                    "Also scan Word header/footer parts and return part_path/kind/ref_types "
+                    "targets for replace_header_footer. Default: true."
+                ),
+            },
             "context_chars": {
                 "type": "integer",
                 "description": "Characters of context around each match. Default: 80.",
@@ -276,6 +283,7 @@ def _handle_scan(args: dict, **kwargs) -> str:
         flexible_whitespace=bool(args.get("flexible_whitespace", True)),
         view=str(args.get("view", "final") or "final"),
         include_tables=bool(args.get("include_tables", True)),
+        include_headers_footers=bool(args.get("include_headers_footers", True)),
         context_chars=int(args.get("context_chars", 80) or 80),
         max_results=int(args.get("max_results", 200) or 200),
     )
