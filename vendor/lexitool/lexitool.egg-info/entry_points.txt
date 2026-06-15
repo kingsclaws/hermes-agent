@@ -1,2 +1,4 @@
 [console_scripts]
 lex-docx = lexitool.cli:main
+lex-ocr = lexitool.ocr_cli:main
+lexitool = lexitool.cli:main

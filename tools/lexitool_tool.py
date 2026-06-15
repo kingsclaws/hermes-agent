@@ -560,7 +560,11 @@ LEX_EDIT_SCHEMA = {
                     "set_table_cells",
                     "insert_table_rows", "insert_paragraphs",
                     "create_table", "replace_header_footer",
-                    "remove_blue_text", "replace_all",
+                    "remove_blue_text", "replace_all", "find_replace",
+                    "delete_table", "merge_cells", "split_cell",
+                    "delete_table_row", "insert_table_column",
+                    "delete_table_column", "list_tables",
+                    "add_image", "remove_image", "list_images",
                 ],
                 "description": (
                     "Operation type. Paragraph-level: replace, insert, delete, set_format, replace_all. "
@@ -793,7 +797,11 @@ def _handle_edit(args: dict, **kwargs) -> str:
 
     if op in ("replace_table_cell", "replace_table_cells", "set_table_cells",
               "insert_table_rows", "insert_paragraphs",
-              "create_table", "remove_blue_text", "trim_end"):
+              "create_table", "remove_blue_text", "trim_end",
+              "delete_table", "merge_cells", "split_cell",
+              "delete_table_row", "insert_table_column",
+              "delete_table_column", "list_tables",
+              "add_image", "remove_image", "list_images"):
         try:
             if op == "remove_blue_text":
                 res = remove_blue_text(path, output=path)
@@ -875,6 +883,75 @@ def _handle_edit(args: dict, **kwargs) -> str:
                     output=path,
                 )
 
+            elif op == "delete_table":
+                from lexitool.openxml_table import delete_table
+                table_index = args.get("table_index", 0)
+                res = delete_table(path, table_index, output=path)
+
+            elif op == "merge_cells":
+                from lexitool.openxml_table import merge_cells
+                table_index = args.get("table_index", 0)
+                start_row = args.get("start_row", 0)
+                start_col = args.get("start_col", 0)
+                end_row = args.get("end_row", 0)
+                end_col = args.get("end_col", 0)
+                res = merge_cells(path, table_index,
+                                  start_row, start_col, end_row, end_col,
+                                  output=path)
+
+            elif op == "split_cell":
+                from lexitool.openxml_table import split_cell
+                table_index = args.get("table_index", 0)
+                row = args.get("row", 0)
+                col = args.get("col", 0)
+                res = split_cell(path, table_index, row, col, output=path)
+
+            elif op == "delete_table_row":
+                from lexitool.openxml_table import delete_table_row
+                table_index = args.get("table_index", 0)
+                row_index = args.get("row_index", 0)
+                res = delete_table_row(path, table_index, row_index, output=path)
+
+            elif op == "insert_table_column":
+                from lexitool.openxml_table import insert_table_column
+                table_index = args.get("table_index", 0)
+                position = args.get("position", -1)
+                res = insert_table_column(path, table_index, position, output=path)
+
+            elif op == "delete_table_column":
+                from lexitool.openxml_table import delete_table_column
+                table_index = args.get("table_index", 0)
+                col_index = args.get("col_index", 0)
+                res = delete_table_column(path, table_index, col_index, output=path)
+
+            elif op == "list_tables":
+                from lexitool.openxml_table import list_tables
+                res = list_tables(path)
+
+            elif op == "add_image":
+                from lexitool.openxml_image import add_image
+                image_path = args.get("image_path", "")
+                if not image_path:
+                    return tool_error("'image_path' is required for add_image")
+                res = add_image(path, image_path,
+                                para=args.get("para", 1),
+                                offset=args.get("offset", -1),
+                                width=args.get("width"),
+                                height=args.get("height"),
+                                dpi=args.get("dpi", 96),
+                                output=path)
+
+            elif op == "remove_image":
+                from lexitool.openxml_image import remove_image
+                res = remove_image(path,
+                                   relationship_id=args.get("rid"),
+                                   image_name=args.get("image_name"),
+                                   output=path)
+
+            elif op == "list_images":
+                from lexitool.openxml_image import list_images
+                res = list_images(path)
+
             elif op == "trim_end":
                 para = args.get("para", 0)
                 chars = args.get("chars", 1)
@@ -953,6 +1030,24 @@ def _handle_edit(args: dict, **kwargs) -> str:
             return tool_result(result)
         except Exception as e:
             return tool_error(str(e))
+
+    # ── Whole-document find_replace ──────────────────────────────────────────
+    if op == "find_replace":
+        from lexitool.edit_ops import find_and_replace_all
+        find = args.get("find", args.get("old_text", ""))
+        if not find:
+            return tool_error("'find' (or 'old_text') is required for find_replace")
+        replace_text = args.get("replace", args.get("new_text", ""))
+        result = find_and_replace_all(
+            path, find, replace_text,
+            match_case=args.get("match_case", True),
+            whole_word=args.get("whole_word", False),
+            regex=args.get("regex", False),
+            tc=tc, author=author,
+            include_headers_footers=args.get("include_headers_footers", False),
+            include_tables=args.get("include_tables", True),
+        )
+        return tool_result(result)
 
     # ── Paragraph-level operations ───────────────────────────────────────────
     from lexitool.markup import parse_target
@@ -1592,13 +1687,20 @@ LEX_FORMAT_SCHEMA = {
     "name": "lex_format",
     "description": (
         "Apply formatting to text ranges in a .docx file. Supports format brush "
-        "(copy format from one paragraph) and direct property application.\n\n"
+        "(copy format from one paragraph), direct property application, and style management.\n\n"
         "Format properties: bold, italic, underline, strikethrough, font (name), "
-        "size (e.g. '12pt'), color (e.g. '#FF0000'), highlight, spacing, indent, align."
+        "size (e.g. '12pt'), color (e.g. '#FF0000'), highlight, spacing, indent, align.\n\n"
+        "Style ops: read_styles (list all), create_style, modify_style, delete_style, apply_style."
     ),
     "parameters": {
         "type": "object",
         "properties": {
+            "op": {
+                "type": "string",
+                "enum": ["format", "read_styles", "create_style", "modify_style", "delete_style", "apply_style"],
+                "description": "Operation. 'format' = apply format brush/properties (default). Others = style management.",
+                "default": "format",
+            },
             "path": {
                 "type": "string",
                 "description": "Path to the .docx file.",
@@ -1615,8 +1717,38 @@ LEX_FORMAT_SCHEMA = {
                 "type": "object",
                 "description": 'Format to apply: {"font": "宋体", "size": "11.5pt", "bold": false, "align": "justify"}.',
             },
+            "style_id": {
+                "type": "string",
+                "description": "Style ID for create/modify/delete/apply_style operations.",
+            },
+            "style_name": {
+                "type": "string",
+                "description": "Display name for the style.",
+            },
+            "style_type": {
+                "type": "string",
+                "enum": ["paragraph", "character", "table", "numbering"],
+                "description": "Style type. Default: paragraph.",
+            },
+            "based_on": {
+                "type": "string",
+                "description": "Base this style on another style ID.",
+            },
+            "next_style": {
+                "type": "string",
+                "description": "Next paragraph style (paragraph styles only).",
+            },
+            "style_props": {
+                "type": "object",
+                "description": "Run and paragraph properties for the style: {bold, italic, font_size, font_ascii, font_eastAsia, alignment, spacing_before, spacing_after, outline_level, ...}.",
+            },
+            "paragraphs": {
+                "type": "array",
+                "items": {"type": "integer"},
+                "description": "Paragraph indices (1-indexed) to apply the style to.",
+            },
         },
-        "required": ["path", "target"],
+        "required": ["path"],
     },
 }
 
@@ -1626,6 +1758,151 @@ def _handle_format(args: dict, **kwargs) -> str:
     from lexitool.edit_ops import _read_docx, _write_docx
 
     path = _resolve_path(args["path"])
+
+    # ── Style management ops ──
+    style_op = args.get("op", "format")
+
+    if style_op == "read_styles":
+        from lexitool.openxml_style import read_styles
+        styles = read_styles(path)
+        result = {}
+        for sid, sd in styles.items():
+            result[sid] = {
+                "name": sd.name,
+                "type": sd.type,
+                "based_on": sd.based_on,
+                "next_style": sd.next_style,
+                "linked_style": sd.linked_style,
+                "is_default": sd.is_default,
+                "is_custom": sd.is_custom,
+                "ui_priority": sd.ui_priority,
+                "hidden": sd.hidden,
+                "run_props": {
+                    "bold": sd.run_props.bold,
+                    "italic": sd.run_props.italic,
+                    "font_size": sd.run_props.font_size,
+                    "font_ascii": sd.run_props.font_ascii,
+                    "font_eastAsia": sd.run_props.font_eastAsia,
+                    "color": sd.run_props.color,
+                },
+                "para_props": {
+                    "alignment": sd.para_props.alignment,
+                    "spacing_before": sd.para_props.spacing_before,
+                    "spacing_after": sd.para_props.spacing_after,
+                    "indent_left": sd.para_props.indent_left,
+                    "outline_level": sd.para_props.outline_level,
+                },
+            }
+        return tool_result({"ok": True, "styles": result})
+
+    elif style_op == "create_style":
+        from lexitool.openxml_style import create_style, StyleRunProps, StyleParaProps
+        style_id = (args.get("style_id") or "")
+        style_name = (args.get("style_name") or "")
+        if not style_id:
+            return tool_error("style_id is required for create_style")
+        if not style_name:
+            return tool_error("style_name is required for create_style")
+
+        style_props = args.get("style_props", {}) or {}
+        rp = StyleRunProps(
+            bold=style_props.get("bold"),
+            italic=style_props.get("italic"),
+            font_size=None if "font_size" not in style_props else float(style_props["font_size"]),
+            font_ascii=style_props.get("font_ascii"),
+            font_hAnsi=style_props.get("font_hAnsi"),
+            font_eastAsia=style_props.get("font_eastAsia"),
+            font_cs=style_props.get("font_cs"),
+            color=style_props.get("color"),
+            highlight=style_props.get("highlight"),
+            underline=style_props.get("underline"),
+        )
+        pp = StyleParaProps(
+            alignment=style_props.get("alignment"),
+            spacing_before=style_props.get("spacing_before"),
+            spacing_after=style_props.get("spacing_after"),
+            line_spacing=style_props.get("line_spacing"),
+            indent_left=style_props.get("indent_left"),
+            indent_right=style_props.get("indent_right"),
+            indent_first_line=style_props.get("indent_first_line"),
+            outline_level=style_props.get("outline_level"),
+        )
+        return tool_result(create_style(
+            path, style_id, style_name,
+            type=args.get("style_type", "paragraph"),
+            based_on=args.get("based_on"),
+            next_style=args.get("next_style"),
+            linked_style=args.get("linked_style"),
+            run_props=rp,
+            para_props=pp,
+        ))
+
+    elif style_op == "modify_style":
+        from lexitool.openxml_style import modify_style, StyleRunProps, StyleParaProps
+        style_id = (args.get("style_id") or "")
+        if not style_id:
+            return tool_error("style_id is required for modify_style")
+
+        style_props = args.get("style_props", {}) or {}
+        rp = None
+        pp = None
+        if style_props:
+            rp = StyleRunProps(
+                bold=style_props.get("bold"),
+                italic=style_props.get("italic"),
+                font_size=None if "font_size" not in style_props else float(style_props["font_size"]),
+                font_ascii=style_props.get("font_ascii"),
+                font_hAnsi=style_props.get("font_hAnsi"),
+                font_eastAsia=style_props.get("font_eastAsia"),
+                font_cs=style_props.get("font_cs"),
+                color=style_props.get("color"),
+                highlight=style_props.get("highlight"),
+                underline=style_props.get("underline"),
+            )
+            pp = StyleParaProps(
+                alignment=style_props.get("alignment"),
+                spacing_before=style_props.get("spacing_before"),
+                spacing_after=style_props.get("spacing_after"),
+                line_spacing=style_props.get("line_spacing"),
+                indent_left=style_props.get("indent_left"),
+                indent_right=style_props.get("indent_right"),
+                indent_first_line=style_props.get("indent_first_line"),
+                outline_level=style_props.get("outline_level"),
+            )
+        return tool_result(modify_style(
+            path, style_id,
+            name=args.get("style_name"),
+            based_on=args.get("based_on"),
+            next_style=args.get("next_style"),
+            linked_style=args.get("linked_style"),
+            run_props=rp,
+            para_props=pp,
+        ))
+
+    elif style_op == "delete_style":
+        from lexitool.openxml_style import delete_style
+        style_id = (args.get("style_id") or "")
+        if not style_id:
+            return tool_error("style_id is required for delete_style")
+        return tool_result(delete_style(path, style_id))
+
+    elif style_op == "apply_style":
+        from lexitool.openxml_style import apply_style
+        style_id = (args.get("style_id") or "")
+        if not style_id:
+            return tool_error("style_id is required for apply_style")
+        paragraphs = args.get("paragraphs", [])
+        if not paragraphs and args.get("target"):
+            target = parse_target(args["target"])
+            if target.para_end:
+                paragraphs = list(range(target.para_start - 1, target.para_end))
+            else:
+                paragraphs = [target.para_start - 1]
+        if not paragraphs:
+            return tool_error("paragraphs or target is required for apply_style")
+        return tool_result(apply_style(path, paragraphs, style_id))
+
+    # ── Format brush / direct properties (default) ──
     target = parse_target(args["target"])
     props = args.get("properties", {})
     source_para = args.get("source_para")
@@ -1649,12 +1926,10 @@ def _handle_format(args: dict, **kwargs) -> str:
         target_para = paras[idx]
 
         if source_para:
-            # ── Format brush: copy from source paragraph ──
             src_idx = source_para - 1
             if 0 <= src_idx < len(paras):
                 _apply_format_brush(paras, target_para, paras[src_idx], W)
         else:
-            # ── Apply explicit properties ──
             _apply_format_props(target_para, props, W, target)
 
     try:
@@ -2017,7 +2292,10 @@ LEX_REF_SCHEMA = {
                          "add_noteref", "add_styleref", "list", "list_fields",
                          "resolve_fields", "scan_xref", "auto_xref", "cross_doc_scan",
                          "xref_audit", "audit_documents", "convert_static_refs",
-                         "term_format_audit"],
+                         "term_format_audit",
+                         "add_hyperlink", "remove_hyperlink", "list_hyperlinks",
+                         "add_footnote", "add_endnote", "remove_footnote",
+                         "remove_endnote", "list_footnotes", "list_endnotes"],
                 "description": "Operation to perform.",
             },
             "name": {
@@ -2113,7 +2391,65 @@ def _handle_ref(args: dict, **kwargs) -> str:
     target_para = args.get("target_para", 1)
     offset = args.get("offset", 0)
 
-    if op == "add_bookmark":
+    if op == "add_hyperlink":
+        from lexitool.openxml_hyperlink import add_hyperlink
+        result = add_hyperlink(path, target_para, name,
+                               url=args.get("url"),
+                               anchor=args.get("anchor"),
+                               tooltip=args.get("tooltip"))
+        return tool_result(result)
+
+    elif op == "remove_hyperlink":
+        from lexitool.openxml_hyperlink import remove_hyperlink
+        result = remove_hyperlink(path, target_para, name)
+        return tool_result(result)
+
+    elif op == "list_hyperlinks":
+        from lexitool.openxml_hyperlink import list_hyperlinks
+        result = list_hyperlinks(path)
+        return tool_result(result)
+
+    elif op == "add_footnote":
+        from lexitool.openxml_footnotes import add_footnote
+        result = add_footnote(path, target_para,
+                              text=args.get("text", ""),
+                              offset=args.get("offset", -1))
+        return tool_result(result)
+
+    elif op == "add_endnote":
+        from lexitool.openxml_footnotes import add_endnote
+        result = add_endnote(path, target_para,
+                              text=args.get("text", ""),
+                              offset=args.get("offset", -1))
+        return tool_result(result)
+
+    elif op == "remove_footnote":
+        from lexitool.openxml_footnotes import remove_footnote
+        note_id = args.get("note_id")
+        if note_id is None:
+            return tool_error("'note_id' is required for remove_footnote")
+        result = remove_footnote(path, int(note_id))
+        return tool_result(result)
+
+    elif op == "remove_endnote":
+        from lexitool.openxml_footnotes import remove_endnote
+        note_id = args.get("note_id")
+        if note_id is None:
+            return tool_error("'note_id' is required for remove_endnote")
+        result = remove_endnote(path, int(note_id))
+        return tool_result(result)
+
+    elif op == "list_footnotes":
+        from lexitool.openxml_footnotes import list_footnotes
+        result = list_footnotes(path)
+        return tool_result(result)
+
+    elif op == "list_endnotes":
+        from lexitool.openxml_footnotes import list_endnotes
+        result = list_endnotes(path)
+        return tool_result(result)
+
+    elif op == "add_bookmark":
         result = bookmarks.add_bookmark(path, target_para - 1, name)
     elif op == "remove_bookmark":
         result = bookmarks.remove_bookmark(path, name)
@@ -2139,9 +2475,14 @@ LEX_SECTION_SCHEMA = {
     "name": "lex_section",
     "description": (
         "Manage page layout, breaks, margins, columns, and orientation.\n\n"
-        "Breaks: page, column, section_next (new page), section_continuous (same page).\n"
+        "Breaks: page, column, section_next (next page), section_continuous (same page).\n"
+        "Page sizes: A4, A3, A5, Letter, Legal, Tabloid, B5, Executive.\n"
         "Margins: {'top': '2.54cm', 'bottom': '2.54cm', 'left': '3.18cm', 'right': '3.18cm'}.\n"
-        "Orientation: portrait or landscape."
+        "Orientation: portrait or landscape.\n\n"
+        "Section ops: add_section_break inserts a proper OOXML section break after\n"
+        "a paragraph, preserving layout from the previous section. remove_section_break\n"
+        "merges two sections. page_setup sets page size and margins in one call.\n"
+        "read_sections returns a list of all sections with their properties."
     ),
     "parameters": {
         "type": "object",
@@ -2152,7 +2493,11 @@ LEX_SECTION_SCHEMA = {
             },
             "op": {
                 "type": "string",
-                "enum": ["add_break", "set_margins", "set_orientation"],
+                "enum": [
+                    "add_break", "set_margins", "set_orientation",
+                    "add_section_break", "remove_section_break",
+                    "page_setup", "read_sections",
+                ],
                 "description": "Operation to perform.",
             },
             "at_para": {
@@ -2161,8 +2506,8 @@ LEX_SECTION_SCHEMA = {
             },
             "type": {
                 "type": "string",
-                "enum": ["page", "column", "section_next", "section_continuous"],
-                "description": "Break type. Required for add_break.",
+                "enum": ["page", "column", "section_next", "section_continuous", "nextPage", "continuous", "evenPage", "oddPage"],
+                "description": "Break type. Required for add_break / add_section_break.",
             },
             "margins": {
                 "type": "object",
@@ -2172,6 +2517,14 @@ LEX_SECTION_SCHEMA = {
                 "type": "string",
                 "enum": ["portrait", "landscape"],
             },
+            "page_size": {
+                "type": "string",
+                "description": "Named page size: A4, A3, A5, Letter, Legal, Tabloid, B5, Executive.",
+            },
+            "section_index": {
+                "type": "integer",
+                "description": "0-indexed section number. -1 = last section. Used by remove_section_break and page_setup.",
+            },
         },
         "required": ["path", "op"],
     },
@@ -2180,14 +2533,108 @@ LEX_SECTION_SCHEMA = {
 
 def _handle_section(args: dict, **kwargs) -> str:
     from lexitool.edit_ops import _read_docx, _write_docx
+    from lxml import etree
 
     path = _resolve_path(args["path"])
     op = args["op"]
+    W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+    W = f"{{{W_NS}}}"
 
+    # ── New ops using openxml_section ──
+    if op == "read_sections":
+        from lexitool.openxml_section import read_sections
+
+        sections = read_sections(path)
+        result = []
+        for s in sections:
+            ps = s.page_setup
+            result.append({
+                "index": s.index,
+                "start_para": s.start_para,
+                "end_para": s.end_para,
+                "page_width": ps.page_width,
+                "page_height": ps.page_height,
+                "orientation": ps.orientation,
+                "margin_top": ps.margin_top,
+                "margin_bottom": ps.margin_bottom,
+                "margin_left": ps.margin_left,
+                "margin_right": ps.margin_right,
+                "margin_gutter": ps.margin_gutter,
+                "margin_header": ps.margin_header,
+                "margin_footer": ps.margin_footer,
+                "header_refs": s.header_refs,
+                "footer_refs": s.footer_refs,
+            })
+        return tool_result({"ok": True, "sections": result})
+
+    elif op == "add_section_break":
+        from lexitool.openxml_section import add_section_break, PageSetup, _parse_dim
+
+        after_para = args.get("at_para", 1)
+        break_type_map = {
+            "section_next": "nextPage", "section_continuous": "continuous",
+            "nextPage": "nextPage", "continuous": "continuous",
+            "evenPage": "evenPage", "oddPage": "oddPage",
+        }
+        break_type = break_type_map.get(args.get("type", "nextPage"), "nextPage")
+
+        ps = None
+        if args.get("page_size") or args.get("orientation") or args.get("margins"):
+            kwargs_ps = {}
+            page_size = args.get("page_size")
+            if page_size:
+                orient = args.get("orientation", "portrait")
+                kwargs_ps["page_width"], kwargs_ps["page_height"] = PageSetup.from_preset(page_size, orient).page_width, PageSetup.from_preset(page_size, orient).page_height
+                kwargs_ps["orientation"] = orient
+            orientation = args.get("orientation")
+            if orientation and not page_size:
+                kwargs_ps["orientation"] = orientation
+            margins = args.get("margins")
+            if margins:
+                for key, attr in [("top", "margin_top"), ("bottom", "margin_bottom"),
+                                   ("left", "margin_left"), ("right", "margin_right")]:
+                    if key in margins:
+                        kwargs_ps[attr] = _parse_dim(str(margins[key]))
+            ps = PageSetup(**kwargs_ps) if kwargs_ps else None
+
+        return tool_result(add_section_break(path, after_para, break_type, page_setup=ps))
+
+    elif op == "remove_section_break":
+        from lexitool.openxml_section import remove_section_break
+
+        section_index = args.get("section_index", 0)
+        return tool_result(remove_section_break(path, section_index))
+
+    elif op == "page_setup":
+        from lexitool.openxml_section import apply_page_setup, PageSetup, _parse_dim
+
+        section_index = args.get("section_index", -1)
+        ps = PageSetup()
+
+        page_size = args.get("page_size")
+        if page_size:
+            orient = args.get("orientation", "portrait")
+            preset = PageSetup.from_preset(page_size, orient)
+            ps = ps.merge_into(preset)
+
+        orientation = args.get("orientation")
+        if orientation and not page_size:
+            ps.orientation = orientation
+
+        margins = args.get("margins")
+        if margins:
+            for key, attr in [("top", "margin_top"), ("bottom", "margin_bottom"),
+                               ("left", "margin_left"), ("right", "margin_right"),
+                               ("gutter", "margin_gutter"), ("header", "margin_header"),
+                               ("footer", "margin_footer")]:
+                if key in margins:
+                    setattr(ps, attr, _parse_dim(str(margins[key])))
+
+        return tool_result(apply_page_setup(path, ps, section_index=section_index))
+
+    # ── Legacy ops (backward compatible) ──
     doc_xml, other = _read_docx(path)
-    from lxml import etree
     root = etree.fromstring(doc_xml)
-    W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
     body = root.find(f"{W}body")
 
     if op == "add_break":
@@ -2216,10 +2663,10 @@ def _handle_section(args: dict, **kwargs) -> str:
 
     elif op == "set_margins" and args.get("margins"):
         margins = args["margins"]
-        # Find or create the last sectPr in the document
+        from lexitool.openxml_section import _parse_dim
+
         sectPr = body.find(f"{W}sectPr")
         if sectPr is None:
-            # Add sectPr to the last paragraph
             paras = [el for el in body if el.tag == f"{W}p"]
             if paras:
                 pPr = paras[-1].find(f"{W}pPr")
@@ -2235,11 +2682,17 @@ def _handle_section(args: dict, **kwargs) -> str:
                 sectPr.insert(0, pgMar)
             for key in ("top", "bottom", "left", "right"):
                 if key in margins:
-                    val = int(float(margins[key].replace("cm", "").replace("in", "").strip()) * 567)  # cm to twips approx
+                    val = margins[key]
+                    if isinstance(val, str):
+                        val = _parse_dim(val)
+                    else:
+                        val = int(val)
                     pgMar.set(f"{W}{key}", str(val))
 
     elif op == "set_orientation" and args.get("orientation"):
         orientation = args["orientation"]
+        from lexitool.openxml_section import PAGE_SIZES
+
         sectPr = body.find(f"{W}sectPr")
         if sectPr is None:
             paras = [el for el in body if el.tag == f"{W}p"]
@@ -2254,14 +2707,25 @@ def _handle_section(args: dict, **kwargs) -> str:
             pgSz = sectPr.find(f"{W}pgSz")
             if pgSz is None:
                 pgSz = etree.SubElement(sectPr, f"{W}pgSz")
+            # Preserve existing page size and swap dimensions
+            existing_w = pgSz.get(f"{W}w")
+            existing_h = pgSz.get(f"{W}h")
             if orientation == "landscape":
                 pgSz.set(f"{W}orient", "landscape")
-                pgSz.set(f"{W}w", "16838")
-                pgSz.set(f"{W}h", "11906")
+                if existing_w and existing_h:
+                    pgSz.set(f"{W}w", existing_h)
+                    pgSz.set(f"{W}h", existing_w)
+                else:
+                    pgSz.set(f"{W}w", "16838")
+                    pgSz.set(f"{W}h", "11906")
             else:
                 pgSz.set(f"{W}orient", "portrait")
-                pgSz.set(f"{W}w", "11906")
-                pgSz.set(f"{W}h", "16838")
+                if existing_w and existing_h:
+                    pgSz.set(f"{W}w", existing_h)
+                    pgSz.set(f"{W}h", existing_w)
+                else:
+                    pgSz.set(f"{W}w", "11906")
+                    pgSz.set(f"{W}h", "16838")
 
     try:
         doc_xml_out = etree.tostring(root, xml_declaration=True, encoding="UTF-8", standalone="yes")
@@ -2285,7 +2749,10 @@ LEX_DOC_SCHEMA = {
         "properties": {
             "op": {
                 "type": "string",
-                "enum": ["create", "clean", "update_toc", "update_fields"],
+                "enum": ["create", "clean", "update_toc", "update_fields",
+                         "add_watermark", "remove_watermark", "list_watermarks",
+                         "merge", "split",
+                         "set_property", "get_properties", "remove_property"],
                 "description": "Operation to perform.",
             },
             "path": {
@@ -2303,6 +2770,15 @@ LEX_DOC_SCHEMA = {
             "metadata": {
                 "type": "object",
                 "description": 'Document metadata: {"title": "...", "author": "...", "case_no": "..."}.',
+            },
+            "watermark_text": {
+                "type": "string",
+                "description": "Watermark text (e.g. DRAFT, CONFIDENTIAL).",
+            },
+            "watermark_layout": {
+                "type": "string",
+                "enum": ["diagonal", "horizontal"],
+                "description": "Watermark layout. Default: diagonal.",
             },
         },
         "required": ["op"],
@@ -2344,6 +2820,72 @@ def _handle_doc(args: dict, **kwargs) -> str:
         path = _resolve_path(args["path"])
         result = update_fields(doc_path=path)
         return tool_result(result)
+
+    elif op == "add_watermark":
+        from lexitool.openxml_watermark import add_watermark
+        path = _resolve_path(args["path"])
+        return tool_result(add_watermark(
+            path,
+            text=args.get("watermark_text", "DRAFT"),
+            layout=args.get("watermark_layout", "diagonal"),
+        ))
+
+    elif op == "remove_watermark":
+        from lexitool.openxml_watermark import remove_watermark
+        path = _resolve_path(args["path"])
+        return tool_result(remove_watermark(path))
+
+    elif op == "list_watermarks":
+        from lexitool.openxml_watermark import list_watermarks
+        path = _resolve_path(args["path"])
+        return tool_result(list_watermarks(path))
+
+    elif op == "merge":
+        from lexitool.openxml_merge import merge_documents
+        path = _resolve_path(args["path"])
+        insert_path = args.get("insert_path", "")
+        if not insert_path:
+            return tool_error("'insert_path' is required for merge")
+        return tool_result(merge_documents(
+            path, insert_path,
+            after_para=args.get("after_para", 0),
+        ))
+
+    elif op == "split":
+        from lexitool.openxml_merge import split_document
+        path = _resolve_path(args["path"])
+        para_start = args.get("para_start", 1)
+        para_end = args.get("para_end", 1)
+        output = args.get("output", "")
+        if not output:
+            return tool_error("'output' is required for split")
+        return tool_result(split_document(
+            path, para_start, para_end, output=output,
+        ))
+
+    elif op == "set_property":
+        from lexitool.openxml_custom_props import set_custom_property
+        path = _resolve_path(args["path"])
+        prop_name = args.get("prop_name", "")
+        prop_value = args.get("prop_value", "")
+        if not prop_name:
+            return tool_error("'prop_name' is required for set_property")
+        return tool_result(set_custom_property(
+            path, prop_name, prop_value,
+        ))
+
+    elif op == "get_properties":
+        from lexitool.openxml_custom_props import get_custom_properties
+        path = _resolve_path(args["path"])
+        return tool_result(get_custom_properties(path))
+
+    elif op == "remove_property":
+        from lexitool.openxml_custom_props import remove_custom_property
+        path = _resolve_path(args["path"])
+        prop_name = args.get("prop_name", "")
+        if not prop_name:
+            return tool_error("'prop_name' is required for remove_property")
+        return tool_result(remove_custom_property(path, prop_name))
 
     return tool_error(f"Unknown op: {op}")
 

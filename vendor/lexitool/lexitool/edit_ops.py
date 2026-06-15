@@ -13,6 +13,7 @@ edit_ops.py — 纯 OpenXML 基础编辑操作（insert / replace / delete），
 from __future__ import annotations
 
 import copy
+import os
 import re
 import shutil
 import tempfile
@@ -46,7 +47,7 @@ def _write_docx(path: str, doc_xml: bytes, other: dict[str, bytes],
     out_path = output or path
     fd, tmp = tempfile.mkstemp(prefix="lex_docx_edit.", suffix=".docx")
     import os as _os
-    _os.close(fd)
+    os.close(fd)
     with zipfile.ZipFile(tmp, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         # OOXML requires [Content_Types].xml as the first ZIP entry
         ct_xml = other.get("[Content_Types].xml")
@@ -1587,3 +1588,174 @@ def insert_paragraph_block(docx_path: str, after_para: int,
 	                  ),
 	                  tc_mode=tc_mode,
 	                  path=output or docx_path)
+
+# ── Whole-document find/replace ──────────────────────────────────────────────
+
+
+def _normalize_quotes(text: str) -> str:
+    """Replace smart/curly quotes with straight quotes for flexible matching."""
+    return (text
+            .replace("ʻ", "'").replace("ʼ", "'")
+            .replace("“", '"').replace("”", '"')
+            .replace("«", '"').replace("»", '"')
+            .replace("–", "-").replace("—", "--"))
+
+
+def find_and_replace_all(
+    docx_path: str,
+    find: str,
+    replace: str,
+    *,
+    match_case: bool = True,
+    whole_word: bool = False,
+    regex: bool = False,
+    tc: bool = True,
+    author: str = "agent",
+    include_headers_footers: bool = False,
+    include_tables: bool = True,
+    output: str | None = None,
+) -> dict:
+    """Replace all occurrences of *find* with *replace* across the entire document.
+
+    Uses multi-strategy text matching:
+    1. Exact match (optionally case-insensitive)
+    2. Smart-quote normalized match
+    3. Whitespace-flexible match
+
+    Returns a dict with match_count, paragraphs_touched, and errors.
+    """
+    import re as _re
+
+    out_path = output or docx_path
+
+    doc_xml, other = _read_docx(docx_path)
+    root = etree.fromstring(doc_xml)
+    body = root.find(f"{W}body")
+    if body is None:
+        return {"ok": False, "error": "document has no body"}
+
+    # Build list of paragraph elements to search
+    search_paras: list[etree._Element] = []
+    for el in body:
+        if el.tag == f"{W}p":
+            search_paras.append(el)
+        elif el.tag == f"{W}tbl" and include_tables:
+            for tc in el.iter(f"{W}tc"):
+                for p in tc.iter(f"{W}p"):
+                    search_paras.append(p)
+
+    # Build find pattern
+    flags = 0 if match_case else _re.IGNORECASE
+    if regex:
+        try:
+            pattern = _re.compile(find, flags)
+        except _re.error as e:
+            return {"ok": False, "error": f"invalid regex: {e}"}
+    else:
+        escaped = _re.escape(find)
+        if whole_word:
+            escaped = r"\b" + escaped + r"\b"
+        pattern = _re.compile(escaped, flags)
+
+    # Collect all matches: (paragraph_element, match_start, match_end)
+    matches: list[tuple[etree._Element, int, int]] = []
+
+    for para in search_paras:
+        rendered = render_paragraph(para, include_deleted=True)
+        para_text = rendered.text
+        if not para_text:
+            continue
+
+        # Strategy 1: exact/case-sensitive
+        for m in pattern.finditer(para_text):
+            matches.append((para, m.start(), m.end()))
+
+        # Strategy 2: smart-quote normalized
+        if not matches:
+            norm_text = _normalize_quotes(para_text)
+            find_norm = _normalize_quotes(find)
+            if find_norm != find:
+                if regex:
+                    try:
+                        pn = _re.compile(find_norm, flags)
+                    except _re.error:
+                        pn = None
+                else:
+                    en = _re.escape(find_norm)
+                    if whole_word:
+                        en = r"\b" + en + r"\b"
+                    pn = _re.compile(en, flags)
+                if pn is not None:
+                    for m in pn.finditer(norm_text):
+                        matches.append((para, m.start(), m.end()))
+
+        # Strategy 3: whitespace-flexible
+        if not matches:
+            collapsed = _re.sub(r"\s+", " ", para_text.strip())
+            find_collapsed = _re.sub(r"\s+", " ", find.strip())
+            idx = collapsed.lower().find(find_collapsed.lower())
+            if idx >= 0:
+                # Map back to original position
+                orig_idx = para_text.lower().find(find_collapsed.lower())
+                if orig_idx >= 0:
+                    matches.append((para, orig_idx, orig_idx + len(find_collapsed)))
+
+    # Deduplicate by (element_id, start)
+    seen: set[tuple[int, int]] = set()
+    unique: list[tuple[etree._Element, int, int]] = []
+    for el, s, e in matches:
+        key = (id(el), s)
+        if key not in seen:
+            seen.add(key)
+            unique.append((el, s, e))
+
+    # Group matches by paragraph, sort within each para in reverse order
+    from collections import defaultdict
+    by_para: dict[int, list[tuple[int, int]]] = defaultdict(list)
+    for el, s, e in unique:
+        by_para[id(el)].append((s, e))
+
+    para_map: dict[int, etree._Element] = {}
+    for el, s, e in unique:
+        para_map[id(el)] = el
+
+    # Process paragraphs in reverse order, matches within each in reverse
+    match_count = 0
+    errors: list[str] = []
+
+    for para in reversed(search_paras):
+        pid = id(para)
+        if pid not in by_para:
+            continue
+        # Sort matches in reverse start order
+        span_matches = sorted(by_para[pid], key=lambda x: x[0], reverse=True)
+        for s, e in span_matches:
+            rendered = render_paragraph(para, include_deleted=True)
+            ok = replace_span(rendered, s, e, replace)
+            if not ok:
+                errors.append(f"failed to replace at offset {s}-{e} in a paragraph")
+                continue
+            match_count += 1
+
+    doc_xml_out = etree.tostring(root, xml_declaration=True, encoding="UTF-8", standalone="yes")
+
+    fd, tmp = tempfile.mkstemp(prefix="lex_replace_all.", suffix=".docx")
+    os.close(fd)
+    with zipfile.ZipFile(tmp, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        ct = other.get("[Content_Types].xml")
+        if ct is not None:
+            zf.writestr("[Content_Types].xml", ct)
+        zf.writestr("word/document.xml", doc_xml_out)
+        for name, data in other.items():
+            if name == "[Content_Types].xml":
+                continue
+            zf.writestr(name, data)
+    shutil.move(tmp, out_path)
+
+    return {
+        "ok": True,
+        "match_count": match_count,
+        "paragraphs_touched": len(by_para),
+        "errors": errors or None,
+        "path": out_path,
+    }
