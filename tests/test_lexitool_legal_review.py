@@ -16,6 +16,7 @@ from lexitool.openxml_opc import (
     PKG_REL_NS,
     append_relationship,
     ensure_default_content_type,
+    ensure_override_content_type,
     rels_member_for_part,
     resolve_target_path,
 )
@@ -29,7 +30,7 @@ from hermes_cli.project_commands import (
     legal_scorecard,
     lex_convention_profile,
 )
-from tools.lexitool_tool import _handle_edit, _handle_revision_guard, _handle_scan
+from tools.lexitool_tool import _handle_comment, _handle_edit, _handle_revision_guard, _handle_scan
 
 
 W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
@@ -254,8 +255,62 @@ def test_openxml_opc_helpers_manage_relationships_and_content_types():
     assert ensure_default_content_type(types, "xml", "application/xml") is True
     assert ensure_default_content_type(types, ".png", "image/png") is True
     assert ensure_default_content_type(types, "png", "image/png") is False
+    assert ensure_override_content_type(types, "/word/comments.xml", "application/comments+xml") is True
+    assert ensure_override_content_type(types, "word/comments.xml", "application/comments+xml") is False
     defaults = {el.get("Extension"): el.get("ContentType") for el in types.findall(f"{{{CT_NS}}}Default")}
     assert defaults == {"xml": "application/xml", "png": "image/png"}
+    overrides = {el.get("PartName"): el.get("ContentType") for el in types.findall(f"{{{CT_NS}}}Override")}
+    assert overrides == {"/word/comments.xml": "application/comments+xml"}
+
+
+def test_lex_comment_add_precisely_anchors_cross_run_range(tmp_path):
+    path = tmp_path / "comments.docx"
+    doc = Document()
+    p = doc.add_paragraph()
+    p.add_run("The ")
+    p.add_run("Security").bold = True
+    p.add_run(" Trustee").italic = True
+    p.add_run(" may act.")
+    doc.save(path)
+
+    result = _handle_comment({
+        "path": str(path),
+        "op": "add",
+        "para": 0,
+        "range_start": 4,
+        "range_end": 20,
+        "author": "JT",
+        "text": "Confirm this should be Chargee.",
+    })
+
+    assert '"ok": true' in result
+    assert '"anchored_precisely": true' in result
+
+    listed = _handle_comment({"path": str(path), "op": "list"})
+    assert '"para": 0' in listed
+    assert '"para_display": 1' in listed
+
+    with zipfile.ZipFile(path, "r") as zf:
+        doc_root = etree.fromstring(zf.read("word/document.xml"))
+        rels_root = etree.fromstring(zf.read("word/_rels/document.xml.rels"))
+        ct_root = etree.fromstring(zf.read("[Content_Types].xml"))
+
+    para = next(doc_root.iter(f"{W}p"))
+    child_tags = [etree.QName(child).localname for child in para]
+    texts = ["".join(t.text or "" for t in child.iter(f"{W}t")) for child in para]
+
+    assert "".join(t.text or "" for t in para.iter(f"{W}t")) == "The Security Trustee may act."
+    assert child_tags == ["r", "commentRangeStart", "r", "r", "commentRangeEnd", "r", "r"]
+    assert texts[0] == "The "
+    assert texts[2] == "Security"
+    assert texts[3] == " Trustee"
+    assert texts[-1] == " may act."
+    assert para.find(f".//{W}commentReference") is not None
+
+    rels = rels_root.findall(f"{{{PKG_REL_NS}}}Relationship")
+    assert any(rel.get("Type", "").endswith("/comments") and rel.get("Target") == "comments.xml" for rel in rels)
+    overrides = ct_root.findall(f"{{{CT_NS}}}Override")
+    assert any(ov.get("PartName") == "/word/comments.xml" for ov in overrides)
 
 
 def test_lex_edit_header_footer_replace_handles_cross_run_text(tmp_path):

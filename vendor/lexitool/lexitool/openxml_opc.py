@@ -113,6 +113,23 @@ def append_relationship(
     return rid
 
 
+def ensure_relationship(
+    root: etree._Element,
+    rel_type: str,
+    target: str,
+    *,
+    target_mode: str | None = None,
+) -> str:
+    for rel in root.findall(f"{{{PKG_REL_NS}}}Relationship"):
+        if (
+            rel.get("Type") == rel_type
+            and rel.get("Target") == target
+            and (rel.get("TargetMode") or None) == (target_mode or None)
+        ):
+            return rel.get("Id", "rId1")
+    return append_relationship(root, rel_type, target, target_mode=target_mode)
+
+
 def ensure_default_content_type(
     root: etree._Element,
     extension: str,
@@ -133,6 +150,32 @@ def ensure_default_content_type(
 
     item = etree.SubElement(root, f"{{{CT_NS}}}Default")
     item.set("Extension", extension)
+    item.set("ContentType", content_type)
+    return True
+
+
+def ensure_override_content_type(
+    root: etree._Element,
+    part_name: str,
+    content_type: str,
+) -> bool:
+    part_name = (part_name or "").strip()
+    if not part_name:
+        raise ValueError("part_name is required")
+    if not part_name.startswith("/"):
+        part_name = "/" + part_name
+    if not content_type:
+        raise ValueError("content_type is required")
+
+    for item in root.findall(f"{{{CT_NS}}}Override"):
+        if item.get("PartName") == part_name:
+            if item.get("ContentType") == content_type:
+                return False
+            item.set("ContentType", content_type)
+            return True
+
+    item = etree.SubElement(root, f"{{{CT_NS}}}Override")
+    item.set("PartName", part_name)
     item.set("ContentType", content_type)
     return True
 

@@ -6,14 +6,24 @@ word/document.xml via w:commentRangeStart / w:commentRangeEnd / w:commentReferen
 """
 from __future__ import annotations
 
+import copy
 import shutil
 import tempfile
 import zipfile
 from dataclasses import dataclass, field
 from lxml import etree
 
+from .openxml_opc import (
+    CT_NS,
+    PKG_REL_NS,
+    ensure_override_content_type,
+    ensure_relationship,
+)
+from .openxml_runmap import editable_touched_spans, render_paragraph, text_in_span
+
 W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 W = f"{{{W_NS}}}"
+XML_SPACE = "{http://www.w3.org/XML/1998/namespace}space"
 
 
 @dataclass
@@ -50,8 +60,6 @@ def _write_docx_zf(path: str, doc_xml: bytes, other: dict[str, bytes]) -> None:
     shutil.move(tmp, path)
 
 
-CT_NS = "http://schemas.openxmlformats.org/package/2006/content-types"
-REL_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
 OO_REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 
 COMMENTS_CT = "application/vnd.openxmlformats-officedocument.wordprocessingml.comments+xml"
@@ -64,14 +72,7 @@ def _ensure_content_type(other: dict[str, bytes], part_name: str, content_type: 
     if ct_bytes is None:
         return
     ct_root = etree.fromstring(ct_bytes)
-    # Check if override already exists
-    for ov in ct_root:
-        if ov.get("PartName") == part_name:
-            return
-    # Add override
-    ov = etree.SubElement(ct_root, f"{{{CT_NS}}}Override")
-    ov.set("PartName", part_name)
-    ov.set("ContentType", content_type)
+    ensure_override_content_type(ct_root, part_name, content_type)
     other["[Content_Types].xml"] = etree.tostring(ct_root, xml_declaration=True,
                                                    encoding="UTF-8", standalone=True)
 
@@ -81,35 +82,13 @@ def _ensure_relationship(other: dict[str, bytes], rel_type: str, target: str) ->
     rels_key = "word/_rels/document.xml.rels"
     rels_bytes = other.get(rels_key)
     if rels_bytes is None:
-        # Create minimal .rels file
-        rels = (
-            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
-            f'<Relationships xmlns="{REL_NS}"></Relationships>'
-        )
-        rels_root = etree.fromstring(rels.encode("utf-8"))
+        rels_root = etree.Element(f"{{{PKG_REL_NS}}}Relationships", nsmap={None: PKG_REL_NS})
     else:
         rels_root = etree.fromstring(rels_bytes)
-    # Check if relationship already exists
-    for r in rels_root:
-        if r.get("Type") == rel_type and r.get("Target") == target:
-            return r.get("Id", "rId1")
-    # Find next rId
-    max_id = 0
-    for r in rels_root:
-        rid = r.get("Id", "")
-        if rid.startswith("rId"):
-            try:
-                max_id = max(max_id, int(rid[3:]))
-            except ValueError:
-                pass
-    new_rid = f"rId{max_id + 1}"
-    rel = etree.SubElement(rels_root, "Relationship")
-    rel.set("Id", new_rid)
-    rel.set("Type", rel_type)
-    rel.set("Target", target)
+    rid = ensure_relationship(rels_root, rel_type, target)
     other[rels_key] = etree.tostring(rels_root, xml_declaration=True,
                                       encoding="UTF-8", standalone=True)
-    return new_rid
+    return rid
 
 
 def _next_comment_id(comments_root: etree._Element) -> int:
@@ -148,7 +127,35 @@ def _find_para(root: etree._Element, para_idx: int) -> etree._Element | None:
     return None
 
 
-def _insert_comment_marks_at_char_range(p, cmt_id, range_start, range_end):
+def _make_comment_reference_run(cmt_id: int) -> etree._Element:
+    cref = etree.Element(f"{W}r")
+    cr_an = etree.SubElement(cref, f"{W}commentReference")
+    cr_an.set(f"{W}id", str(cmt_id))
+    return cref
+
+
+def _make_text_run_from_rpr(text: str, base_rPr=None) -> etree._Element:
+    run = etree.Element(f"{W}r")
+    if base_rPr is not None:
+        run.append(copy.deepcopy(base_rPr))
+    t = etree.SubElement(run, f"{W}t")
+    t.text = text
+    if text.startswith((" ", "\t", "\n")) or text.endswith((" ", "\t", "\n")):
+        t.set(XML_SPACE, "preserve")
+    return run
+
+
+def _append_comment_marks(p, cmt_id: int) -> None:
+    crs = etree.Element(f"{W}commentRangeStart")
+    crs.set(f"{W}id", str(cmt_id))
+    cre = etree.Element(f"{W}commentRangeEnd")
+    cre.set(f"{W}id", str(cmt_id))
+    p.append(crs)
+    p.append(cre)
+    p.append(_make_comment_reference_run(cmt_id))
+
+
+def _insert_comment_marks_at_char_range(p, cmt_id, range_start, range_end) -> bool:
     """Insert commentRangeStart/End/Reference at a character range within a paragraph.
 
     Places commentRangeStart before the character at range_start,
@@ -159,62 +166,71 @@ def _insert_comment_marks_at_char_range(p, cmt_id, range_start, range_end):
     crs.set(f"{W}id", str(cmt_id))
     cre = etree.Element(f"{W}commentRangeEnd")
     cre.set(f"{W}id", str(cmt_id))
-    cref = etree.Element(f"{W}r")
-    cr_an = etree.SubElement(cref, f"{W}commentReference")
-    cr_an.set(f"{W}id", str(cmt_id))
 
     if range_start is None and range_end is None:
-        p.append(crs)
-        p.append(cre)
-        p.append(cref)
-        return
+        _append_comment_marks(p, cmt_id)
+        return True
 
-    # Find the insertion points by character offset
-    t_elements = [(el, el.text or "") for el in p.iter(f"{W}t")]
-    if not t_elements:
-        p.append(crs)
-        p.append(cre)
-        p.append(cref)
-        return
+    rendered = render_paragraph(p)
+    if not rendered.text:
+        _append_comment_marks(p, cmt_id)
+        return False
 
-    # Insert commentRangeStart at range_start
-    if range_start is not None:
-        offset = 0
-        inserted_start = False
-        for t_el, t_text in t_elements:
-            tlen = len(t_text)
-            if not inserted_start and offset + tlen >= range_start:
-                local_pos = range_start - offset
-                if local_pos <= 0:
-                    t_el.addprevious(crs)
-                else:
-                    # Split the text: before gets commentRangeStart after it
-                    parent = t_el.getparent()
-                    idx = list(parent).index(t_el)
-                    parent.insert(idx + 1, crs)
-                inserted_start = True
-                break
-            offset += tlen
-        if not inserted_start:
-            p.append(crs)
+    start = 0 if range_start is None else int(range_start)
+    end = len(rendered.text) if range_end is None else int(range_end)
+    if start < 0 or end <= start or end > len(rendered.text):
+        _append_comment_marks(p, cmt_id)
+        return False
 
-    # Insert commentRangeEnd and commentReference at range_end
-    if range_end is not None:
-        offset = 0
-        inserted_end = False
-        for t_el, t_text in t_elements:
-            tlen = len(t_text)
-            if not inserted_end and offset + tlen >= range_end:
-                parent = t_el.getparent()
-                idx = list(parent).index(t_el)
-                parent.insert(idx + 1, cre)
-                parent.insert(idx + 2, cref)
-                inserted_end = True
-                break
-            offset += tlen
-        if not inserted_end:
-            p.append(cre)
-            p.append(cref)
+    touched = editable_touched_spans(rendered, start, end)
+    if not touched:
+        _append_comment_marks(p, cmt_id)
+        return False
+
+    runs: list[etree._Element] = []
+    for span in touched:
+        run = span.run
+        if run is not None and run not in runs:
+            runs.append(run)
+    if not runs:
+        _append_comment_marks(p, cmt_id)
+        return False
+
+    parent = runs[0].getparent()
+    if parent is None or any(run.getparent() is not parent for run in runs):
+        _append_comment_marks(p, cmt_id)
+        return False
+
+    insert_idx = list(parent).index(runs[0])
+    new_elems: list[etree._Element] = []
+    for span in touched:
+        run = span.run
+        if run is None:
+            _append_comment_marks(p, cmt_id)
+            return False
+        rpr = run.find(f"{W}rPr")
+        before = span.text[: max(0, start - span.start)] if span is touched[0] else ""
+        middle = text_in_span(span, start, end)
+        after = span.text[max(0, end - span.start):] if span is touched[-1] else ""
+
+        if span is touched[0] and before:
+            new_elems.append(_make_text_run_from_rpr(before, rpr))
+        if span is touched[0]:
+            new_elems.append(crs)
+        if middle:
+            new_elems.append(_make_text_run_from_rpr(middle, rpr))
+        if span is touched[-1]:
+            new_elems.append(cre)
+            new_elems.append(_make_comment_reference_run(cmt_id))
+            if after:
+                new_elems.append(_make_text_run_from_rpr(after, rpr))
+
+    for run in runs:
+        if run.getparent() is parent:
+            parent.remove(run)
+    for offset, elem in enumerate(new_elems):
+        parent.insert(insert_idx + offset, elem)
+    return True
 
 
 def add_comment(docx_path: str, para: int, text: str, *,
@@ -269,14 +285,21 @@ def add_comment(docx_path: str, para: int, text: str, *,
         cmt_t.text = line
 
     # Add comment reference marks to the paragraph
-    _insert_comment_marks_at_char_range(p, cmt_id, range_start, range_end)
+    anchored_precisely = _insert_comment_marks_at_char_range(p, cmt_id, range_start, range_end)
 
     other["word/comments.xml"] = etree.tostring(cmt_root, xml_declaration=True,
                                                   encoding="UTF-8", standalone=True)
     _write_docx_zf(out, etree.tostring(root, xml_declaration=True, encoding="UTF-8",
                                         standalone=True), other)
     return CommentResult(ok=True, message=f"Comment {cmt_id} added to paragraph {para}",
-                         data=[{"id": cmt_id, "author": author, "text": text}],
+                         data=[{
+                             "id": cmt_id,
+                             "author": author,
+                             "text": text,
+                             "para": para,
+                             "para_display": para + 1,
+                             "anchored_precisely": anchored_precisely,
+                         }],
                          path=out)
 
 
@@ -296,15 +319,18 @@ def list_comments(docx_path: str, *, para: int | None = None,
     cmt_root = etree.fromstring(cmt_xml)
     doc_root = etree.fromstring(doc_xml)
 
-    # Build comment → para map via commentRangeStart in document
+    # Build comment → para map via commentRangeStart in document. para is 0-based;
+    # para_display is 1-based for lex_read §N cross-checking.
     cmt_para: dict[int, int] = {}
-    para_num = 0
+    cmt_para_display: dict[int, int] = {}
+    para_num = -1
     for child in doc_root.iter(f"{W}p"):
         para_num += 1
         for crs in child.iter(f"{W}commentRangeStart"):
             try:
                 cid = int(crs.get(f"{W}id", ""))
                 cmt_para[cid] = para_num
+                cmt_para_display[cid] = para_num + 1
             except ValueError:
                 pass
 
@@ -333,6 +359,7 @@ def list_comments(docx_path: str, *, para: int | None = None,
         results.append({
             "id": cid,
             "para": p_num,
+            "para_display": cmt_para_display.get(cid),
             "author": c_author,
             "date": c_date,
             "text": c_text,
