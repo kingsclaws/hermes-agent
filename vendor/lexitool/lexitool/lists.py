@@ -650,52 +650,66 @@ def create_list(
          "style": style, "preview": str}
     """
     if num_id is not None:
-        # Use existing numbering instance — apply directly, optionally with start override
+        # Use existing numbering definition, optionally with a new num instance
+        # for start override.  This follows the dolanmiu/docx pattern:
+        # createConcreteNumberingInstance(reference, instance) — clone a numId
+        # sharing the same abstractNumId, with per-instance start override.
+        doc_xml, other = _read_docx(doc_path)
+        numbering_xml = _check_and_insert_numbering_part(other)
+        numbering_el = etree.fromstring(numbering_xml)
+
+        # Find the existing num and its abstractNumId
+        existing_abstract_num_id = None
+        existing_num_found = False
+        for num_el in numbering_el.findall(f"{W}num"):
+            if num_el.get(f"{W}numId") == str(num_id):
+                existing_num_found = True
+                abs_ref = num_el.find(f"{W}abstractNumId")
+                if abs_ref is not None:
+                    existing_abstract_num_id = abs_ref.get(f"{W}val")
+                break
+
+        if not existing_num_found:
+            return {"ok": False, "reason": f"numId {num_id} not found in numbering.xml"}
+
+        actual_num_id: int = num_id
         if start > 1:
-            doc_xml, other = _read_docx(doc_path)
-            numbering_xml = _check_and_insert_numbering_part(other)
-            numbering_el = etree.fromstring(numbering_xml)
-            for num_el in numbering_el.findall(f"{W}num"):
-                if num_el.get(f"{W}numId") == str(num_id):
-                    # Add or update lvlOverride for ilvl=0
-                    existing_override = None
-                    for lo in num_el.findall(f"{W}lvlOverride"):
-                        if lo.get(f"{W}ilvl") == "0":
-                            existing_override = lo
-                            break
-                    if existing_override is not None:
-                        so = existing_override.find(f"{W}startOverride")
-                        if so is not None:
-                            existing_override.remove(so)
-                    else:
-                        existing_override = etree.SubElement(num_el, f"{W}lvlOverride")
-                        existing_override.set(f"{W}ilvl", "0")
-                    so = etree.SubElement(existing_override, f"{W}startOverride")
-                    so.set(f"{W}val", str(start))
-                    other["word/numbering.xml"] = etree.tostring(
-                        numbering_el, xml_declaration=True, encoding="UTF-8", standalone="yes"
-                    )
-                    try:
-                        doc_xml_out = etree.tostring(
-                            etree.fromstring(doc_xml), xml_declaration=True,
-                            encoding="UTF-8", standalone="yes"
-                        )
-                    except Exception:
-                        doc_xml_out = doc_xml
-                    _write_docx(doc_path, doc_xml_out, other)
-                    break
+            # Clone: new numId → same abstractNumId + startOverride.
+            # This preserves the original numId for existing paragraphs.
+            actual_num_id = _next_num_id(numbering_el)
+            new_num = etree.SubElement(numbering_el, f"{W}num")
+            new_num.set(f"{W}numId", str(actual_num_id))
+            abs_ref = etree.SubElement(new_num, f"{W}abstractNumId")
+            abs_ref.set(f"{W}val", str(existing_abstract_num_id))
+            lo = etree.SubElement(new_num, f"{W}lvlOverride")
+            lo.set(f"{W}ilvl", "0")
+            so = etree.SubElement(lo, f"{W}startOverride")
+            so.set(f"{W}val", str(start))
+
+        other["word/numbering.xml"] = etree.tostring(
+            numbering_el, xml_declaration=True, encoding="UTF-8", standalone="yes"
+        )
+        try:
+            doc_xml_out = etree.tostring(
+                etree.fromstring(doc_xml), xml_declaration=True,
+                encoding="UTF-8", standalone="yes"
+            )
+        except Exception:
+            doc_xml_out = doc_xml
+        _write_docx(doc_path, doc_xml_out, other)
 
         applied = 0
         for para_idx in para_indices:
-            r = apply_numbering(doc_path, para_idx, num_id, ilvl=0)
+            r = apply_numbering(doc_path, para_idx, actual_num_id, ilvl=0)
             if r["ok"]:
                 applied += 1
         return {
             "ok": True,
-            "numId": num_id,
+            "numId": actual_num_id,
             "applied_to": applied,
             "total": len(para_indices),
             "continued": True,
+            "abstractNumId": int(existing_abstract_num_id) if existing_abstract_num_id else None,
         }
 
     result = create_abstract_num(doc_path, style, levels=levels, start=start)

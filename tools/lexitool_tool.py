@@ -1182,7 +1182,8 @@ def _handle_edit(args: dict, **kwargs) -> str:
                 _direct_insert(para_el, new_text_plain, target.char_start or -1)
 
         elif op == "set_format" and fmt:
-            _apply_format_to_range(para_el, target.char_start, target.char_end, fmt)
+            for p_el in target_paras:
+                _apply_format_to_range(p_el, target.char_start, target.char_end, fmt)
 
     except Exception as e:
         return tool_error(str(e))
