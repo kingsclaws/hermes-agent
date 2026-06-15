@@ -37,6 +37,7 @@ import {
   PanelLeftClose,
   PanelLeftOpen,
   Puzzle,
+  Rocket,
   RotateCw,
   Settings,
   Shield,
@@ -77,6 +78,7 @@ import PluginsPage from "@/pages/PluginsPage";
 import ChatPage from "@/pages/ChatPage";
 import ProjectFilesPage from "@/pages/ProjectFilesPage";
 import ProjectDashboardPage from "@/pages/ProjectDashboardPage";
+import LaunchPad from "@/pages/LaunchPad";
 import { LanguageSwitcher } from "@/components/LanguageSwitcher";
 import { ThemeSwitcher } from "@/components/ThemeSwitcher";
 import { useI18n } from "@/i18n";
@@ -95,7 +97,7 @@ function RootRedirect() {
   if (isDashboardEmbeddedChatEnabled()) {
     return <Navigate to="/chat" replace />;
   }
-  return <Navigate to="/sessions" replace />;
+  return <Navigate to="/launch" replace />;
 }
 
 function UnknownRouteFallback({ pluginsLoading }: { pluginsLoading: boolean }) {
@@ -103,7 +105,7 @@ function UnknownRouteFallback({ pluginsLoading }: { pluginsLoading: boolean }) {
     // Render nothing during the plugin-load window — a spinner here would just flash.
     return null;
   }
-  return <Navigate to="/sessions" replace />;
+  return <Navigate to="/launch" replace />;
 }
 
 const CHAT_NAV_ITEM: NavItem = {
@@ -124,6 +126,7 @@ const CHAT_NAV_ITEM: NavItem = {
  */
 const BUILTIN_ROUTES_CORE: Record<string, ComponentType> = {
   "/": RootRedirect,
+  "/launch": LaunchPad,
   "/projects": ProjectsPage,
   "/projects/:projectId": ProjectDashboardPage,
   "/projects/:projectId/files": ProjectFilesPage,
@@ -149,6 +152,12 @@ function ChatRouteSink() {
 }
 
 const BUILTIN_NAV_REST: NavItem[] = [
+  {
+    path: "/launch",
+    labelKey: "launchpad",
+    label: "LaunchPad",
+    icon: Rocket,
+  },
   {
     path: "/projects",
     labelKey: "projects",
@@ -190,6 +199,12 @@ const BUILTIN_NAV_REST: NavItem[] = [
 
 const LEX_WORKSPACE_NAV: NavItem[] = [
   CHAT_NAV_ITEM,
+  {
+    path: "/launch",
+    labelKey: "launchpad",
+    label: "LaunchPad",
+    icon: Rocket,
+  },
   {
     path: "/projects",
     labelKey: "projects",

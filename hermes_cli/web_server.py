@@ -2880,6 +2880,53 @@ async def delete_project(project_id: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.post("/api/projects/{project_id}/sessions")
+async def create_project_session(project_id: str, request: Request):
+    """Create a new chat session pre-associated with a project.
+
+    The session is created in the project's management directory so that
+    the agent starts with the project context available.  The caller can
+    optionally pass a ``cwd`` override in the JSON body.
+    """
+    try:
+        from hermes_state import SessionDB
+    except ImportError:
+        raise HTTPException(status_code=500, detail="SessionDB unavailable")
+
+    project = _resolve_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    body: dict = {}
+    try:
+        body = await request.json() or {}
+    except Exception:
+        pass
+
+    mgmt_dir = str(project.get("management_dir") or project.get("directory") or "")
+    cwd = body.get("cwd") or mgmt_dir
+    source = body.get("source") or "web-launchpad"
+    session_id = f"session-{secrets.token_hex(6)}"
+
+    try:
+        db = SessionDB()
+        try:
+            db.create_session(session_id, source)
+            db.set_session_project(session_id, project.get("id") or project_id)
+        finally:
+            db.close()
+    except Exception as e:
+        _log.exception("Failed to create session for project %s", project_id)
+        raise HTTPException(status_code=500, detail=str(e))
+
+    return {
+        "ok": True,
+        "session_id": session_id,
+        "project_id": project_id,
+        "management_dir": mgmt_dir,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Project file browsing / upload / download endpoints
 # ---------------------------------------------------------------------------

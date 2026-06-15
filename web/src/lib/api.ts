@@ -522,6 +522,13 @@ export const api = {
       { method: "DELETE" },
     ),
 
+  // LaunchPad: create a session pre-linked to a project
+  createProjectSession: (projectId: string) =>
+    fetchJSON<CreateProjectSessionResponse>(
+      `/api/projects/${encodeURIComponent(projectId)}/sessions`,
+      { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" },
+    ),
+
   // Project legal workflows
   fetchProjectWorkflows: (projectId: string, limit?: number) => {
     const qs = limit ? `?limit=${encodeURIComponent(String(limit))}` : "";
@@ -979,6 +986,13 @@ export interface ProjectCreateResponse {
   total_chars_extracted: number;
   entities_detected: Record<string, string[]>;
   error?: string;
+}
+
+export interface CreateProjectSessionResponse {
+  ok: boolean;
+  session_id: string;
+  project_id: string;
+  management_dir: string;
 }
 
 export interface FileEntry {
