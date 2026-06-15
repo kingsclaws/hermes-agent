@@ -2928,6 +2928,78 @@ async def create_project_session(project_id: str, request: Request):
 
 
 # ---------------------------------------------------------------------------
+# Legal Swarm dashboard endpoints
+# ---------------------------------------------------------------------------
+
+@app.get("/api/kanban/swarm/runs")
+async def list_swarm_runs(board: str = ""):
+    """List legal-swarm runs on a kanban board."""
+    if not board:
+        raise HTTPException(status_code=400, detail="Query parameter 'board' is required")
+
+    try:
+        from hermes_cli import kanban_db as kb
+        from hermes_cli.kanban_legal_swarm import list_runs
+        conn = kb.connect(board=board)
+        try:
+            runs = list_runs(conn)
+            return {"ok": True, "board": board, "runs": runs}
+        finally:
+            conn.close()
+    except Exception as e:
+        _log.exception("GET /api/kanban/swarm/runs failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/kanban/swarm/runs/{run_id}")
+async def get_swarm_run_status(run_id: str, board: str = ""):
+    """Get per-node status for a single swarm run on a kanban board."""
+    if not board:
+        raise HTTPException(status_code=400, detail="Query parameter 'board' is required")
+
+    try:
+        from hermes_cli import kanban_db as kb
+        from hermes_cli.kanban_legal_swarm import run_status, list_runs, get_run
+        conn = kb.connect(board=board)
+        try:
+            # Find the root task for this run_id
+            all_runs = list_runs(conn)
+            root_id = ""
+            workflow_id = ""
+            for r in all_runs:
+                if r.get("run_id") == run_id:
+                    root_id = r["root_task_id"]
+                    workflow_id = r.get("workflow_id", "")
+                    break
+
+            if not root_id:
+                raise HTTPException(status_code=404, detail=f"Run '{run_id}' not found on board '{board}'")
+
+            # Get full status
+            status = run_status(conn, root_id)
+
+            # Get run metadata
+            run = get_run(conn, workflow_id, run_id)
+            if run:
+                status["run"] = {
+                    "workflow_id": run.workflow_id,
+                    "run_id": run.run_id,
+                    "board": run.board,
+                    "root_task_id": run.root_task_id,
+                    "node_count": len(run.node_mappings),
+                }
+
+            return status
+        finally:
+            conn.close()
+    except HTTPException:
+        raise
+    except Exception as e:
+        _log.exception("GET /api/kanban/swarm/runs/%s failed", run_id)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ---------------------------------------------------------------------------
 # Project file browsing / upload / download endpoints
 # ---------------------------------------------------------------------------
 

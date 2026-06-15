@@ -79,6 +79,7 @@ import ChatPage from "@/pages/ChatPage";
 import ProjectFilesPage from "@/pages/ProjectFilesPage";
 import ProjectDashboardPage from "@/pages/ProjectDashboardPage";
 import LaunchPad from "@/pages/LaunchPad";
+import SwarmBoardPage from "@/pages/SwarmBoardPage";
 import { LanguageSwitcher } from "@/components/LanguageSwitcher";
 import { ThemeSwitcher } from "@/components/ThemeSwitcher";
 import { useI18n } from "@/i18n";
@@ -127,6 +128,7 @@ const CHAT_NAV_ITEM: NavItem = {
 const BUILTIN_ROUTES_CORE: Record<string, ComponentType> = {
   "/": RootRedirect,
   "/launch": LaunchPad,
+  "/swarm-board": SwarmBoardPage,
   "/projects": ProjectsPage,
   "/projects/:projectId": ProjectDashboardPage,
   "/projects/:projectId/files": ProjectFilesPage,

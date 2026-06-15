@@ -529,6 +529,16 @@ export const api = {
       { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" },
     ),
 
+  // Legal swarm board queries
+  fetchSwarmRuns: (board: string) =>
+    fetchJSON<SwarmRunsResponse>(
+      `/api/kanban/swarm/runs?board=${encodeURIComponent(board)}`,
+    ),
+  fetchSwarmRunStatus: (runId: string, board: string) =>
+    fetchJSON<SwarmRunStatusResponse>(
+      `/api/kanban/swarm/runs/${encodeURIComponent(runId)}?board=${encodeURIComponent(board)}`,
+    ),
+
   // Project legal workflows
   fetchProjectWorkflows: (projectId: string, limit?: number) => {
     const qs = limit ? `?limit=${encodeURIComponent(String(limit))}` : "";
@@ -993,6 +1003,56 @@ export interface CreateProjectSessionResponse {
   session_id: string;
   project_id: string;
   management_dir: string;
+}
+
+// ── Legal Swarm board types ──────────────────────────────────────────────
+
+export interface SwarmRunSummary {
+  root_task_id: string;
+  title: string;
+  status: string;
+  created_at: number;
+  completed_at: number | null;
+  workflow_id: string;
+  run_id: string;
+  board: string;
+  node_count: number;
+}
+
+export interface SwarmRunsResponse {
+  ok: boolean;
+  board: string;
+  runs: SwarmRunSummary[];
+}
+
+export interface SwarmNodeTask {
+  task_id: string;
+  title: string;
+  status: string;
+  assignee: string;
+}
+
+export interface SwarmNodeStatus {
+  node_id: string;
+  kind: string;
+  task_ids: string[];
+  tasks: SwarmNodeTask[];
+  status: string;
+}
+
+export interface SwarmRunStatusResponse {
+  ok: boolean;
+  workflow_id: string;
+  root_task_id: string;
+  nodes: Record<string, SwarmNodeStatus>;
+  run?: {
+    workflow_id: string;
+    run_id: string;
+    board: string;
+    root_task_id: string;
+    node_count: number;
+  };
+  error?: string;
 }
 
 export interface FileEntry {
