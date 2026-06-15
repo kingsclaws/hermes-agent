@@ -222,6 +222,38 @@ def test_openxml_runmap_replace_span_preserves_surrounding_text_nodes():
     assert "".join(texts) == "AXC"
 
 
+def test_lex_edit_header_footer_replace_handles_cross_run_text(tmp_path):
+    path = tmp_path / "header-footer.docx"
+    doc = Document()
+    section = doc.sections[0]
+    header_para = section.header.paragraphs[0]
+    header_para.add_run("Project ")
+    header_para.add_run("Security").bold = True
+    header_para.add_run(" Trustee").italic = True
+    doc.add_paragraph("Body")
+    doc.save(path)
+
+    result = _handle_edit({
+        "path": str(path),
+        "op": "replace_header_footer",
+        "kind": "header",
+        "old_text": "Security Trustee",
+        "new_text": "Chargee",
+    })
+
+    assert '"total_replacements": 1' in result
+
+    with zipfile.ZipFile(path, "r") as zf:
+        header_name = next(name for name in zf.namelist() if name.startswith("word/header") and name.endswith(".xml"))
+        root = etree.fromstring(zf.read(header_name))
+    texts = [t.text or "" for t in root.iter(f"{W}t")]
+
+    assert "".join(texts) == "Project Chargee"
+    assert texts == ["Project ", "Chargee", ""]
+    assert root.find(f".//{W}b") is not None
+    assert root.find(f".//{W}i") is not None
+
+
 def test_revision_guard_blocks_unresolved_final_view_residuals(tmp_path):
     path = tmp_path / "share-mortgage.docx"
     doc = Document()

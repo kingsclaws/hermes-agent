@@ -23,6 +23,8 @@ from pathlib import Path
 
 from lxml import etree
 
+from .openxml_runmap import render_paragraph, replace_span
+
 # ── Namespaces ─────────────────────────────────────────────────────────────── #
 _W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 _R_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
@@ -65,16 +67,18 @@ def _has_textbox(xml_bytes: bytes) -> bool:
 
 
 def _replace_text_in_xml(xml_bytes: bytes, find: str, replace: str) -> tuple[bytes, int]:
-    """Replace text inside w:t nodes while preserving the rest of the part XML."""
+    """Replace text in header/footer XML using paragraph run maps."""
     root = etree.fromstring(xml_bytes)
     count = 0
-    for el in root.iter():
-        if el.tag != _wqn("t") or not el.text or find not in el.text:
-            continue
-        el.text = el.text.replace(find, replace)
-        if " " in el.text:
-            el.set(_XML_SPACE, "preserve")
-        count += 1
+    for para in root.iter(_wqn("p")):
+        while True:
+            rendered = render_paragraph(para)
+            start = rendered.text.find(find)
+            if start < 0:
+                break
+            if not replace_span(rendered, start, start + len(find), replace):
+                break
+            count += 1
     return etree.tostring(root, xml_declaration=True, encoding="UTF-8", standalone="yes"), count
 
 
