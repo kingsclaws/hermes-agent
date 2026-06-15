@@ -9,6 +9,7 @@ from lxml import etree
 sys.path.insert(0, str((Path(__file__).resolve().parents[1] / "vendor" / "lexitool").resolve()))
 
 from lexitool.diff import summary
+from lexitool.edit_ops import replace_text
 from lexitool.markup import lex_read
 from hermes_cli.project_commands import (
     edit_verification_record,
@@ -124,6 +125,32 @@ def test_replace_all_requires_confirmation_for_high_risk_bulk_legal_edits(tmp_pa
     })
 
     assert "LEGAL_BULK_REPLACE_REVIEW_REQUIRED" in result
+
+
+def test_direct_replace_preserves_unmatched_runs_when_match_crosses_runs(tmp_path):
+    path = tmp_path / "share-mortgage.docx"
+    doc = Document()
+    p = doc.add_paragraph()
+    p.add_run("The ")
+    p.add_run("Security").bold = True
+    p.add_run(" Trustee").italic = True
+    p.add_run(" may act.")
+    doc.save(path)
+
+    result = replace_text(str(path), 0, "Security Trustee", "Chargee", tc=False)
+
+    assert result.ok is True
+
+    with zipfile.ZipFile(path, "r") as zf:
+        root = etree.fromstring(zf.read("word/document.xml"))
+    para = next(root.iter(f"{W}p"))
+    text_nodes = list(para.iter(f"{W}t"))
+    texts = [t.text or "" for t in text_nodes]
+
+    assert "".join(texts) == "The Chargee may act."
+    assert texts == ["The ", "Chargee", "", " may act."]
+    assert para.find(f".//{W}b") is not None
+    assert para.find(f".//{W}i") is not None
 
 
 def test_revision_guard_blocks_unresolved_final_view_residuals(tmp_path):
