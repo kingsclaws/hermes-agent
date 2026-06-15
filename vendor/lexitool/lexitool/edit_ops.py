@@ -18,10 +18,11 @@ import shutil
 import tempfile
 import zipfile
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from lxml import etree
 
-from .openxml_runmap import render_paragraph, replace_span
+from .openxml_runmap import editable_touched_spans, render_paragraph, replace_span, text_in_span
 
 W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 W = f"{{{W_NS}}}"
@@ -107,6 +108,89 @@ def _make_run(text: str, bold: bool = False, italic: bool = False,
     t.set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
     t.text = text
     return r
+
+
+def _make_text_run_from_rpr(text: str, base_rPr=None, *, deleted: bool = False) -> etree._Element:
+    r = etree.Element(f"{W}r")
+    if base_rPr is not None:
+        r.append(copy.deepcopy(base_rPr))
+    t = etree.SubElement(r, f"{W}delText" if deleted else f"{W}t")
+    t.set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
+    t.text = text
+    return r
+
+
+def _tc_tag(tag: str, tc_id: int, author: str, date: str) -> etree._Element:
+    el = etree.Element(f"{W}{tag}")
+    el.set(f"{W}id", str(tc_id))
+    el.set(f"{W}author", author)
+    el.set(f"{W}date", date)
+    return el
+
+
+def _replace_text_with_tc_precise(
+    para: etree._Element,
+    start: int,
+    end: int,
+    new: str,
+    *,
+    tc_id: int,
+    author: str,
+    date: str,
+) -> bool:
+    rendered = render_paragraph(para)
+    touched = editable_touched_spans(rendered, start, end)
+    if not touched:
+        return False
+
+    runs: list[etree._Element] = []
+    for span in touched:
+        run = span.run
+        if run is not None and run not in runs:
+            runs.append(run)
+    if not runs:
+        return False
+
+    first_run = runs[0]
+    parent = first_run.getparent()
+    if parent is None:
+        return False
+    if any(run.getparent() is not parent for run in runs):
+        return False
+    insert_idx = list(parent).index(first_run)
+
+    new_elems: list[etree._Element] = []
+    for span in touched:
+        run = span.run
+        if run is None:
+            return False
+        rPr = run.find(f"{W}rPr")
+        before = span.text[: max(0, start - span.start)] if span is touched[0] else ""
+        middle = text_in_span(span, start, end)
+        after = span.text[max(0, end - span.start):] if span is touched[-1] else ""
+
+        if before:
+            new_elems.append(_make_text_run_from_rpr(before, rPr))
+        if middle:
+            del_el = _tc_tag("del", tc_id, author, date)
+            del_el.append(_make_text_run_from_rpr(middle, rPr, deleted=True))
+            new_elems.append(del_el)
+            tc_id += 1
+        if span is touched[-1] and new:
+            ins_el = _tc_tag("ins", tc_id, author, date)
+            ins_el.append(_make_text_run_from_rpr(new, rPr))
+            new_elems.append(ins_el)
+            tc_id += 1
+        if after:
+            new_elems.append(_make_text_run_from_rpr(after, rPr))
+
+    for run in runs:
+        run_parent = run.getparent()
+        if run_parent is parent:
+            parent.remove(run)
+    for offset, elem in enumerate(new_elems):
+        parent.insert(insert_idx + offset, elem)
+    return True
 
 
 def _inject_tc_ins(root: etree._Element, para: etree._Element,
@@ -239,94 +323,27 @@ def replace_text(docx_path: str, para: int, old: str, new: str, *,
     tid = _next_tc_id(root)
 
     if tc:
-        # TC 模式：内联替换 — 在匹配位置将旧文本包裹为 <w:del>，
-        # 紧跟 <w:ins> 插入新文本。仅移除和替换包含匹配文本的 w:r 元素，
-        # 保留不相关的 w:r 及其他段落子元素。
-        from datetime import datetime
         dt = datetime.now().strftime("%Y-%m-%dT%H:%M:%SZ")
-
-        # 收集段落直接 w:r 子元素的文本
-        w_r_children = [child for child in p if child.tag == f"{W}r"]
-
-        # Build text map: for each w:r, compute its text and character range
-        run_texts = []
-        char_pos = 0
-        for r_el in w_r_children:
-            text = "".join(t.text or "" for t in r_el.findall(f"{W}t"))
-            run_texts.append((r_el, text, char_pos, char_pos + len(text)))
-            char_pos += len(text)
-
-        full_text = "".join(t for _, t, _, _ in run_texts)
-        located = _locate_replacement_span(full_text, old)
+        rendered = render_paragraph(p)
+        located = _locate_replacement_span(rendered.text, old)
         if located is None:
             return EditResult(ok=False, para=para, text=old,
                               message=f"段落 {para} 中未找到 '{old}'",
                               path=docx_path)
 
         pos, end_pos, actual_old = located
-
-        # Classify w:r elements relative to the match
-        before_runs = []
-        match_runs = []
-        after_runs = []
-
-        for r_el, text, r_start, r_end in run_texts:
-            if r_end <= pos:
-                before_runs.append(r_el)
-            elif r_start >= end_pos:
-                after_runs.append(r_el)
-            else:
-                match_runs.append(r_el)
-
-        if not match_runs:
+        if not _replace_text_with_tc_precise(
+            p,
+            pos,
+            end_pos,
+            new,
+            tc_id=tid,
+            author=author,
+            date=dt,
+        ):
             return EditResult(ok=False, para=para, text=old,
-                              message=f"段落 {para} 中未找到 '{old}' 的边界",
+                              message=f"段落 {para} 中未找到 '{old}' 的文本边界",
                               path=docx_path)
-
-        # Compute before/after text within the matched runs
-        match_start_pos = run_texts[w_r_children.index(match_runs[0])][2]
-        match_text = "".join(
-            "".join(t.text or "" for t in r_el.findall(f"{W}t"))
-            for r_el in match_runs
-        )
-        match_end_pos = match_start_pos + len(match_text)
-        before_in_match = full_text[match_start_pos:pos]
-        after_in_match = full_text[end_pos:match_end_pos]
-
-        # Remove only the matched w:r elements
-        insert_idx = list(p).index(match_runs[0]) if match_runs else 0
-        for r_el in match_runs:
-            p.remove(r_el)
-
-        # Build replacement: before_part + w:del(old) + w:ins(new) + after_part
-        new_elems = []
-
-        if before_in_match:
-            new_elems.append(_make_run(before_in_match, font=font, sz=sz))
-
-        del_el = etree.Element(f"{W}del")
-        del_el.set(f"{W}id", str(tid))
-        del_el.set(f"{W}author", author)
-        del_el.set(f"{W}date", dt)
-        d_run = _make_run(actual_old, font=font, sz=sz)
-        for t in d_run.iter(f"{W}t"):
-            t.tag = f"{W}delText"
-        del_el.append(d_run)
-        new_elems.append(del_el)
-
-        tid2 = tid + 1
-        ins_el = etree.Element(f"{W}ins")
-        ins_el.set(f"{W}id", str(tid2))
-        ins_el.set(f"{W}author", author)
-        ins_el.set(f"{W}date", dt)
-        ins_el.append(_make_run(new, bold=bold, italic=italic, font=font, sz=sz))
-        new_elems.append(ins_el)
-
-        if after_in_match:
-            new_elems.append(_make_run(after_in_match, font=font, sz=sz))
-
-        for i, elem in enumerate(new_elems):
-            p.insert(insert_idx + i, elem)
 
         _write_docx(docx_path, etree.tostring(root, xml_declaration=True,
                                               encoding="UTF-8", standalone=True),

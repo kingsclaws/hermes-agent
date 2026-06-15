@@ -154,6 +154,37 @@ def test_direct_replace_preserves_unmatched_runs_when_match_crosses_runs(tmp_pat
     assert para.find(f".//{W}i") is not None
 
 
+def test_tc_replace_marks_only_matched_text_and_preserves_run_format(tmp_path):
+    path = tmp_path / "share-mortgage-tc.docx"
+    doc = Document()
+    p = doc.add_paragraph()
+    p.add_run("The ")
+    p.add_run("Security").bold = True
+    p.add_run(" Trustee").italic = True
+    p.add_run(" may act.")
+    doc.save(path)
+
+    result = replace_text(str(path), 0, "Security Trustee", "Chargee", tc=True, author="JT")
+
+    assert result.ok is True
+
+    with zipfile.ZipFile(path, "r") as zf:
+        root = etree.fromstring(zf.read("word/document.xml"))
+    para = next(root.iter(f"{W}p"))
+    visible_text = "".join(t.text or "" for t in para.iter(f"{W}t"))
+    deleted_text = "".join(t.text or "" for t in para.iter(f"{W}delText"))
+    del_nodes = list(para.iter(f"{W}del"))
+    ins_nodes = list(para.iter(f"{W}ins"))
+
+    assert visible_text == "The Chargee may act."
+    assert deleted_text == "Security Trustee"
+    assert len(del_nodes) == 2
+    assert len(ins_nodes) == 1
+    assert del_nodes[0].find(f".//{W}b") is not None
+    assert del_nodes[1].find(f".//{W}i") is not None
+    assert ins_nodes[0].find(f".//{W}i") is not None
+
+
 def test_openxml_runmap_renders_tabs_and_rejects_noneditable_span():
     para = etree.fromstring(
         f"""

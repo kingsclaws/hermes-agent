@@ -24,6 +24,15 @@ class TextSpan:
     text: str
     editable: bool
 
+    @property
+    def run(self) -> etree._Element | None:
+        cur = self.el
+        while cur is not None:
+            if cur.tag == f"{W}r":
+                return cur
+            cur = cur.getparent()
+        return None
+
 
 @dataclass(frozen=True)
 class RenderedParagraph:
@@ -115,3 +124,16 @@ def replace_span(rendered: RenderedParagraph, start: int, end: int, new_text: st
     last.el.text = suffix
     patch_space_attribute(last.el)
     return True
+
+
+def editable_touched_spans(rendered: RenderedParagraph, start: int, end: int) -> list[TextSpan]:
+    touched = [span for span in rendered.spans if span.end > start and span.start < end]
+    if not touched or any(not span.editable for span in touched):
+        return []
+    return touched
+
+
+def text_in_span(span: TextSpan, start: int, end: int) -> str:
+    local_start = max(0, start - span.start)
+    local_end = min(len(span.text), end - span.start)
+    return span.text[local_start:local_end]
