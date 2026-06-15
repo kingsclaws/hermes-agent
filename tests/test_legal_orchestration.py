@@ -5,6 +5,7 @@ from tools.legal_orchestration_tool import (
     _extract_json_payload,
     _handle_legal_orchestrate,
     _normalize_findings,
+    _run_scorecard_gate,
 )
 
 
@@ -45,10 +46,12 @@ def test_build_review_subtasks_includes_output_contract(tmp_path):
         related_paths=[],
         term_sheet_path=None,
         review_types=["review_content"],
+        workflow_type="full_review",
+        learning_scope="project",
     )
 
     assert len(tasks) == 1
-    assert tasks[0]["toolsets"] == ["lex-docx", "file", "project_management"]
+    assert tasks[0]["toolsets"] == ["lex-docx-coordinator", "file", "project_management"]
     assert "Output Contract" in tasks[0]["context"]
 
 
@@ -79,6 +82,8 @@ def test_build_review_subtasks_includes_xref_preflight_context(tmp_path, monkeyp
         related_paths=[],
         term_sheet_path=None,
         review_types=["review_xref"],
+        workflow_type="full_review",
+        learning_scope="project",
     )
 
     assert len(tasks) == 1
@@ -140,7 +145,7 @@ def test_review_defaults_include_xref_and_merge_machine_findings(tmp_path, monke
     monkeypatch.setattr("tools.legal_orchestration_tool.delegate_task", _fake_delegate_task)
 
     raw = _handle_legal_orchestrate(
-        {"task_type": "review", "document_path": "agreement.docx"},
+        {"task_type": "review", "document_path": "agreement.docx", "project_dir": str(tmp_path)},
         parent_agent=_StubAgent(),
     )
 
@@ -151,3 +156,50 @@ def test_review_defaults_include_xref_and_merge_machine_findings(tmp_path, monke
         "review_xref",
     ]
     assert any(item["title"] == "Dead internal cross-reference: 第9条" for item in payload["findings"])
+
+
+def test_scorecard_gate_blocks_failed_scorecard(tmp_path, monkeypatch):
+    def _fake_scorecard(*args, **kwargs):
+        assert kwargs["workflow_id"] == "full_review"
+        assert kwargs["run_id"] == "run-1"
+        return {
+            "ok": False,
+            "status": "failed",
+            "failures": [{"check": "review_plan", "message": "No review plan found."}],
+        }
+
+    monkeypatch.setattr("hermes_cli.project_commands.legal_scorecard", _fake_scorecard)
+
+    payload = _run_scorecard_gate(
+        tmp_path,
+        document_path="agreement.docx",
+        workflow_id="full_review",
+        run_id="run-1",
+        payload={"status": "completed", "verification_passed": True},
+    )
+
+    assert payload["status"] == "failed"
+    assert payload["verification_passed"] is False
+    assert payload["scorecard"]["ok"] is False
+    assert "No review plan found." in payload["verification_report"][0]
+
+
+def test_scorecard_gate_fails_closed_on_exception(tmp_path, monkeypatch):
+    def _raise_scorecard(*args, **kwargs):
+        raise RuntimeError("scorecard unavailable")
+
+    monkeypatch.setattr("hermes_cli.project_commands.legal_scorecard", _raise_scorecard)
+
+    payload = _run_scorecard_gate(
+        tmp_path,
+        document_path="agreement.docx",
+        workflow_id="contract_revision",
+        run_id="run-2",
+        payload={"status": "completed", "verification_passed": True},
+    )
+
+    assert payload["status"] == "failed"
+    assert payload["verification_passed"] is False
+    assert payload["scorecard"]["ok"] is False
+    assert payload["scorecard"]["status"] == "failed"
+    assert "scorecard unavailable" in payload["verification_report"][0]

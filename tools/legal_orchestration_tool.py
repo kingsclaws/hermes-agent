@@ -418,6 +418,60 @@ def _extract_json_payload(text: str) -> Optional[Dict[str, Any]]:
     return parsed if isinstance(parsed, dict) else None
 
 
+def _run_scorecard_gate(
+    project_root,
+    document_path: str | None,
+    workflow_id: str,
+    run_id: str | None,
+    payload: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Run legal_scorecard as a programmatic gate and merge results into payload.
+
+    This is the machine-audit layer from the video's architecture — it validates
+    persisted harness evidence (handoff envelopes, convention profiles, review
+    plans, verification records) rather than trusting agent prose.
+    """
+    try:
+        from hermes_cli.project_commands import legal_scorecard
+
+        sc = legal_scorecard(
+            str(project_root),
+            document_path=document_path,
+            workflow_id=workflow_id,
+            run_id=run_id,
+            strict=True,
+        )
+        payload["scorecard"] = sc
+        if not sc.get("ok"):
+            payload["status"] = "failed"
+            payload["verification_passed"] = False
+            report = payload.get("verification_report")
+            if not isinstance(report, list):
+                report = []
+            failures_desc = "; ".join(
+                f.get("message", f.get("check", "?")) for f in sc.get("failures", [])
+            )
+            report.append(
+                f"Scorecard gate failed [{len(sc.get('failures', []))} failure(s)]: {failures_desc}"
+            )
+            payload["verification_report"] = report
+    except Exception as exc:
+        payload["scorecard"] = {
+            "ok": False,
+            "status": "failed",
+            "error": "scorecard gate raised exception",
+            "detail": str(exc),
+        }
+        payload["status"] = "failed"
+        payload["verification_passed"] = False
+        report = payload.get("verification_report")
+        if not isinstance(report, list):
+            report = []
+        report.append(f"Scorecard gate failed [exception]: {exc}")
+        payload["verification_report"] = report
+    return payload
+
+
 def _revision_guard_failed(parsed: Optional[Dict[str, Any]]) -> bool:
     if not isinstance(parsed, dict):
         return False
@@ -1196,8 +1250,12 @@ def _handle_legal_orchestrate(args: dict, **kwargs) -> str:
             document_path=document_path,
             enabled=enable_learning,
         )
-        return _tool_ok(
-            {
+        payload = _run_scorecard_gate(
+            project_root,
+            document_path=document_path,
+            workflow_id="full_review",
+            run_id=review_run_id,
+            payload={
                 "document_path": document_path,
                 "findings": findings,
                 "learning": learning,
@@ -1207,8 +1265,9 @@ def _handle_legal_orchestrate(args: dict, **kwargs) -> str:
                 "status": "completed",
                 "subtasks": subtasks,
                 "task_type": task_type,
-            }
+            },
         )
+        return _tool_ok(payload)
 
     if task_type == "review_translation":
         from tools.registry import registry as _registry
@@ -1250,6 +1309,18 @@ def _handle_legal_orchestrate(args: dict, **kwargs) -> str:
         )
         if result.get("error"):
             return tool_error(str(result["error"]), data=result)
+        run_id = None
+        for chunk in result.get("chunks") or []:
+            if chunk.get("run_id"):
+                run_id = chunk["run_id"]
+                break
+        result = _run_scorecard_gate(
+            project_root,
+            document_path=document_path,
+            workflow_id="contract_revision",
+            run_id=run_id,
+            payload=result,
+        )
         return _tool_ok(result)
 
     # Structured-template auto-detection — intercept before generic draft/revise.
@@ -1348,6 +1419,18 @@ def _handle_legal_orchestrate(args: dict, **kwargs) -> str:
                 )
                 if result.get("error"):
                     return tool_error(str(result["error"]), data=result)
+                run_id = None
+                for chunk in result.get("chunks") or []:
+                    if chunk.get("run_id"):
+                        run_id = chunk["run_id"]
+                        break
+                result = _run_scorecard_gate(
+                    project_root,
+                    document_path=document_path,
+                    workflow_id="contract_revision",
+                    run_id=run_id,
+                    payload=result,
+                )
                 return _tool_ok(result)
         except Exception:
             pass  # Document may not exist yet → fall through to single-child draft
@@ -1419,8 +1502,12 @@ def _handle_legal_orchestrate(args: dict, **kwargs) -> str:
             document_path=document_path,
             enabled=enable_learning,
         )
-        return _tool_ok(
-            {
+        payload = _run_scorecard_gate(
+            project_root,
+            document_path=document_path,
+            workflow_id=learning_workflow_type,
+            run_id=delegated.get("run_id") if isinstance(delegated, dict) else None,
+            payload={
                 "document_path": document_path,
                 "findings": findings,
                 "learning": learning,
@@ -1433,8 +1520,9 @@ def _handle_legal_orchestrate(args: dict, **kwargs) -> str:
                     else summary
                 ) or str((preflight or {}).get("summary") or ""),
                 "task_type": task_type,
-            }
+            },
         )
+        return _tool_ok(payload)
 
     payload = structured if isinstance(structured, dict) else {
         "modified_files": [document_path] if document_path else [],
@@ -1457,6 +1545,13 @@ def _handle_legal_orchestrate(args: dict, **kwargs) -> str:
             "lex_revision_guard failed and residuals were not fully justified; parent workflow blocks completion."
         )
         payload["verification_report"] = report
+    payload = _run_scorecard_gate(
+        project_root,
+        document_path=document_path,
+        workflow_id=learning_workflow_type,
+        run_id=delegated.get("run_id") if isinstance(delegated, dict) else None,
+        payload=payload,
+    )
     return _tool_ok(payload)
 
 
