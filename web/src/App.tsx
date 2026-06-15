@@ -30,6 +30,7 @@ import {
   FolderKanban,
   Globe,
   Heart,
+  KanbanSquare,
   KeyRound,
   Menu,
   MessageSquare,
@@ -130,6 +131,7 @@ const BUILTIN_ROUTES_CORE: Record<string, ComponentType> = {
   "/": RootRedirect,
   "/launch": LaunchPad,
   "/swarm-board": SwarmBoardPage,
+  "/kanban": SwarmBoardPage,
   "/swarm-chat": LegalSwarmChat,
   "/projects": ProjectsPage,
   "/projects/:projectId": ProjectDashboardPage,
@@ -167,6 +169,12 @@ const BUILTIN_NAV_REST: NavItem[] = [
     labelKey: "swarmChat",
     label: "Swarm Chat",
     icon: MessageSquare,
+  },
+  {
+    path: "/kanban",
+    labelKey: "kanban",
+    label: "Kanban",
+    icon: KanbanSquare,
   },
   {
     path: "/projects",

@@ -3000,6 +3000,39 @@ async def get_swarm_run_status(run_id: str, board: str = ""):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/api/kanban/swarm/runs/all")
+async def list_all_swarm_runs():
+    """List legal-swarm runs across ALL kanban boards (no board param needed)."""
+    try:
+        from hermes_cli import kanban_db as kb
+        from hermes_cli.kanban_legal_swarm import list_runs
+
+        all_runs: list[dict] = []
+        boards = kb.list_boards()
+
+        for bm in boards:
+            slug = bm.get("slug", "")
+            if not slug:
+                continue
+            try:
+                conn = kb.connect(board=slug)
+                try:
+                    runs = list_runs(conn)
+                    for r in runs:
+                        r["board"] = r.get("board") or slug
+                    all_runs.extend(runs)
+                finally:
+                    conn.close()
+            except Exception:
+                _log.warning("Failed to list runs for board %s", slug, exc_info=True)
+
+        all_runs.sort(key=lambda r: r.get("created_at") or 0, reverse=True)
+        return {"ok": True, "runs": all_runs}
+    except Exception as e:
+        _log.exception("GET /api/kanban/swarm/runs/all failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.post("/api/projects/{project_id}/workflows/{workflow_id}/compile")
 async def compile_swarm_workflow(project_id: str, workflow_id: str, request: Request):
     """Compile a YAML workflow definition into a kanban swarm run."""

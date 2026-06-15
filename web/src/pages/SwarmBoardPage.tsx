@@ -5,7 +5,7 @@ import {
   useCallback,
   useMemo,
 } from "react";
-import { useSearchParams } from "react-router-dom";
+import { useSearchParams, useNavigate } from "react-router-dom";
 import {
   CheckCircle2,
   Circle,
@@ -14,16 +14,28 @@ import {
   RefreshCw,
   Users,
   AlertTriangle,
+  Building2,
+  ChevronRight,
+  KanbanSquare,
 } from "lucide-react";
 import { api } from "@/lib/api";
-import type { SwarmRunStatusResponse, SwarmNodeStatus, SwarmNodeTask } from "@/lib/api";
+import type {
+  SwarmRunStatusResponse,
+  SwarmNodeStatus,
+  SwarmNodeTask,
+  ProjectInfo,
+  WorkflowDefinition,
+  SwarmRunSummary,
+} from "@/lib/api";
 import { Button } from "@nous-research/ui/ui/components/button";
 import { Badge } from "@nous-research/ui/ui/components/badge";
 import { Spinner } from "@nous-research/ui/ui/components/spinner";
 import { Card, CardContent } from "@nous-research/ui/ui/components/card";
 import { Segmented } from "@nous-research/ui/ui/components/segmented";
 import { usePageHeader } from "@/contexts/usePageHeader";
+import { useToast } from "@nous-research/ui/hooks/use-toast";
 import { PluginSlot } from "@/plugins";
+import { cn } from "@/lib/utils";
 
 // ---------------------------------------------------------------------------
 // Status helpers
@@ -70,6 +82,56 @@ export default function SwarmBoardPage() {
   const [view, setView] = useState<"board" | "list">("board");
 
   const { setAfterTitle, setEnd, setTitle } = usePageHeader();
+  const navigate = useNavigate();
+  const { showToast } = useToast();
+
+  // ── Launcher state (when no board/run in URL) ──────────────────────────
+
+  const [allRuns, setAllRuns] = useState<SwarmRunSummary[]>([]);
+  const [runsLoading, setRunsLoading] = useState(true);
+  const [projects, setProjects] = useState<ProjectInfo[]>([]);
+  const [workflowDefs, setWorkflowDefs] = useState<WorkflowDefinition[]>([]);
+  const [selectedProjectId, setSelectedProjectId] = useState("");
+  const [selectedWorkflowId, setSelectedWorkflowId] = useState("");
+  const [launching, setLaunching] = useState(false);
+
+  useEffect(() => {
+    if (board && runId) return;
+
+    api.fetchAllSwarmRuns().then((d) => {
+      setAllRuns(d.runs ?? []);
+    }).catch(() => {}).finally(() => setRunsLoading(false));
+
+    api.fetchProjects().then((d) => {
+      setProjects(d.projects ?? []);
+      if ((d.projects ?? []).length > 0) setSelectedProjectId(d.projects[0].id);
+    }).catch(() => {});
+
+    api.fetchWorkflowDefinitions().then((d) => {
+      setWorkflowDefs(d.definitions ?? []);
+      if ((d.definitions ?? []).length > 0) setSelectedWorkflowId(d.definitions[0].id);
+    }).catch(() => {});
+  }, [board, runId]);
+
+  const handleLaunch = useCallback(async () => {
+    if (!selectedProjectId || !selectedWorkflowId || launching) return;
+    setLaunching(true);
+    try {
+      const result = await api.compileSwarmWorkflow(selectedProjectId, selectedWorkflowId);
+      navigate(
+        `/swarm-board?board=${encodeURIComponent(result.board)}&run=${encodeURIComponent(result.run_id)}`,
+      );
+    } catch (e: any) {
+      showToast(e?.message ?? "Failed to compile workflow", "error");
+      setLaunching(false);
+    }
+  }, [selectedProjectId, selectedWorkflowId, launching, navigate, showToast]);
+
+  const handleViewRun = useCallback((run: SwarmRunSummary) => {
+    navigate(
+      `/swarm-board?board=${encodeURIComponent(run.board)}&run=${encodeURIComponent(run.run_id)}`,
+    );
+  }, [navigate]);
 
   // ── Load ──────────────────────────────────────────────────────────
 
@@ -168,7 +230,146 @@ export default function SwarmBoardPage() {
     return Math.round((done / all.length) * 100);
   }, [status]);
 
-  // ── Loading / Error states ───────────────────────────────────────
+  // ── Launcher (no board/run params) ──────────────────────────────────
+
+  if (!board || !runId) {
+    const selectedWf = workflowDefs.find((w) => w.id === selectedWorkflowId);
+    return (
+      <div className="flex flex-col items-center justify-center h-full overflow-y-auto py-8 gap-6">
+        <div className="w-full max-w-2xl px-4">
+          <div className="text-center mb-6">
+            <KanbanSquare className="w-10 h-10 text-primary/50 mx-auto mb-3" />
+            <h2 className="text-lg font-semibold mb-1">Legal Swarm Kanban</h2>
+            <p className="text-sm text-secondary">
+              Real-time kanban board for legal swarm workflow runs — watch bots work through columns.
+            </p>
+          </div>
+
+          {/* Existing Runs */}
+          <Card className="mb-4">
+            <CardContent className="p-4">
+              <h3 className="text-xs font-semibold text-secondary uppercase tracking-wide mb-3">
+                Active Runs
+              </h3>
+              {runsLoading ? (
+                <div className="flex justify-center py-4">
+                  <Spinner className="text-primary" />
+                </div>
+              ) : allRuns.length === 0 ? (
+                <p className="text-xs text-secondary text-center py-4">
+                  No runs yet. Start one below.
+                </p>
+              ) : (
+                <div className="flex flex-col gap-1 max-h-60 overflow-y-auto">
+                  {allRuns.map((run) => (
+                    <button
+                      key={run.run_id || run.root_task_id}
+                      type="button"
+                      className="flex items-center gap-3 px-3 py-2 rounded-md text-left hover:bg-secondary/5 border border-transparent hover:border-border transition-colors w-full"
+                      onClick={() => handleViewRun(run)}
+                    >
+                      <Badge
+                        tone={run.status === "done" ? "success" : run.status === "running" ? "warning" : "secondary"}
+                        className="text-[10px] shrink-0"
+                      >
+                        {run.status ?? "todo"}
+                      </Badge>
+                      <span className="text-sm font-medium truncate min-w-0">
+                        {run.workflow_id || "?"}
+                      </span>
+                      <span className="text-[10px] text-secondary font-mono-ui shrink-0">
+                        {run.run_id?.slice(0, 12) || run.root_task_id.slice(0, 12)}
+                      </span>
+                      <span className="text-[10px] text-secondary ml-auto shrink-0">
+                        {run.node_count} nodes
+                      </span>
+                      <ChevronRight className="w-3.5 h-3.5 text-secondary shrink-0" />
+                    </button>
+                  ))}
+                </div>
+              )}
+            </CardContent>
+          </Card>
+
+          {/* New Run */}
+          <Card>
+            <CardContent className="p-4 flex flex-col gap-4">
+              <h3 className="text-xs font-semibold text-secondary uppercase tracking-wide">
+                Start New Run
+              </h3>
+
+              <div>
+                <label className="text-xs font-semibold text-secondary uppercase tracking-wide block mb-1.5">
+                  Project
+                </label>
+                <div className="flex flex-col gap-1 max-h-36 overflow-y-auto">
+                  {projects.map((p) => (
+                    <button
+                      key={p.id}
+                      type="button"
+                      className={cn(
+                        "flex items-center gap-2 px-3 py-2 rounded-md text-left text-sm transition-colors w-full",
+                        p.id === selectedProjectId
+                          ? "bg-primary/10 border border-primary/30"
+                          : "hover:bg-secondary/5 border border-transparent",
+                      )}
+                      onClick={() => setSelectedProjectId(p.id)}
+                    >
+                      <Building2 className="w-3.5 h-3.5 text-secondary shrink-0" />
+                      <span className="truncate">{p.name || p.id}</span>
+                      {p.id === selectedProjectId && (
+                        <ChevronRight className="w-3.5 h-3.5 text-primary shrink-0 ml-auto" />
+                      )}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div>
+                <label className="text-xs font-semibold text-secondary uppercase tracking-wide block mb-1.5">
+                  Workflow
+                </label>
+                <div className="flex flex-col gap-1">
+                  {workflowDefs.map((wf) => (
+                    <button
+                      key={wf.id}
+                      type="button"
+                      className={cn(
+                        "flex flex-col px-3 py-2 rounded-md text-left transition-colors w-full",
+                        wf.id === selectedWorkflowId
+                          ? "bg-primary/10 border border-primary/30"
+                          : "hover:bg-secondary/5 border border-transparent",
+                      )}
+                      onClick={() => setSelectedWorkflowId(wf.id)}
+                    >
+                      <span className="text-sm font-medium">{wf.id}</span>
+                      <span className="text-[11px] text-secondary">{wf.pipeline}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <Button
+                onClick={handleLaunch}
+                disabled={!selectedProjectId || !selectedWorkflowId || launching}
+                className="w-full"
+                prefix={launching ? <Spinner className="w-4 h-4" /> : <Play className="w-4 h-4" />}
+              >
+                {launching ? "Compiling..." : "Start New Run"}
+              </Button>
+              {selectedWf && (
+                <p className="text-[10px] text-secondary text-center -mt-2">
+                  {selectedWf.node_count} bots &middot; {selectedWf.timeout_minutes}min timeout
+                </p>
+              )}
+            </CardContent>
+          </Card>
+        </div>
+      </div>
+    );
+  }
+
+  // ── Loading / Error states ──────────────────────────────────────────
 
   if (loading) {
     return (

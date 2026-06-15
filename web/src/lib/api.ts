@@ -534,6 +534,8 @@ export const api = {
     fetchJSON<SwarmRunsResponse>(
       `/api/kanban/swarm/runs?board=${encodeURIComponent(board)}`,
     ),
+  fetchAllSwarmRuns: () =>
+    fetchJSON<AllSwarmRunsResponse>("/api/kanban/swarm/runs/all"),
   fetchSwarmRunStatus: (runId: string, board: string) =>
     fetchJSON<SwarmRunStatusResponse>(
       `/api/kanban/swarm/runs/${encodeURIComponent(runId)}?board=${encodeURIComponent(board)}`,
@@ -1063,6 +1065,11 @@ export interface SwarmRunSummary {
 export interface SwarmRunsResponse {
   ok: boolean;
   board: string;
+  runs: SwarmRunSummary[];
+}
+
+export interface AllSwarmRunsResponse {
+  ok: boolean;
   runs: SwarmRunSummary[];
 }
 

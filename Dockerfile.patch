@@ -1,82 +1,18 @@
-# Patch build — MINIMAL layers: 1 COPY + 1 RUN
+# Minimal patch build — Phase 10 chat room deployment
+# docker build -t localhost:6678/lex-hermes:latest -f Dockerfile.patch .
 ARG BASE_IMAGE=localhost:6678/lex-hermes:latest
 FROM ${BASE_IMAGE}
-ENV PIP_BREAK_SYSTEM_PACKAGES=1 PIP_ROOT_USER_ACTION=ignore
-WORKDIR /opt/lex-hermes
 
-# Single COPY of everything, then overlay the source tree in RUN
-COPY . /tmp/patch_src/
+# Backend Python modules (Phase 10 + low_temperature fix)
+COPY hermes_cli/kanban_db.py /opt/hermes/hermes_cli/kanban_db.py
+COPY hermes_cli/kanban_legal_swarm.py /opt/hermes/hermes_cli/kanban_legal_swarm.py
+COPY hermes_cli/web_server.py /opt/hermes/hermes_cli/web_server.py
 
-RUN set -eux; \
-    mkdir -p /opt/lexitool/lexitool; \
-    cp -a /tmp/patch_src/vendor/lexitool/lexitool/. /opt/lexitool/lexitool/; \
-    cp /tmp/patch_src/vendor/lexitool/pyproject.toml /opt/lexitool/; \
-    for root in /opt/lex-hermes /opt/hermes; do \
-      mkdir -p "$root/vendor/lexitool"; \
-      cp -a /tmp/patch_src/vendor/lexitool/. "$root/vendor/lexitool/"; \
-    done; \
-    rm -rf /opt/lex-hermes/web/src /opt/hermes/web/src; \
-    for d in tools hermes_cli agent tui_gateway web; do \
-      for root in /opt/lex-hermes /opt/hermes; do \
-        mkdir -p "$root/$d"; \
-        cp -a "/tmp/patch_src/$d/." "$root/$d/"; \
-      done; \
-    done; \
-    find /opt/lex-hermes/tools /opt/lex-hermes/hermes_cli /opt/lex-hermes/agent /opt/lex-hermes/tui_gateway \
-      /opt/hermes/tools /opt/hermes/hermes_cli /opt/hermes/agent /opt/hermes/tui_gateway \
-      \( -name '__pycache__' -o -name '*.pyc' \) -exec rm -rf {} +; \
-    for f in run_agent.py model_tools.py toolsets.py hermes_state.py hermes_constants.py cli.py; do \
-      if [ -f "/tmp/patch_src/$f" ]; then cp "/tmp/patch_src/$f" "/opt/lex-hermes/$f"; fi; \
-      if [ -f "/tmp/patch_src/$f" ]; then cp "/tmp/patch_src/$f" "/opt/hermes/$f"; fi; \
-    done; \
-    mkdir -p /opt/hermes/docker; \
-    cp /tmp/patch_src/docker/main-wrapper.sh /opt/hermes/docker/main-wrapper.sh; \
-    chmod +x /opt/hermes/docker/main-wrapper.sh; \
-    if [ -e /root/.hermes ] && [ ! -d /root/.hermes ]; then rm -f /root/.hermes; fi; \
-    mkdir -p /root/.hermes; \
-    cp /tmp/patch_src/start-lex-hermes.sh /usr/local/bin/; \
-    cp /tmp/patch_src/start-lex-hermes.sh /opt/lex-hermes/; \
-    cp /tmp/patch_src/start-lex-hermes.sh /opt/hermes/; \
-    cp /tmp/patch_src/SOUL.md /root/.hermes/; \
-    rm -rf /opt/lex-hermes/skills/productivity/ocr-and-documents/ \
-      /opt/hermes/skills/productivity/ocr-and-documents/ \
-      /root/.hermes/skills/productivity/ocr-and-documents/ \
-      /opt/lex-hermes/skills/productivity/legal-project-workflow/ \
-      /opt/hermes/skills/productivity/legal-project-workflow/ \
-      /root/.hermes/skills/productivity/legal-project-workflow/; \
-    for s in \
-      skills/productivity/ocr-and-documents \
-      skills/productivity/legal-project-workflow \
-      skills/legal/lexitool-operations; do \
-      mkdir -p "/opt/lex-hermes/$s" "/opt/hermes/$s" "/root/.hermes/$s"; \
-      cp -a "/tmp/patch_src/$s/." "/opt/lex-hermes/$s/"; \
-      cp -a "/tmp/patch_src/$s/." "/opt/hermes/$s/"; \
-      cp -a "/tmp/patch_src/$s/." "/root/.hermes/$s/"; \
-    done; \
-    mkdir -p /opt/lex-hermes/profiles/; \
-    mkdir -p /opt/hermes/profiles/; \
-    (cp /tmp/patch_src/profiles/*.soul.md /opt/lex-hermes/profiles/ 2>/dev/null || true); \
-    (cp /tmp/patch_src/profiles/*.soul.md /opt/hermes/profiles/ 2>/dev/null || true); \
-    rm -rf /tmp/patch_src; \
-    site_dir=$(/opt/hermes/.venv/bin/python3 -c 'import site; print(site.getsitepackages()[0])'); \
-    mkdir -p "$site_dir"; \
-    printf '%s\n' /opt/lexitool > "$site_dir/lexitool.pth"; \
-    printf '%s\n' '#!/bin/sh' 'exec /opt/hermes/.venv/bin/python3 -c "from lexitool.cli import main; raise SystemExit(main())" "$@"' > /usr/local/bin/lexitool; \
-    cp /usr/local/bin/lexitool /usr/local/bin/lex-docx; \
-    printf '%s\n' '#!/bin/sh' 'exec /opt/hermes/.venv/bin/python3 -c "from lexitool.ocr_cli import main; raise SystemExit(main())" "$@"' > /usr/local/bin/lex-ocr; \
-    chmod +x /usr/local/bin/lexitool /usr/local/bin/lex-docx /usr/local/bin/lex-ocr; \
-    /opt/hermes/.venv/bin/python3 -c "import docx, lxml, lexitool"; \
-    if [ -x /opt/lex-hermes/web/node_modules/.bin/tsc ]; then \
-      cd /opt/lex-hermes/web && npm run build; \
-    elif [ -f /opt/lex-hermes/hermes_cli/web_dist/index.html ]; then \
-      echo "Using prebuilt hermes_cli/web_dist from patch context"; \
-    else \
-      echo "No web build toolchain or prebuilt hermes_cli/web_dist found" >&2; \
-      exit 1; \
-    fi; \
-    rm -rf /opt/hermes/hermes_cli/web_dist; \
-    mkdir -p /opt/hermes/hermes_cli/web_dist; \
-    cp -a /opt/lex-hermes/hermes_cli/web_dist/. /opt/hermes/hermes_cli/web_dist/; \
-    python3 -m compileall -q -f /usr/local/lib/python3.11/site-packages/; \
-    python3 -m compileall -q -f /opt/lex-hermes/; \
-    python3 -m compileall -q -f /opt/hermes/
+# Pre-built frontend
+COPY hermes_cli/web_dist/ /opt/hermes/web/dist/
+
+# Sync to lex-hermes mirror
+RUN cp /opt/hermes/hermes_cli/kanban_db.py /opt/lex-hermes/hermes_cli/kanban_db.py && \
+    cp /opt/hermes/hermes_cli/kanban_legal_swarm.py /opt/lex-hermes/hermes_cli/kanban_legal_swarm.py && \
+    cp /opt/hermes/hermes_cli/web_server.py /opt/lex-hermes/hermes_cli/web_server.py && \
+    cp -a /opt/hermes/web/dist/. /opt/lex-hermes/web/dist/

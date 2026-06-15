@@ -5,7 +5,7 @@ import {
   useRef,
   useMemo,
 } from "react";
-import { useSearchParams } from "react-router-dom";
+import { useSearchParams, useNavigate } from "react-router-dom";
 import {
   Send,
   Users,
@@ -20,9 +20,12 @@ import {
   Wifi,
   WifiOff,
   Play,
+  Building2,
+  ChevronRight,
+  MessagesSquare,
 } from "lucide-react";
 import { api } from "@/lib/api";
-import type { RoomMessage, BotInfo } from "@/lib/api";
+import type { RoomMessage, BotInfo, ProjectInfo, WorkflowDefinition } from "@/lib/api";
 import { RoomClient } from "@/lib/roomClient";
 import type { ConnectionState } from "@/lib/roomClient";
 import { cn } from "@/lib/utils";
@@ -32,6 +35,7 @@ import { Spinner } from "@nous-research/ui/ui/components/spinner";
 import { useToast } from "@nous-research/ui/hooks/use-toast";
 import { Markdown } from "@/components/Markdown";
 import { PluginSlot } from "@/plugins";
+import { Card, CardContent } from "@nous-research/ui/ui/components/card";
 
 // ---------------------------------------------------------------------------
 // Bot avatar icon mapping
@@ -403,6 +407,41 @@ export default function LegalSwarmChat() {
   const [statusLoading, setStatusLoading] = useState(true);
   const [compiling] = useState(false);
   const { showToast } = useToast();
+  const navigate = useNavigate();
+
+  // ── Launcher state (when no board/run in URL) ────────────────────────
+
+  const [projects, setProjects] = useState<ProjectInfo[]>([]);
+  const [workflowDefs, setWorkflowDefs] = useState<WorkflowDefinition[]>([]);
+  const [selectedProjectId, setSelectedProjectId] = useState("");
+  const [selectedWorkflowId, setSelectedWorkflowId] = useState("");
+  const [launching, setLaunching] = useState(false);
+
+  useEffect(() => {
+    if (board && runId) return;
+    api.fetchProjects().then((d) => {
+      setProjects(d.projects ?? []);
+      if ((d.projects ?? []).length > 0) setSelectedProjectId(d.projects[0].id);
+    }).catch(() => {});
+    api.fetchWorkflowDefinitions().then((d) => {
+      setWorkflowDefs(d.definitions ?? []);
+      if ((d.definitions ?? []).length > 0) setSelectedWorkflowId(d.definitions[0].id);
+    }).catch(() => {});
+  }, [board, runId]);
+
+  const handleLaunch = useCallback(async () => {
+    if (!selectedProjectId || !selectedWorkflowId || launching) return;
+    setLaunching(true);
+    try {
+      const result = await api.createRoom(selectedProjectId, selectedWorkflowId);
+      navigate(
+        `/swarm-chat?board=${encodeURIComponent(result.board)}&run=${encodeURIComponent(result.run_id)}`,
+      );
+    } catch (e: any) {
+      showToast(e?.message ?? "Failed to create chat room", "error");
+      setLaunching(false);
+    }
+  }, [selectedProjectId, selectedWorkflowId, launching, navigate, showToast]);
 
   const clientRef = useRef<RoomClient | null>(null);
   const msgIdSet = useRef<Set<string>>(new Set());
@@ -513,18 +552,90 @@ export default function LegalSwarmChat() {
     );
   }, [showToast]);
 
-  // ── Invalid params state ─────────────────────────────────────────────
+  // ── Launcher (no board/run) ──────────────────────────────────────────
 
   if (!board || !runId) {
+    const selectedWf = workflowDefs.find((w) => w.id === selectedWorkflowId);
     return (
-      <div className="flex flex-col items-center justify-center h-full gap-3">
-        <Users className="w-10 h-10 text-secondary/30" />
-        <p className="text-sm text-secondary">
-          No room specified. Use <strong>LaunchPad</strong> to create or join a chat room.
-        </p>
-        <p className="text-xs text-secondary">
-          Expected URL: <code>/swarm-chat?board=&lt;board&gt;&run=&lt;run_id&gt;</code>
-        </p>
+      <div className="flex items-center justify-center h-full">
+        <div className="w-full max-w-lg mx-auto px-4">
+          <div className="text-center mb-6">
+            <MessagesSquare className="w-10 h-10 text-primary/50 mx-auto mb-3" />
+            <h2 className="text-lg font-semibold mb-1">Legal Swarm Chat</h2>
+            <p className="text-sm text-secondary">
+              All legal agent bots — coordinator, drafter, reviewers — in one real-time conversation.
+            </p>
+          </div>
+
+          <Card>
+            <CardContent className="p-4 flex flex-col gap-4">
+              <div>
+                <label className="text-xs font-semibold text-secondary uppercase tracking-wide block mb-1.5">
+                  Project
+                </label>
+                <div className="flex flex-col gap-1 max-h-48 overflow-y-auto">
+                  {projects.map((p) => (
+                    <button
+                      key={p.id}
+                      type="button"
+                      className={cn(
+                        "flex items-center gap-2 px-3 py-2 rounded-md text-left text-sm transition-colors w-full",
+                        p.id === selectedProjectId
+                          ? "bg-primary/10 border border-primary/30"
+                          : "hover:bg-secondary/5 border border-transparent",
+                      )}
+                      onClick={() => setSelectedProjectId(p.id)}
+                    >
+                      <Building2 className="w-3.5 h-3.5 text-secondary shrink-0" />
+                      <span className="truncate">{p.name || p.id}</span>
+                      {p.id === selectedProjectId && (
+                        <ChevronRight className="w-3.5 h-3.5 text-primary shrink-0 ml-auto" />
+                      )}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div>
+                <label className="text-xs font-semibold text-secondary uppercase tracking-wide block mb-1.5">
+                  Workflow
+                </label>
+                <div className="flex flex-col gap-1">
+                  {workflowDefs.map((wf) => (
+                    <button
+                      key={wf.id}
+                      type="button"
+                      className={cn(
+                        "flex flex-col px-3 py-2 rounded-md text-left transition-colors w-full",
+                        wf.id === selectedWorkflowId
+                          ? "bg-primary/10 border border-primary/30"
+                          : "hover:bg-secondary/5 border border-transparent",
+                      )}
+                      onClick={() => setSelectedWorkflowId(wf.id)}
+                    >
+                      <span className="text-sm font-medium">{wf.id}</span>
+                      <span className="text-[11px] text-secondary">{wf.pipeline}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <Button
+                onClick={handleLaunch}
+                disabled={!selectedProjectId || !selectedWorkflowId || launching}
+                className="w-full"
+                prefix={launching ? <Spinner className="w-4 h-4" /> : <Play className="w-4 h-4" />}
+              >
+                {launching ? "Creating..." : "Start Chat Room"}
+              </Button>
+              {selectedWf && (
+                <p className="text-[10px] text-secondary text-center -mt-2">
+                  {selectedWf.node_count} bots &middot; {selectedWf.timeout_minutes}min timeout
+                </p>
+              )}
+            </CardContent>
+          </Card>
+        </div>
       </div>
     );
   }
