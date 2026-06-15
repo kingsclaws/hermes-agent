@@ -441,6 +441,8 @@ def replace_text(docx_path: str, para: int, old: str, new: str, *,
     tc=False（默认）：直接替换 w:t 中的文本
     tc=True：旧文本包为 <w:del>，新文本注入 <w:ins>
     """
+    if not old or not isinstance(old, str) or not old.strip():
+        return EditResult(ok=False, message="'old' text is required for replace; use delete_paragraph_tc to delete a paragraph", path=docx_path)
     doc_xml, other = _read_docx(docx_path)
     root = etree.fromstring(doc_xml)
     p = _find_para(root, para)
@@ -1497,6 +1499,18 @@ def insert_paragraph_block(docx_path: str, after_para: int,
 		                  path=docx_path)
 
 	anchor = all_paras[after_para]
+	# Bug 2: when inherit_format is true and the anchor paragraph is empty
+	# with no pStyle, walk backwards to find the nearest non-empty paragraph.
+	if inherit_format:
+		_anchor_text = _get_para_text(anchor).strip()
+		_anchor_pPr = anchor.find(f"{W}pPr")
+		_has_style = _anchor_pPr is not None and _anchor_pPr.find(f"{W}pStyle") is not None
+		if not _anchor_text and not _has_style:
+			for prev_idx in range(after_para - 1, -1, -1):
+				prev = all_paras[prev_idx]
+				if _get_para_text(prev).strip():
+					anchor = prev
+					break
 	inserted = 0
 	skipped_empty = 0
 	tc_mode = tc
@@ -1525,8 +1539,12 @@ def insert_paragraph_block(docx_path: str, after_para: int,
 
 		pg_format = dict(default_format or {})
 		pg_format.update(pg.get("format") or {})
+		# Collect style from all sources: default_format, pg.format, and pg-level shortcut
 		if pg.get("style") or pg.get("style_id"):
 			pg_format["style"] = pg.get("style") or pg.get("style_id")
+		# Bug 1: apply paragraph style explicitly before run-level formatting
+		if pg_format.get("style"):
+			_set_pstyle(pPr, pg_format["style"])
 		if pg.get("font"):
 			pg_format["font"] = pg.get("font")
 		elif not inherit_format and font:

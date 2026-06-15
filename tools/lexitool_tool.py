@@ -1066,6 +1066,7 @@ def _handle_edit(args: dict, **kwargs) -> str:
     body = root.find(f"{W}body")
 
     para_idx = target.para_start - 1
+    para_end_idx = (target.para_end - 1) if target.para_end else para_idx
 
     # Build two paragraph lists:
     #   body_paras — body-direct w:p only (matches lex_read numbering)
@@ -1076,13 +1077,19 @@ def _handle_edit(args: dict, **kwargs) -> str:
 
     if para_idx < 0 or para_idx >= len(body_paras):
         return tool_error(f"Paragraph {target.para_start} out of range (1-{len(body_paras)})")
+    if para_end_idx >= len(body_paras):
+        return tool_error(f"Paragraph {target.para_end} out of range (1-{len(body_paras)})")
 
-    para_el = body_paras[para_idx]
+    # Build the list of target paragraphs for range-based delete
+    target_indices = list(range(para_idx, para_end_idx + 1))
+    target_paras = [body_paras[i] for i in target_indices]
+
     tc_id = _next_tc_id_from_body(body)
 
-    # Resolve the paragraph in the all_paras list for operations that need
-    # the canonical element from root.iter() (tc_replace_first_in_para
-    # requires the element's parent chain to match the root).
+    # For single-paragraph ops, use the first target paragraph
+    para_el = target_paras[0] if target_paras else None
+
+    # Resolve _all_idx for nearby search fallbacks (replace op only)
     _all_idx = None
     for i, el in enumerate(all_paras):
         if el is para_el:
@@ -1091,20 +1098,20 @@ def _handle_edit(args: dict, **kwargs) -> str:
 
     try:
         if op == "delete":
-            if tc:
-                tc_del_paragraph(para_el, tc_id, author)
-            else:
-                for t_el in para_el.iter(f"{W}t"):
-                    t_el.text = None
+            # Process range in reverse to avoid XML mutation interference
+            for p_el in reversed(target_paras):
+                if tc:
+                    tc_del_paragraph(p_el, tc_id, author)
+                    tc_id += 10  # spacing between paragraph TC IDs
+                else:
+                    for t_el in p_el.iter(f"{W}t"):
+                        t_el.text = None
 
         elif op == "replace":
             requested_old_text = args.get("old_text")
-            if isinstance(requested_old_text, str) and requested_old_text:
-                old_text = requested_old_text
-            elif target.char_start is not None:
-                old_text = _get_para_text(para_el)[target.char_start:target.char_end]
-            else:
-                old_text = _get_para_text(para_el)
+            if not isinstance(requested_old_text, str) or not requested_old_text.strip():
+                return tool_error("'old_text' is required for replace operation")
+            old_text = requested_old_text
 
             # Parse format markers from new_text so that [b], [i], [u]
             # are converted to actual OOXML formatting instead of being
@@ -1200,9 +1207,13 @@ def _handle_edit(args: dict, **kwargs) -> str:
     verified_output = ""
     try:
         from lexitool.markup import lex_read
-        # Read the edited paragraph plus one on each side for context
-        read_start = max(1, target.para_start - 1)
-        read_end = target.para_start + 1
+        # For range ops, read the full affected range; for single-para, read with context
+        if target.para_end and target.para_end > target.para_start:
+            read_start = target.para_start
+            read_end = target.para_end
+        else:
+            read_start = max(1, target.para_start - 1)
+            read_end = target.para_start + 1
         verified = lex_read(path, paras=list(range(read_start, read_end + 1)),
                             mode="full", show_tc=True, show_format=True)
         verified_output = verified.get("text", "")
@@ -1210,6 +1221,9 @@ def _handle_edit(args: dict, **kwargs) -> str:
         verified_output = ""  # best-effort
 
     result = {"ok": True, "op": op, "target": target_str, "para": target.para_start}
+    if target.para_end and target.para_end > target.para_start:
+        result["para_end"] = target.para_end
+        result["paragraphs_affected"] = len(target_indices)
     if verified_output:
         result["verified_output"] = verified_output
     return tool_result(result)
@@ -1537,7 +1551,31 @@ def _apply_format_to_range(para_el, start: int, end: int, fmt: dict) -> None:
     W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
     from lxml import etree
     from lexitool.tc_utils import make_rPr_from_dict
+    from lexitool.edit_ops import _parse_indent_twips, _parse_size_half_points, _set_pstyle, _ensure_child
 
+    # ── Paragraph-level properties ──
+    pPr = para_el.find(f"{W}pPr")
+    if pPr is None:
+        pPr = etree.Element(f"{W}pPr")
+        para_el.insert(0, pPr)
+
+    if fmt.get("style") or fmt.get("style_id"):
+        _set_pstyle(pPr, fmt.get("style") or fmt.get("style_id"))
+
+    if fmt.get("align"):
+        jc = _ensure_child(pPr, f"{W}jc")
+        jc.set(f"{W}val", str(fmt["align"]))
+
+    if fmt.get("spacing"):
+        spacing = _ensure_child(pPr, f"{W}spacing")
+        spacing.set(f"{W}line", str(int(float(fmt["spacing"]) * 240)))
+        spacing.set(f"{W}lineRule", "auto")
+
+    if fmt.get("indent") is not None:
+        ind = _ensure_child(pPr, f"{W}ind")
+        ind.set(f"{W}firstLine", _parse_indent_twips(fmt["indent"]))
+
+    # ── Run-level properties ──
     rpr_dict = {}
     if fmt.get("bold"):
         rpr_dict["b"] = True
@@ -1551,10 +1589,14 @@ def _apply_format_to_range(para_el, start: int, end: int, fmt: dict) -> None:
             rpr_dict["sz"] = str(int(float(val) * 2))
         except (ValueError, TypeError):
             pass
+    if fmt.get("color"):
+        rpr_dict["color"] = str(fmt["color"]).lstrip("#")
+    if fmt.get("highlight"):
+        rpr_dict["highlight"] = str(fmt["highlight"])
 
     if rpr_dict:
         new_rPr = make_rPr_from_dict(rpr_dict)
-        for r_el in para_el.findall(f"{W}r"):
+        for r_el in para_el.findall(f".//{W}r"):
             existing = r_el.find(f"{W}rPr")
             if existing is not None:
                 r_el.remove(existing)
@@ -1972,8 +2014,8 @@ def _apply_format_brush(paras, target_para, src_para, W):
                     target_pPr.append(deepcopy(src_child))
 
     # Copy run-level formatting from first run of source to all runs of target
-    src_runs = src_para.findall(f"{W}r")
-    target_runs = target_para.findall(f"{W}r")
+    src_runs = src_para.findall(f".//{W}r")
+    target_runs = target_para.findall(f".//{W}r")
     if src_runs and target_runs:
         src_rPr = src_runs[0].find(f"{W}rPr")
         if src_rPr is not None:
@@ -2058,7 +2100,7 @@ def _apply_format_props(para_el, props, W, target):
     _apply_run_format_props(pPr_rPr, run_props, W, _parse_size_half_points)
 
     # Determine target runs
-    all_runs = para_el.findall(f"{W}r")
+    all_runs = para_el.findall(f".//{W}r")
     if target.char_start is not None and all_runs:
         # Apply to runs within character range (approximate: apply to all runs
         # when range is given — exact char-level targeting needs text splitting
@@ -2219,7 +2261,11 @@ LEX_LIST_SCHEMA = {
             },
             "start": {
                 "type": "integer",
-                "description": "Restart numbering at this value. For 'restart' operation.",
+                "description": "Starting number for 'create' (default 1), or restart value for 'restart' operation.",
+            },
+            "num_id": {
+                "type": "integer",
+                "description": "Existing numbering instance ID to continue from. When provided with 'create', skips creating new numbering and applies the existing numId to the target paragraphs. Use this to continue an existing auto-numbered sequence instead of starting a new one.",
             },
         },
         "required": ["path", "op"],
@@ -2235,9 +2281,12 @@ def _handle_list(args: dict, **kwargs) -> str:
     paras = [p - 1 for p in args.get("paras", [])]  # Convert to 0-indexed
 
     if op == "create":
-        if not args.get("style"):
-            return tool_error("'style' is required for create operation")
-        result = lists.create_list(path, paras, style=args["style"])
+        if not args.get("style") and not args.get("num_id"):
+            return tool_error("'style' is required for create operation (or provide 'num_id' to continue existing numbering)")
+        result = lists.create_list(path, paras,
+                                    style=args.get("style", "decimal"),
+                                    start=args.get("start", 1),
+                                    num_id=args.get("num_id"))
     elif op == "list_styles":
         result = lists.list_styles()
     elif op == "promote" and paras:

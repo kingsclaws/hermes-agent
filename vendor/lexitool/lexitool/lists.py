@@ -631,20 +631,73 @@ def create_list(
     style: str = "decimal",
     start: int = 1,
     levels: int | None = None,
+    num_id: int | None = None,
 ) -> dict:
     """Convenience: create a full list in one call.
 
     Args:
         doc_path: Path to .docx file.
         para_indices: 0-indexed paragraph numbers.
-        style: Any style from list_styles().
+        style: Any style from list_styles(). Ignored when num_id is provided.
         start: Starting number.
-        levels: How many levels to define (default: 4).
+        levels: How many levels to define (default: 4). Ignored when num_id is provided.
+        num_id: Existing numbering instance ID to use instead of creating a new one.
+                When provided, skips abstractNum/num creation and applies the
+                existing numId directly, optionally with a startOverride.
 
     Returns:
         {"ok": True, "abstractNumId": int, "numId": int, "applied_to": int,
          "style": style, "preview": str}
     """
+    if num_id is not None:
+        # Use existing numbering instance — apply directly, optionally with start override
+        if start > 1:
+            doc_xml, other = _read_docx(doc_path)
+            numbering_xml = _check_and_insert_numbering_part(other)
+            numbering_el = etree.fromstring(numbering_xml)
+            for num_el in numbering_el.findall(f"{W}num"):
+                if num_el.get(f"{W}numId") == str(num_id):
+                    # Add or update lvlOverride for ilvl=0
+                    existing_override = None
+                    for lo in num_el.findall(f"{W}lvlOverride"):
+                        if lo.get(f"{W}ilvl") == "0":
+                            existing_override = lo
+                            break
+                    if existing_override is not None:
+                        so = existing_override.find(f"{W}startOverride")
+                        if so is not None:
+                            existing_override.remove(so)
+                    else:
+                        existing_override = etree.SubElement(num_el, f"{W}lvlOverride")
+                        existing_override.set(f"{W}ilvl", "0")
+                    so = etree.SubElement(existing_override, f"{W}startOverride")
+                    so.set(f"{W}val", str(start))
+                    other["word/numbering.xml"] = etree.tostring(
+                        numbering_el, xml_declaration=True, encoding="UTF-8", standalone="yes"
+                    )
+                    try:
+                        doc_xml_out = etree.tostring(
+                            etree.fromstring(doc_xml), xml_declaration=True,
+                            encoding="UTF-8", standalone="yes"
+                        )
+                    except Exception:
+                        doc_xml_out = doc_xml
+                    _write_docx(doc_path, doc_xml_out, other)
+                    break
+
+        applied = 0
+        for para_idx in para_indices:
+            r = apply_numbering(doc_path, para_idx, num_id, ilvl=0)
+            if r["ok"]:
+                applied += 1
+        return {
+            "ok": True,
+            "numId": num_id,
+            "applied_to": applied,
+            "total": len(para_indices),
+            "continued": True,
+        }
+
     result = create_abstract_num(doc_path, style, levels=levels, start=start)
     if not result["ok"]:
         return result
