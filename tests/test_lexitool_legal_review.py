@@ -348,6 +348,43 @@ def test_insert_paragraphs_inherits_anchor_format_and_skips_empty_items(tmp_path
     assert "§4 后续段落" in readback
 
 
+def test_insert_paragraphs_compat_handles_legacy_insert_signature(monkeypatch, tmp_path):
+    import lexitool.edit_ops as edit_ops
+
+    path = tmp_path / "legacy-insert.docx"
+    doc = Document()
+    doc.add_paragraph("锚点")
+    doc.save(path)
+    captured = {}
+
+    def legacy_insert(docx_path, after_para, paragraphs, *, tc=True, author="agent", font="宋体", sz=22.0, output=None):
+        captured["paragraphs"] = paragraphs
+        captured["kwargs"] = {"tc": tc, "author": author, "font": font, "sz": sz, "output": output}
+        return edit_ops.EditResult(ok=True, message="legacy inserted", path=output or docx_path)
+
+    monkeypatch.setattr(edit_ops, "insert_paragraph_block", legacy_insert)
+
+    result = _handle_edit({
+        "path": str(path),
+        "op": "insert_paragraphs",
+        "after_para": 0,
+        "tc": True,
+        "format": {"size": "16pt"},
+        "inherit_format": True,
+        "skip_empty": True,
+        "paragraphs": [
+            {"text": "新增段落"},
+            {"text": ""},
+        ],
+    })
+
+    assert '"ok": true' in result
+    assert "skipped 1 empty paragraphs" in result
+    assert captured["paragraphs"] == [{"text": "新增段落"}]
+    assert captured["kwargs"]["tc"] is True
+    assert captured["kwargs"]["output"] == str(path)
+
+
 def test_lex_format_accepts_indent_units_and_sets_paragraph_run_defaults(tmp_path):
     path = tmp_path / "format-units.docx"
     doc = Document()

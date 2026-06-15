@@ -21,6 +21,7 @@ import json
 import logging
 import re
 import sys
+import inspect
 from pathlib import Path
 
 from tools.registry import invalidate_check_fn_cache, registry, tool_error, tool_result
@@ -41,6 +42,83 @@ def _check_lexitool():
 def _resolve_path(path: str) -> str:
     """Resolve a path, expanding ~ and making absolute."""
     return str(Path(path).expanduser().resolve())
+
+
+def _supports_kwargs(func) -> tuple[set[str], bool]:
+    try:
+        sig = inspect.signature(func)
+    except (TypeError, ValueError):
+        return set(), True
+    supported = set(sig.parameters)
+    has_var_kw = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
+    return supported, has_var_kw
+
+
+def _insert_paragraph_block_compat(
+    insert_paragraph_block,
+    path: str,
+    after_para: int,
+    paragraphs: list[dict],
+    *,
+    tc: bool,
+    author: str,
+    sz: int,
+    default_format: dict,
+    inherit_format: bool,
+    skip_empty: bool,
+    output: str,
+):
+    """Call lexitool insert_paragraph_block across editable-install mismatches.
+
+    Long-running Hermes processes may import a newer tool wrapper while the
+    editable lexitool package still resolves to an older function signature.
+    Filter unsupported kwargs instead of failing the user's document edit.
+    """
+    supported, has_var_kw = _supports_kwargs(insert_paragraph_block)
+
+    call_paragraphs = paragraphs
+    skipped_empty = 0
+    if skip_empty and "skip_empty" not in supported and not has_var_kw:
+        call_paragraphs = []
+        for pg in paragraphs:
+            text = str(pg.get("text", ""))
+            if not text.strip() and not pg.get("page_break_before"):
+                skipped_empty += 1
+                continue
+            call_paragraphs.append(pg)
+
+    kwargs = {
+        "tc": tc,
+        "author": author,
+        "sz": sz,
+        "default_format": default_format,
+        "inherit_format": inherit_format,
+        "skip_empty": skip_empty,
+        "output": output,
+    }
+    if not has_var_kw:
+        kwargs = {key: value for key, value in kwargs.items() if key in supported}
+
+    try:
+        res = insert_paragraph_block(path, after_para, call_paragraphs, **kwargs)
+    except TypeError as exc:
+        if "unexpected keyword argument" not in str(exc):
+            raise
+        legacy_kwargs = {
+            key: value
+            for key, value in {
+                "tc": tc,
+                "author": author,
+                "sz": sz,
+                "output": output,
+            }.items()
+            if has_var_kw or key in supported or not supported
+        }
+        res = insert_paragraph_block(path, after_para, call_paragraphs, **legacy_kwargs)
+
+    if skipped_empty and hasattr(res, "message") and skipped_empty and "skipped" not in res.message:
+        res.message += f"; skipped {skipped_empty} empty paragraphs"
+    return res
 
 
 # ── 1. lex_read ──────────────────────────────────────────────────────────────
@@ -773,7 +851,8 @@ def _handle_edit(args: dict, **kwargs) -> str:
                 paragraphs = args.get("paragraphs", [])
                 if not paragraphs:
                     return tool_error("'paragraphs' is required for insert_paragraphs")
-                res = insert_paragraph_block(
+                res = _insert_paragraph_block_compat(
+                    insert_paragraph_block,
                     path, after_para, paragraphs,
                     tc=tc, author=author,
                     sz=int(font_size * 2),
