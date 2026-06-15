@@ -21,6 +21,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from lxml import etree
 
+from .openxml_runmap import render_paragraph, replace_span
+
 W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 W = f"{{{W_NS}}}"
 
@@ -84,65 +86,6 @@ def _get_para_text(para: etree._Element) -> str:
 def _find_runs(para: etree._Element) -> list[etree._Element]:
     """获取段落中所有 w:r 元素。"""
     return [child for child in para if child.tag == f"{W}r"]
-
-
-def _patch_space_attribute(t_el: etree._Element) -> None:
-    """Keep Word whitespace semantics valid after changing a w:t node."""
-    xml_space = "{http://www.w3.org/XML/1998/namespace}space"
-    text = t_el.text or ""
-    if text.startswith((" ", "\t", "\n")) or text.endswith((" ", "\t", "\n")):
-        t_el.set(xml_space, "preserve")
-    else:
-        t_el.attrib.pop(xml_space, None)
-
-
-def _replace_span_in_text_nodes(
-    t_elements: list[etree._Element],
-    start: int,
-    end: int,
-    new_text: str,
-) -> bool:
-    """Replace a rendered paragraph span without collapsing unrelated runs.
-
-    This mirrors the DocX-style split/replace principle at a conservative
-    granularity: only w:t nodes touched by the match are changed; text before
-    the first touched node and after the last touched node stays in its
-    original run.  It is intentionally used for non-TC direct edits only.
-    """
-    spans: list[tuple[etree._Element, int, int, str]] = []
-    cursor = 0
-    for t_el in t_elements:
-        text = t_el.text or ""
-        next_cursor = cursor + len(text)
-        spans.append((t_el, cursor, next_cursor, text))
-        cursor = next_cursor
-
-    touched = [
-        (t_el, s, e, text)
-        for t_el, s, e, text in spans
-        if e > start and s < end
-    ]
-    if not touched:
-        return False
-
-    first_el, first_start, first_end, first_text = touched[0]
-    last_el, last_start, last_end, last_text = touched[-1]
-    prefix = first_text[: max(0, start - first_start)]
-    suffix = last_text[max(0, end - last_start):]
-
-    if first_el is last_el:
-        first_el.text = prefix + new_text + suffix
-        _patch_space_attribute(first_el)
-        return True
-
-    first_el.text = prefix + new_text
-    _patch_space_attribute(first_el)
-    for mid_el, *_ in touched[1:-1]:
-        mid_el.text = ""
-        _patch_space_attribute(mid_el)
-    last_el.text = suffix
-    _patch_space_attribute(last_el)
-    return True
 
 
 def _make_run(text: str, bold: bool = False, italic: bool = False,
@@ -392,20 +335,16 @@ def replace_text(docx_path: str, para: int, old: str, new: str, *,
                           tc_id=tid, message=f"TC 替换段落 {para}：{old}→{new}",
                           path=output or docx_path)
     else:
-        # 直接替换：支持跨 run 文本匹配
-        # 收集段落中所有 w:t 元素的文本
-        t_elements = list(p.iter(f"{W}t"))
-        texts = [(i, t.text or "") for i, t in enumerate(t_elements)]
-        full_text = "".join(t for _, t in texts)
+        rendered = render_paragraph(p)
 
-        located = _locate_replacement_span(full_text, old)
+        located = _locate_replacement_span(rendered.text, old)
         if located is None:
             return EditResult(ok=False, para=para, text=old,
                               message=f"段落 {para} 中未找到 '{old}'",
                               path=docx_path)
 
         pos, end_pos, actual_old = located
-        if not _replace_span_in_text_nodes(t_elements, pos, end_pos, new):
+        if not replace_span(rendered, pos, end_pos, new):
             return EditResult(ok=False, para=para, text=old,
                               message=f"段落 {para} 中未找到 '{old}' 的文本边界",
                               path=docx_path)

@@ -11,6 +11,7 @@ sys.path.insert(0, str((Path(__file__).resolve().parents[1] / "vendor" / "lexito
 from lexitool.diff import summary
 from lexitool.edit_ops import replace_text
 from lexitool.markup import lex_read
+from lexitool.openxml_runmap import render_paragraph, replace_span
 from hermes_cli.project_commands import (
     edit_verification_record,
     legal_handoff_record,
@@ -151,6 +152,43 @@ def test_direct_replace_preserves_unmatched_runs_when_match_crosses_runs(tmp_pat
     assert texts == ["The ", "Chargee", "", " may act."]
     assert para.find(f".//{W}b") is not None
     assert para.find(f".//{W}i") is not None
+
+
+def test_openxml_runmap_renders_tabs_and_rejects_noneditable_span():
+    para = etree.fromstring(
+        f"""
+        <w:p xmlns:w="{W_NS}">
+          <w:r><w:t>A</w:t></w:r>
+          <w:r><w:tab/></w:r>
+          <w:r><w:t>B</w:t></w:r>
+        </w:p>
+        """.encode()
+    )
+
+    rendered = render_paragraph(para)
+
+    assert rendered.text == "A\tB"
+    assert [span.editable for span in rendered.spans] == [True, False, True]
+    assert replace_span(rendered, 0, 3, "C") is False
+
+
+def test_openxml_runmap_replace_span_preserves_surrounding_text_nodes():
+    para = etree.fromstring(
+        f"""
+        <w:p xmlns:w="{W_NS}">
+          <w:r><w:t>AA</w:t></w:r>
+          <w:r><w:t>BB</w:t></w:r>
+          <w:r><w:t>CC</w:t></w:r>
+        </w:p>
+        """.encode()
+    )
+    rendered = render_paragraph(para)
+
+    assert replace_span(rendered, 1, 5, "X") is True
+
+    texts = [t.text or "" for t in para.iter(f"{W}t")]
+    assert texts == ["AX", "", "C"]
+    assert "".join(texts) == "AXC"
 
 
 def test_revision_guard_blocks_unresolved_final_view_residuals(tmp_path):
