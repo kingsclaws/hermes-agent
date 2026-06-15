@@ -8,10 +8,7 @@ from typing import Any
 
 from lxml import etree
 
-W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
-W = f"{{{W_NS}}}"
-PKG_REL_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
-R_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+from .openxml_opc import W, header_footer_ref_types
 
 
 def _read_document_root(path: str) -> etree._Element:
@@ -19,38 +16,9 @@ def _read_document_root(path: str) -> etree._Element:
         return etree.fromstring(zf.read("word/document.xml"))
 
 
-def _parse_rels(zf: zipfile.ZipFile, rels_path: str) -> dict[str, str]:
-    if rels_path not in set(zf.namelist()):
-        return {}
-    root = etree.fromstring(zf.read(rels_path))
-    mapping: dict[str, str] = {}
-    for rel in root.findall(f"{{{PKG_REL_NS}}}Relationship"):
-        rid = rel.get("Id", "")
-        target = rel.get("Target", "")
-        if rid and target:
-            mapping[rid] = target
-    return mapping
-
-
-def _header_footer_ref_types(path: str) -> dict[str, set[str]]:
-    with zipfile.ZipFile(path, "r") as zf:
-        doc_rels = _parse_rels(zf, "word/_rels/document.xml.rels")
-        root = etree.fromstring(zf.read("word/document.xml"))
-    result: dict[str, set[str]] = {}
-    for tag_name, kind in (("headerReference", "header"), ("footerReference", "footer")):
-        for ref in root.iter(f"{W}{tag_name}"):
-            rid = ref.get(f"{{{R_NS}}}id")
-            target = doc_rels.get(rid or "", "")
-            if not target:
-                continue
-            part_path = f"word/{target}" if not target.startswith("word/") else target
-            result.setdefault(part_path, set()).add(ref.get(f"{W}type", "default") or "default")
-    return result
-
-
 def _iter_header_footer_items(path: str):
-    ref_types = _header_footer_ref_types(path)
     with zipfile.ZipFile(path, "r") as zf:
+        ref_types = header_footer_ref_types(zf)
         for info in zf.infolist():
             name = info.filename
             if not name.startswith("word/") or not name.endswith(".xml"):

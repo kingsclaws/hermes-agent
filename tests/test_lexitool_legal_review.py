@@ -11,6 +11,14 @@ sys.path.insert(0, str((Path(__file__).resolve().parents[1] / "vendor" / "lexito
 from lexitool.diff import summary
 from lexitool.edit_ops import replace_text
 from lexitool.markup import lex_read
+from lexitool.openxml_opc import (
+    CT_NS,
+    PKG_REL_NS,
+    append_relationship,
+    ensure_default_content_type,
+    rels_member_for_part,
+    resolve_target_path,
+)
 from lexitool.openxml_runmap import render_paragraph, replace_span
 from hermes_cli.project_commands import (
     edit_verification_record,
@@ -220,6 +228,34 @@ def test_openxml_runmap_replace_span_preserves_surrounding_text_nodes():
     texts = [t.text or "" for t in para.iter(f"{W}t")]
     assert texts == ["AX", "", "C"]
     assert "".join(texts) == "AXC"
+
+
+def test_openxml_opc_helpers_manage_relationships_and_content_types():
+    assert rels_member_for_part("word/document.xml") == "word/_rels/document.xml.rels"
+    assert resolve_target_path("word/document.xml", "header1.xml") == "word/header1.xml"
+    assert resolve_target_path("word/document.xml", "/custom/item1.xml") == "custom/item1.xml"
+
+    rels = etree.fromstring(
+        f'<Relationships xmlns="{PKG_REL_NS}"><Relationship Id="rId2" Type="old" Target="x"/></Relationships>'
+    )
+    rid = append_relationship(
+        rels,
+        "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink",
+        "https://example.com",
+        target_mode="External",
+    )
+
+    assert rid == "rId3"
+    added = rels.findall(f"{{{PKG_REL_NS}}}Relationship")[-1]
+    assert added.get("TargetMode") == "External"
+    assert added.get("Target") == "https://example.com"
+
+    types = etree.fromstring(f'<Types xmlns="{CT_NS}"><Default Extension="xml" ContentType="old/type"/></Types>')
+    assert ensure_default_content_type(types, "xml", "application/xml") is True
+    assert ensure_default_content_type(types, ".png", "image/png") is True
+    assert ensure_default_content_type(types, "png", "image/png") is False
+    defaults = {el.get("Extension"): el.get("ContentType") for el in types.findall(f"{{{CT_NS}}}Default")}
+    assert defaults == {"xml": "application/xml", "png": "image/png"}
 
 
 def test_lex_edit_header_footer_replace_handles_cross_run_text(tmp_path):

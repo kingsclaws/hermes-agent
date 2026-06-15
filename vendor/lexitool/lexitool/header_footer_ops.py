@@ -23,19 +23,12 @@ from pathlib import Path
 
 from lxml import etree
 
+from .openxml_opc import read_relationships, resolve_target_path
 from .openxml_runmap import render_paragraph, replace_span
 
 # ── Namespaces ─────────────────────────────────────────────────────────────── #
 _W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 _R_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
-_PKG_REL_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
-_XML_SPACE = "{http://www.w3.org/XML/1998/namespace}space"
-
-
-def _qn(tag: str) -> str:
-    """Quick QName helper."""
-    ns, local = tag.split(":")
-    return f"{{{'w' if ns == 'w' else _R_NS}}}{local}"
 
 
 def _wqn(tag: str) -> str:
@@ -183,17 +176,11 @@ def _parse_section_map(zf: zipfile.ZipFile) -> list[dict]:
 
 def _parse_rels(zf: zipfile.ZipFile, rels_path: str) -> dict[str, str]:
     """Parse a .rels file → {rId: target_path}."""
-    raw = zf.read(rels_path) if rels_path in [i.filename for i in zf.infolist()] else None
-    if raw is None:
-        return {}
-    root = etree.fromstring(raw)
-    mapping: dict[str, str] = {}
-    for rel in root.findall(f"{{{_PKG_REL_NS}}}Relationship"):
-        rid = rel.get("Id", "")
-        target = rel.get("Target", "")
-        if rid and target:
-            mapping[rid] = target
-    return mapping
+    return {
+        rid: rel.target
+        for rid, rel in read_relationships(zf, rels_path).items()
+        if rel.target
+    }
 
 
 # ── Public API ────────────────────────────────────────────────────────────── #
@@ -219,14 +206,14 @@ def audit_all(docx_path: str) -> dict:
             # part is like "header1.xml" — resolve to "word/header1.xml"
             target = hdr.get("part", "")
             # target from rels is relative (e.g., "header1.xml")
-            full_path = f"word/{target}" if not target.startswith("word/") else target
+            full_path = resolve_target_path("word/document.xml", target) if target else ""
             hdr["part_path"] = full_path
             p = parts.get(full_path)
             hdr["text"] = p["text"] if p else ""
             hdr["has_textbox"] = p["has_textbox"] if p else False
         for ftr in sec["footers"]:
             target = ftr.get("part", "")
-            full_path = f"word/{target}" if not target.startswith("word/") else target
+            full_path = resolve_target_path("word/document.xml", target) if target else ""
             ftr["part_path"] = full_path
             p = parts.get(full_path)
             ftr["text"] = p["text"] if p else ""
@@ -277,7 +264,7 @@ def replace_header_footer_text(
         for key in ("headers", "footers"):
             for ref in sec.get(key, []):
                 target = str(ref.get("part") or "")
-                full_path = f"word/{target}" if target and not target.startswith("word/") else target
+                full_path = resolve_target_path("word/document.xml", target) if target else ""
                 if not full_path:
                     continue
                 part_ref_types.setdefault(full_path, set()).add(str(ref.get("type") or "default").lower())
