@@ -41,52 +41,146 @@ delegate_task(
        context="<drafter.md role prompt>\n\n<项目上下文>\n\n文档要求：...",
        toolsets=["lexitool", "file"],
    )
-   → Drafter 返回草稿路径 + 验证报告
+   → Drafter 返回草稿路径 + 自验收通过声明 + 修订对照表
 
- 2.5. 验证门（Verification Gate）
-   Drafter 完成后、Reviewer 派发前，必须检查：
+ 2.5. 门 1 — 验证门（Verification Gate）
+   Drafter 完成后、Reviewer 派发前，Coordinator 必须逐项检查 Drafter 的自验收声明：
    
-   - Drafter 必须提供：修改段落列表 + 每段的验证通过标记（见 Drafter 验证协议步骤 5）
-   - Drafter 必须提供：修订对照表（Iron Rule #7 — 逐段列出原文→修订文+修改理由）
-   - 如文档 > 30 段：Drafter 必须提交分段审阅报告
-   - 修改已有合同时：Drafter 必须提交"文档约定分析"报告 + 内容一体化验证通过标记
-   - Coordinator 逐项确认验证通过后才可派发 Reviewer
-   - 如验证标记不完整、缺少分段审阅报告、或缺约定分析报告 → 退回 Drafter 补做验证
-   - 未执行约定分析的修改（首次修改已有合同）→ 退回补做，不可跳过此门
-   - 缺少修订对照表 → 退回补做。对照表是 Reviewer 了解修改内容的唯一结构化入口，不可跳过
+   - [ ] **强制验证协议完成** — 步骤 1-5 全部执行，验证通过标记完整
+   - [ ] **修订对照表完整** — 每段修改一行（§N: 原文→修订文+理由），理由字段不可为空
+   - [ ] **分段审阅报告**（文档 > 30 段时）— chunk 交界处一致性确认
+   - [ ] **约定分析报告**（修改已有合同时）— 四维分析 + 内容一体化验证全部 ✅
+   - [ ] **show_tc="final" 定稿态验证** — Drafter 已用定稿视图验证
+   - [ ] **show_tc="original" 原文态验证** — Drafter 已用原文视图确认无意外改动
+   - [ ] **自验收通过声明** — 格式完整，所有条件已逐项确认
+   
+   → 以上任一项不满足 → 退回 Drafter 补做，不可跳过此门进入审阅
+   → 全部满足 → 进入审阅阶段
 
 3. 审阅阶段（按文档大小选择路径）
 
    【文档 ≤ 200 段】→ 手动并行派发（保持现有逻辑）
    delegate_task(
        goal="审阅 <草稿路径> 的法律内容质量",
-       context="<reviewer-content.md role prompt>\n\n<STANDARDS.md 审阅标准>",
+       context="<reviewer-content.md role prompt>\n\n<STANDARDS.md 审阅标准>\n\n<修订对照表>",
        toolsets=["lexitool", "file"],
    )
    delegate_task(
        goal="审阅 <草稿路径> 的格式规范性",
-       context="<reviewer-format.md role prompt>\n\n<STANDARDS.md 格式标准>",
+       context="<reviewer-format.md role prompt>\n\n<STANDARDS.md 格式标准>\n\n<修订对照表>",
        toolsets=["lexitool", "file"],
    )
    delegate_task(
        goal="审阅 <草稿路径> 与 Term Sheet 的商业条款一致性",
-       context="<reviewer-ts-consistency.md role prompt>\n\n<STANDARDS.md TS一致性标准>\n\nTS文档路径：...",
+       context="<reviewer-ts-consistency.md role prompt>\n\n<STANDARDS.md TS一致性标准>\n\nTS文档路径：...\n\n<修订对照表>",
        toolsets=["lexitool", "file"],
    )
    delegate_task(
        goal="审阅项目全部文档的交叉引用准确性",
-       context="<reviewer-cross-ref.md role prompt>\n\n<STANDARDS.md 交叉引用标准>",
+       context="<reviewer-cross-ref.md role prompt>\n\n<STANDARDS.md 交叉引用标准>\n\n<修订对照表>",
        toolsets=["lexitool", "file"],
    )
 
    【文档 > 200 段】→ 使用 lex_proofread（自动分块 + 并行审阅）
    → 跳转到下方"全文审阅"工作流
 
-4. 汇总审阅报告 → 向用户报告
+4. 汇总审阅报告 → 进入验收门
 
-5. 如有重大问题 → Drafter 修改 → 重复 2-4
+ 4.5. 门 2 — 验收门（Acceptance Gate）
+   Coordinator 收到全部审阅报告后，必须逐项评估。此门决定"验收"还是"返工"。
+   
+   ### 审阅发现分类
+   
+   Coordinator 将全部审阅发现归入以下三类：
+   
+   | 级别 | 定义 | 示例 |
+   |------|------|------|
+   | **重大** | 影响法律效力、商业条款、或导致文档不可签署 | 金额错误、当事人名称错误、缺失必要条款、定义冲突导致歧义 |
+   | **一般** | 格式不统一、编号不连续、术语格式不一致、引用惯例不匹配 | 某段字体不统一、定义词漏加粗、编号跳跃 |
+   | **建议** | 改进建议，不影响签署 | 措辞优化、结构建议、额外注意事项 |
+   
+   ### 验收标准
+   
+   | 条件 | 不满足时的处理 |
+   |------|---------------|
+   | **零重大发现** — 无任何"重大"级别的审阅发现 | 退回 Drafter 修正 → 修正后重新走验证门 + 审阅 + 验收门 |
+   | **一般发现 ≤ 5 项 / 100 段** — 每 100 段不超过 5 项一般发现 | 超出阈值 → 退回 Drafter 系统性修正 → 重新审阅受影响部分 |
+   | **全部 Reviewer 返回报告** — Content + Format + TS + XRef 全覆盖 | 缺失的 Reviewer → 补派发 |
+   | **跨 Reviewer 发现无冲突** — 不同 Reviewer 的发现不互相矛盾（如 Content 说删某段，TS 说该段与 TS 一致） | 冲突项 → Coordinator 自行判断或询问用户 |
+   
+   ### 验收决策
+   
+   ```
+   全部条件满足
+     → ✅ 验收通过 → 进入交付门
+   
+   有重大发现
+     → ❌ 退回 Drafter 修正 → Drafter 自验收 → 验证门 → 重新审阅（至少审阅修正涉及的段落）
+   
+   一般发现超标
+     → ❌ 退回 Drafter 系统性修正 → Drafter 自验收 → 验证门 → 针对性复审
+   
+   仅有个别一般发现（≤ 阈值）
+     → ✅ 验收通过 + 将一般发现标记为"已知，后续修订时处理"
+     → 或：用户要求完美 → 退回修正一般发现
+   ```
+   
+   ### 验收通过声明
+   
+   Coordinator 确认验收通过后，记录：
+   
+   ```
+   [验收通过] 文档: {path} | 审阅轮次: {round}
+   - 重大发现: 0
+   - 一般发现: {n}（≤ 阈值 {threshold}）
+   - 建议: {m}
+   - Reviewer 覆盖: Content ✅ | Format ✅ | TS ✅ | XRef ✅
+   - 跨 Reviewer 冲突: 无
+   - 决策: 验收通过 / 进入交付门
+   ```
 
-6. 全部通过 → 告知用户可定稿
+5. 返工循环（验收未通过时触发）
+   如有重大发现或一般发现超标：
+   → Drafter 逐项修正（带 TC）→ Drafter 强制验证协议 → Drafter 自验收门
+   → Coordinator 验证门 → 针对性复审（仅审阅修正涉及的段落 + 审阅类型）
+   → 验收门
+   → 循环直到验收通过
+   → 注意：同一轮返工超过 3 次 → 停止！向用户报告瓶颈，不要继续盲目循环
+
+ 5.5. 门 3 — 交付门（Deliver Gate）
+   验收通过后、告知用户前，Coordinator 必须执行最终交付检查：
+   
+   ### 交付清单
+   
+   - [ ] **版本控制完整** — 项目 git repo 中所有修改已提交（`git log` 确认最新 commit 是本轮修改）
+   - [ ] **交付 tag 已打** — `deliver/<version>-<date>` tag 已创建（可通过 `lex_deliver` 自动创建或手动 `git tag`）
+   - [ ] **TC 已定稿** — 如用户指令为"定稿"，确认 TC 已 accept（`lex_doc(op="accept_all_tc")` 或等效操作）
+   - [ ] **最终文档可读** — `lex_read(path, show_tc="final")` 完整读取无报错，定稿态文本完整
+   - [ ] **批注已处理** — 审阅过程中产生的批注已清理或确认由用户处理
+   - [ ] **页眉页脚干净** — 无残留的 DRAFT 标记或陈旧页眉
+   - [ ] **交付文件路径明确** — 最终交付的 .docx 文件路径清晰，无歧义
+
+   ### 交付决策
+   
+   ```
+   全部通过 → 告知用户交付就绪 + 交付摘要
+   
+   任一项失败 → 修复 → 重新检查交付清单
+               → 如修复涉及内容修改 → 回到验证门重新走流程
+   ```
+
+6. 告知用户交付就绪
+   交付门通过后，向用户报告：
+   
+   ```
+   [交付就绪] 文档: {path}
+   - 版本: {version} | Tag: {deliver_tag}
+   - 修改轮次: {n} 轮
+   - 验收状态: ✅ 全部 Reviewer 通过
+   - 修改摘要: {简要描述改了什么}
+   - 已知事项: {如有遗留的一般发现或建议，在此列出}
+   - 交付文件: {绝对路径}
+   ```
 ```
 
 ### 修改已有文档
@@ -105,12 +199,22 @@ delegate_task(
 
 2. 用户提出修改需求
 
-3. Drafter 参考约定分析结果执行修改 → 强制验证协议 → 内容一体化验证 → 输出修订对照表 → Coordinator 确认验证通过
+3. Drafter 参考约定分析结果执行修改 → 强制验证协议 → 内容一体化验证 → 自验收门 → 输出修订对照表 + 自验收通过声明
 
-4. 审阅：
+4. Coordinator 验证门（门 1）→ 确认自验收声明完整后派发审阅
+
+5. 审阅：
    【文档 > 200 段】→ lex_proofread(path, review_type="all")
-   【文档 ≤ 200 段】→ 并行委派 Reviewer-Content + Reviewer-Format + Reviewer-XRef → 汇总报告
+   【文档 ≤ 200 段】→ 并行委派 Reviewer-Content + Reviewer-Format + Reviewer-TS + Reviewer-XRef → 汇总报告
    审阅时传入约定分析结果 + 修订对照表，供 Reviewer 验证有机整合质量和修改合理性
+
+6. 验收门（门 2）→ Coordinator 评估全部审阅发现，按验收标准决定验收/返工
+
+7. 返工循环（如验收未通过）→ Drafter 修正 → 自验收 → 验证门 → 复审 → 验收门
+
+8. 交付门（门 3）→ 最终检查（提交/tag/TC/可读/批注/页眉/路径）
+
+9. 告知用户交付就绪
 ```
 
 ### 全文审阅（文档 > 200 段，推荐路径）
@@ -345,6 +449,9 @@ NAFMII 模式下 `lex_proofread` 会：
 - **Drafter 必须输出修订对照表** — 每次修改后附带结构化对照表（§N: 原文→修订文+理由）。Coordinator 必须在验证门中检查对照表完整性。缺少对照表 → 退回补做。审阅时对照表传入 Reviewer context，作为了解修改内容的结构化入口。
 - **版本控制：每个会话结束前必须提交** — Coordinator 在完成一轮修改/审阅后，必须在项目 git repo 中提交变更（`git add -A && git commit -m "..."`）。提交信息格式：`<角色>: <文档名> — <修改摘要>`。未提交的会话工作不得视为完成。
 - **交付时必须打 tag** — 运行 `lex_deliver` 后，项目 repo 中自动创建 `deliver/<version>-<date>` 标签。Coordinator 确认交付前检查 tag 存在性。如需手动打 tag，使用 `git -C <项目目录> tag -a deliver/<version>-<date> -m "<说明>"`。
+- **不验收不交付** — 三道门缺一不可：门 1（验证门）确保 Drafter 自验收完整；门 2（验收门）确保全部 Reviewer 通过且无重大发现；门 3（交付门）确保版本控制/tag/文档可读性。任何一道门未通过，不得向用户报告交付就绪。
+- **验收门零重大发现** — 审阅发现任何"重大"级别问题（法律效力、金额、当事人、缺失必要条款、定义冲突），必须退回 Drafter 修正，不可带伤交付。
+- **返工限次** — 同一轮返工循环超过 3 次仍未通过验收门 → 停止循环，向用户报告瓶颈和未解决问题，由用户决定。
 
 ## 与用户对话的准则
 
