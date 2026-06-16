@@ -6852,7 +6852,7 @@ def _format_chatroom_msg(cm: _ChatroomMsg) -> dict:
     kind: str
     if cm.msg_type == "system":
         kind = "system"
-    elif cm.msg_type == "thinking":
+    elif cm.msg_type in ("thinking", "thinking_end"):
         kind = "status"
     elif cm.role == "bot":
         kind = "bot"
@@ -7111,11 +7111,88 @@ async def _handle_chatroom_mention(
     ))
     await _chatroom_broadcast(room_id, thinking_msg)
 
-    # Generate reply (simulated for now, real Hermes CLIsubprocess later)
+    # Build prompt and call Hermes CLI
+    prompt = (
+        f"The user @mentioned you in the chatroom. "
+        f"Reply helpfully as {bot_name} ({profile}).\n"
+        f"Sender: {sender}\n"
+        f"Message: {user_message}\n"
+        f"Reply directly (do NOT include @-name prefix):"
+    )
+
+    _log.info("CHATROOM MENTION bot=%s room=%s sender=%s msg_len=%d",
+              bot_name, room_id, sender, len(user_message))
     try:
-        reply = f"[{display_name}] Simulation mode — I received: \"{user_message[:150]}\" and would respond as {profile}."
-    except Exception:
-        reply = f"[{display_name}] Error processing your request."
+        # Use venv hermes directly — the shim may drop privs/chdir unexpectedly
+        hermes_bin = os.environ.get("HERMES_VENV_BIN", "/opt/hermes/.venv/bin/hermes")
+        proc = await asyncio.create_subprocess_exec(
+            hermes_bin,
+            "-p", profile,
+            "chat",
+            "-q", prompt,
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _log.info("CHATROOM MENTION bot=%s pid=%d spawned, waiting...", bot_name, proc.pid)
+        stdout, stderr = await asyncio.wait_for(
+            proc.communicate(), timeout=120,
+        )
+        _log.info("CHATROOM MENTION bot=%s pid=%d rc=%d out_len=%d err_len=%d",
+                  bot_name, proc.pid, proc.returncode,
+                  len(stdout) if stdout else 0, len(stderr) if stderr else 0)
+        if proc.returncode != 0:
+            err = (stderr or b"").decode(errors="replace").strip()
+            reply = f"[{display_name}] Error: Hermes exited {proc.returncode}: {err[:200]}"
+        else:
+            out = ((stdout or b"") + (stderr or b"")).decode(errors="replace")
+            # Extract the agent response from between the box-drawing markers
+            # Box openers: ╭─ ... ─╮ (U+256D ... U+256E)
+            # Box closers: ╰─ ... ─╯ (U+2570 ... U+256F)
+            import re as _re
+            m = _re.search(r"╭─.+─╮\s*\n(.*?)\n\s*╰", out, _re.DOTALL)
+            if m:
+                reply = m.group(1).strip()
+            else:
+                # Fallback: take everything between the separator line and the resume hint
+                lines = out.split("\n")
+                cleaned: list[str] = []
+                started = False
+                for line in lines:
+                    s = line.strip()
+                    if not started:
+                        if s.startswith("──") or s.startswith("╭"):
+                            started = True
+                        continue
+                    if s.startswith("Resume this") or s.startswith("Session:") or s.startswith("Duration:"):
+                        break
+                    if s.startswith("╰"):  # box closer
+                        continue
+                    cleaned.append(line)
+                reply = "\n".join(cleaned).strip()
+            if not reply:
+                reply = f"[{display_name}] (empty response)"
+    except asyncio.TimeoutError:
+        _log.warning("CHATROOM MENTION bot=%s TIMEOUT", bot_name)
+        reply = f"[{display_name}] Timed out after 120s"
+    except FileNotFoundError:
+        _log.error("CHATROOM MENTION bot=%s hermes binary not found", bot_name)
+        reply = f"[{display_name}] Hermes binary not found"
+    except Exception as e:
+        _log.exception("CHATROOM MENTION bot=%s ERROR", bot_name)
+        reply = f"[{display_name}] Error: {e}"
+
+    # Send thinking_end
+    thinking_end_msg = _format_chatroom_msg(_ChatroomMsg(
+        id=f"think-end-{int(time.time() * 1000)}-{bot_name}",
+        msg_type="thinking_end",
+        username=bot_name,
+        content="",
+        timestamp=time.time(),
+        role="bot",
+        profile=profile,
+    ))
+    await _chatroom_broadcast(room_id, thinking_end_msg)
 
     # Send reply
     reply_msg = _format_chatroom_msg(_ChatroomMsg(
