@@ -6803,6 +6803,8 @@ async def _spawn_bot_worker(
 
         # Build the WS URL the bot connects back to
         host = getattr(app.state, "bound_host", "127.0.0.1")
+        if host in ("0.0.0.0", "::"):
+            host = "127.0.0.1"
         port = getattr(app.state, "bound_port", 9119)
         ws_url = f"ws://{host}:{port}/ws/chatroom/{room_id}"
 
