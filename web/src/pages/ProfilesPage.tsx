@@ -17,6 +17,7 @@ import spinners from "unicode-animations";
 import { H2 } from "@nous-research/ui/ui/components/typography/h2";
 import { api } from "@/lib/api";
 import type { ProfileInfo } from "@/lib/api";
+import { useAsync } from "@/hooks/useAsync";
 import { DeleteConfirmDialog } from "@/components/DeleteConfirmDialog";
 import { useToast } from "@nous-research/ui/hooks/use-toast";
 import { useConfirmDelete } from "@nous-research/ui/hooks/use-confirm-delete";
@@ -66,8 +67,10 @@ function ProfilesLoadingSpinner() {
 }
 
 export default function ProfilesPage() {
-  const [profiles, setProfiles] = useState<ProfileInfo[]>([]);
-  const [loading, setLoading] = useState(true);
+  const { data: profilesRaw, loading, refetch: load } = useAsync(
+    () => api.getProfiles().then((r) => r.profiles),
+  );
+  const profiles = profilesRaw ?? [];
   const { toast, showToast } = useToast();
   const { t } = useI18n();
   const { setEnd } = usePageHeader();
@@ -95,17 +98,6 @@ export default function ProfilesPage() {
   // newer state when the user switches profiles or closes the editor.
   const activeSoulRequest = useRef<string | null>(null);
 
-  const load = useCallback(() => {
-    api
-      .getProfiles()
-      .then((res) => setProfiles(res.profiles))
-      .catch((e) => showToast(`${t.status.error}: ${e}`, "error"))
-      .finally(() => setLoading(false));
-  }, [showToast, t.status.error]);
-
-  useEffect(() => {
-    load();
-  }, [load]);
 
   const handleCreate = async () => {
     const name = newName.trim();

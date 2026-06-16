@@ -38,6 +38,7 @@ import { ListItem } from "@nous-research/ui/ui/components/list-item";
 import { useToast } from "@nous-research/ui/hooks/use-toast";
 import { usePageHeader } from "@/contexts/usePageHeader";
 import { PluginSlot } from "@/plugins";
+import { useAsync } from "@/hooks/useAsync";
 
 // ---------------------------------------------------------------------------
 // Quick action pill
@@ -61,9 +62,11 @@ const QUICK_ACTIONS: QuickAction[] = [
 // ---------------------------------------------------------------------------
 
 export default function LaunchPad() {
-  const [projects, setProjects] = useState<ProjectInfo[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const {
+    data: projectsRaw, loading, error,
+    refetch: loadProjects,
+  } = useAsync(() => api.fetchProjects().then(d => d.projects ?? []));
+  const projects = projectsRaw ?? [];
   const [search, setSearch] = useState("");
   const [selectedId, setSelectedId] = useState<string | null>(null);
 
@@ -82,25 +85,6 @@ export default function LaunchPad() {
   const { showToast } = useToast();
   const { setAfterTitle, setEnd } = usePageHeader();
 
-  // ── Load projects ──────────────────────────────────────────────────
-
-  const loadProjects = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const data = await api.fetchProjects();
-      setProjects(data.projects ?? []);
-    } catch (e: any) {
-      setError(e?.message ?? "Failed to load projects");
-      setProjects([]);
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    loadProjects();
-  }, [loadProjects]);
 
   // ── Page header ────────────────────────────────────────────────────
 

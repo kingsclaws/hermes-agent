@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from "react";
+import { useState, useCallback } from "react";
 import {
   FolderKanban,
   Plus,
@@ -25,6 +25,7 @@ import { DeleteConfirmDialog } from "@/components/DeleteConfirmDialog";
 import { useConfirmDelete } from "@nous-research/ui/hooks/use-confirm-delete";
 import { useToast } from "@nous-research/ui/hooks/use-toast";
 import { PluginSlot } from "@/plugins";
+import { useAsync } from "@/hooks/useAsync";
 
 interface CreateForm {
   project_name: string;
@@ -43,13 +44,15 @@ const EMPTY_FORM: CreateForm = {
 };
 
 export default function ProjectsPage() {
-  const [projects, setProjects] = useState<ProjectInfo[]>([]);
-  const [loading, setLoading] = useState(true);
+  const {
+    data: projectsRaw, loading, error,
+    refetch: loadProjects, setData: setProjects,
+  } = useAsync(() => api.fetchProjects().then(d => d.projects ?? []));
+  const projects = projectsRaw ?? [];
   const [search, setSearch] = useState("");
   const [showCreate, setShowCreate] = useState(false);
   const [form, setForm] = useState<CreateForm>(EMPTY_FORM);
   const [creating, setCreating] = useState(false);
-  const [error, setError] = useState<string | null>(null);
   const navigate = useNavigate();
 
   const { toast, showToast } = useToast();
@@ -58,7 +61,7 @@ export default function ProjectsPage() {
       async (id: string) => {
         try {
           await api.deleteProject(id);
-          setProjects((prev) => prev.filter((p) => p.id !== id));
+          setProjects((prev) => (prev ?? []).filter((p) => p.id !== id));
           showToast("Project deleted", "success");
         } catch (e: any) {
           showToast(e?.message ?? "Delete failed", "error");
@@ -69,23 +72,6 @@ export default function ProjectsPage() {
     ),
   });
 
-  const loadProjects = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const data = await api.fetchProjects();
-      setProjects(data.projects ?? []);
-    } catch (e: any) {
-      setError(e?.message ?? "Failed to load projects");
-      setProjects([]);
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    loadProjects();
-  }, [loadProjects]);
 
   const handleCreate = async () => {
     if (!form.project_name.trim() || !form.dir_path.trim()) return;

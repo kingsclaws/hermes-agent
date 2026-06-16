@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useState, useMemo } from "react";
+import { useLayoutEffect, useState, useMemo } from "react";
 import {
   Package,
   Search,
@@ -30,6 +30,7 @@ import { Input } from "@nous-research/ui/ui/components/input";
 import { useI18n } from "@/i18n";
 import { usePageHeader } from "@/contexts/usePageHeader";
 import { PluginSlot } from "@/plugins";
+import { useAsync } from "@/hooks/useAsync";
 
 /* ------------------------------------------------------------------ */
 /*  Types & helpers                                                    */
@@ -94,9 +95,12 @@ function toolsetIcon(
 /* ------------------------------------------------------------------ */
 
 export default function SkillsPage() {
-  const [skills, setSkills] = useState<SkillInfo[]>([]);
-  const [toolsets, setToolsets] = useState<ToolsetInfo[]>([]);
-  const [loading, setLoading] = useState(true);
+  const { data: skillsData, loading, setData: setSkillsData } = useAsync(
+    () => Promise.all([api.getSkills(), api.getToolsets()])
+      .then(([s, t]) => ({ skills: s, toolsets: t })),
+  );
+  const skills = skillsData?.skills ?? [];
+  const toolsets = skillsData?.toolsets ?? [];
   const [search, setSearch] = useState("");
   const [view, setView] = useState<"skills" | "toolsets">("skills");
   const [activeCategory, setActiveCategory] = useState<string | null>(null);
@@ -105,25 +109,21 @@ export default function SkillsPage() {
   const { t } = useI18n();
   const { setAfterTitle, setEnd } = usePageHeader();
 
-  useEffect(() => {
-    Promise.all([api.getSkills(), api.getToolsets()])
-      .then(([s, tsets]) => {
-        setSkills(s);
-        setToolsets(tsets);
-      })
-      .catch(() => showToast(t.common.loading, "error"))
-      .finally(() => setLoading(false));
-  }, []);
 
   /* ---- Toggle skill ---- */
   const handleToggleSkill = async (skill: SkillInfo) => {
     setTogglingSkills((prev) => new Set(prev).add(skill.name));
     try {
       await api.toggleSkill(skill.name, !skill.enabled);
-      setSkills((prev) =>
-        prev.map((s) =>
-          s.name === skill.name ? { ...s, enabled: !s.enabled } : s,
-        ),
+      setSkillsData((prev) =>
+        prev
+          ? {
+              ...prev,
+              skills: prev.skills.map((s) =>
+                s.name === skill.name ? { ...s, enabled: !s.enabled } : s,
+              ),
+            }
+          : prev,
       );
       showToast(
         `${skill.name} ${skill.enabled ? t.common.disabled : t.common.enabled}`,

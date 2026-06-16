@@ -231,6 +231,12 @@ const LEX_WORKSPACE_NAV: NavItem[] = [
     icon: MessageSquare,
   },
   {
+    path: "/kanban",
+    labelKey: "kanban",
+    label: "Kanban",
+    icon: KanbanSquare,
+  },
+  {
     path: "/projects",
     labelKey: "projects",
     label: "Projects",
