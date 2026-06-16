@@ -581,6 +581,25 @@ export const api = {
   listBots: () =>
     fetchJSON<BotListResponse>("/api/bots"),
 
+  // ── Chatroom (standalone multi-bot, no kanban) ──
+
+  fetchChatroomBots: () =>
+    fetchJSON<ChatroomBotsResponse>("/api/chatroom/bots"),
+
+  createChatroom: (roomId: string, projectId?: string, workflowId?: string, params?: Record<string, unknown>) =>
+    fetchJSON<CreateChatroomResponse>(
+      `/api/chatroom/${encodeURIComponent(roomId)}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          project_id: projectId || "",
+          workflow_id: workflowId || "",
+          params: params || {},
+        }),
+      },
+    ),
+
   // ── SessionDB legal workflows (persistent step-based) ──
 
   fetchProjectWorkflows: (projectId: string, limit?: number) => {
@@ -1187,6 +1206,32 @@ export interface RoomStatusResponse {
 export interface BotListResponse {
   ok: boolean;
   bots: BotInfo[];
+}
+
+export interface ChatroomBotEntry {
+  id: string;
+  name: string;
+  kind: string;
+  icon: string;
+  profile: string;
+}
+
+export interface ChatroomBotsResponse {
+  ok: boolean;
+  bots: ChatroomBotEntry[];
+}
+
+export interface CreateChatroomResponse {
+  ok: boolean;
+  room_id: string;
+  bots: Array<{ id: string; name: string; kind: string }>;
+  kanban?: {
+    board: string;
+    run_id: string;
+    workflow_id: string;
+    root_task_id: string;
+    node_count: number;
+  } | null;
 }
 
 export interface FileEntry {

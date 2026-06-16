@@ -6696,6 +6696,446 @@ async def room_ws(ws: WebSocket, board: str, run_id: str) -> None:
                     _schedule_room_gc(room_id)
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# Standalone chatroom WebSocket — real-time multi-bot chat, no kanban dep.
+# ═══════════════════════════════════════════════════════════════════════════
+
+# In-memory chatroom state — simpler than RoomState since no kanban polling.
+_CHATROOMS: dict[str, "ChatRoom"] = {}
+_CHATROOMS_LOCK = asyncio.Lock()
+_CHATROOM_GC_SECONDS = 600  # 10 min idle before GC
+
+
+@dataclass
+class ChatRoom:
+    room_id: str
+    subscribers: set[WebSocket] = field(default_factory=set)
+    # In-memory message log for replay on join
+    messages: list[dict] = field(default_factory=list)
+    max_messages: int = 200
+    # Subprocesses for bot workers
+    bot_procs: dict[str, "asyncio.subprocess.Process"] = field(default_factory=dict)
+    gc_timer: "asyncio.Task | None" = None
+    created_at: float = field(default_factory=time.time)
+
+
+def _chatroom_gc_after_delay(room_id: str) -> None:
+    """Caller must hold _CHATROOMS_LOCK when calling but NOT when scheduling."""
+
+    async def _gc():
+        await asyncio.sleep(_CHATROOM_GC_SECONDS)
+        async with _CHATROOMS_LOCK:
+            room = _CHATROOMS.get(room_id)
+            if room is None:
+                return
+            if room.subscribers:
+                return
+            # Kill any lingering bot processes
+            for name, proc in list(room.bot_procs.items()):
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+            _CHATROOMS.pop(room_id, None)
+
+    room = _CHATROOMS.get(room_id)
+    if room is not None:
+        room.gc_timer = asyncio.create_task(_gc())
+
+
+# Bot profiles that are auto-spawned when a chatroom comes alive
+_CHATROOM_BOT_PROFILES = {
+    "lex-coordinator": "Gavel",
+    "lex-drafter": "PenTool",
+    "lex-reviewer-content": "Search",
+    "lex-reviewer-format": "Layout",
+    "lex-reviewer-xref": "Link",
+    "lex-reviewer-ts": "FileText",
+}
+
+
+@dataclass
+class ChatRoomBot:
+    id: str
+    name: str
+    icon: str
+    profile: str
+    kind: str
+
+
+def _get_available_bots() -> list[ChatRoomBot]:
+    """Return the list of available legal bot profiles for chatroom."""
+    bots: list[ChatRoomBot] = []
+    for profile, icon in _CHATROOM_BOT_PROFILES.items():
+        name = profile.replace("lex-", "").replace("-", " ").title()
+        kind = ""
+        if "coordinator" in profile:
+            kind = "coordinator"
+        elif "drafter" in profile:
+            kind = "worker"
+        elif "reviewer" in profile:
+            kind = "reviewer"
+        bots.append(ChatRoomBot(
+            id=profile,
+            name=name,
+            icon=icon,
+            profile=profile,
+            kind=kind,
+        ))
+    return bots
+
+
+async def _spawn_bot_worker(
+    room_id: str,
+    bot_profile: str,
+    bot_name: str,
+) -> "asyncio.subprocess.Process | None":
+    """Spawn a chatroom bot worker subprocess that connects back to the room WS."""
+    try:
+        from hermes_cli.main import PROJECT_ROOT
+
+        python = sys.executable
+        worker_path = Path(__file__).parent / "chatroom_bot.py"
+
+        if not worker_path.exists():
+            _log.warning("chatroom_bot.py not found at %s", worker_path)
+            return None
+
+        # Build the WS URL the bot connects back to
+        host = getattr(app.state, "bound_host", "127.0.0.1")
+        port = getattr(app.state, "bound_port", 9119)
+        ws_url = f"ws://{host}:{port}/ws/chatroom/{room_id}"
+
+        env = os.environ.copy()
+        env["BOT_PROFILE"] = bot_profile
+        env["BOT_NAME"] = bot_name
+        env["ROOM_ID"] = room_id
+        env["RELAY_WS_URL"] = ws_url
+        env["HERMES_SESSION_TOKEN"] = _SESSION_TOKEN
+
+        proc = await asyncio.create_subprocess_exec(
+            python,
+            str(worker_path),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env,
+        )
+        _log.info("Spawned chatroom bot %s (pid=%d) for room %s", bot_name, proc.pid, room_id)
+        return proc
+    except Exception:
+        _log.exception("Failed to spawn bot %s for room %s", bot_name, room_id)
+        return None
+
+
+@dataclass
+class _ChatroomMsg:
+    id: str
+    msg_type: str  # "message", "system", "thinking"
+    username: str
+    content: str
+    timestamp: float
+    role: str = "user"
+    profile: str = ""
+
+
+def _format_chatroom_msg(cm: _ChatroomMsg) -> dict:
+    kind: str
+    if cm.msg_type == "system":
+        kind = "system"
+    elif cm.msg_type == "thinking":
+        kind = "status"
+    elif cm.role == "bot":
+        kind = "bot"
+    else:
+        kind = "user"
+    return {
+        "id": cm.id,
+        "kind": kind,
+        "text": cm.content,
+        "sender": cm.username,
+        "senderProfile": cm.profile or cm.username,
+        "timestamp": cm.timestamp,
+    }
+
+
+@app.websocket("/ws/chatroom/{room_id}")
+async def chatroom_ws(ws: WebSocket, room_id: str) -> None:
+    """Standalone multi-bot chatroom WebSocket.
+
+    No kanban dependency — messages are relayed in real-time between
+    connected clients. Bot workers connect back to this WS and respond
+    to @mentions via Hermes CLIsubprocesses.
+    """
+    if not await _ws_auth_ok(ws):
+        return
+
+    # Validate room_id
+    if not re.match(r"^[a-zA-Z0-9_.-]+$", room_id):
+        await ws.close(code=4400, reason="Invalid room_id")
+        return
+
+    my_username = ""
+    my_role = "user"
+
+    try:
+        await ws.accept()
+
+        # ── Read loop ───────────────────────────────────────────────────
+        async for raw in ws.iter_json():
+            msg_type = (raw.get("type") or "").strip()
+            if not msg_type:
+                continue
+
+            if msg_type == "join":
+                my_username = (raw.get("username") or f"user-{id(ws):x}").strip()
+                my_role = (raw.get("role") or "user").strip()
+                bot_profile = (raw.get("profile") or "").strip()
+
+                async with _CHATROOMS_LOCK:
+                    if room_id not in _CHATROOMS:
+                        _CHATROOMS[room_id] = ChatRoom(room_id=room_id)
+                        # Cancel any lingering GC timer
+                        if _CHATROOMS[room_id].gc_timer:
+                            _CHATROOMS[room_id].gc_timer.cancel()
+                    room = _CHATROOMS[room_id]
+                    room.subscribers.add(ws)
+
+                # Send history replay to the joining client
+                async with _CHATROOMS_LOCK:
+                    history = list(room.messages[-100:])
+
+                if history:
+                    await ws.send_json({
+                        "id": f"replay-{int(time.time())}",
+                        "kind": "system",
+                        "text": "",
+                        "sender": "",
+                        "timestamp": time.time(),
+                        "_replay": history,
+                    })
+
+                # Broadcast join to others if it's a user (not a bot)
+                if my_role != "bot":
+                    join_msg = _ChatroomMsg(
+                        id=f"join-{int(time.time())}",
+                        msg_type="system",
+                        username="system",
+                        content=f"{my_username} joined the room",
+                        timestamp=time.time(),
+                    )
+                    async with _CHATROOMS_LOCK:
+                        room.messages.append({
+                            "id": join_msg.id,
+                            "type": "system",
+                            "username": join_msg.username,
+                            "content": join_msg.content,
+                            "timestamp": join_msg.timestamp,
+                        })
+                        room.messages = room.messages[-room.max_messages:]
+                    fmtd = _format_chatroom_msg(join_msg)
+                    await _chatroom_broadcast(room_id, fmtd, exclude={ws})
+
+                # Auto-spawn bot workers if this is the first user
+                if my_role != "bot":
+                    await _chatroom_ensure_bots(room_id)
+
+            elif msg_type == "message":
+                content = (raw.get("content") or "").strip()
+                if not content:
+                    continue
+
+                msg = _ChatroomMsg(
+                    id=f"msg-{int(time.time() * 1000)}-{id(ws):x}",
+                    msg_type="message",
+                    username=my_username,
+                    content=content,
+                    timestamp=time.time(),
+                    role=my_role,
+                )
+
+                # Persist to in-memory log
+                async with _CHATROOMS_LOCK:
+                    room = _CHATROOMS.get(room_id)
+                    if room:
+                        room.messages.append({
+                            "id": msg.id,
+                            "type": "message",
+                            "username": msg.username,
+                            "content": msg.content,
+                            "timestamp": msg.timestamp,
+                            "role": msg.role,
+                        })
+                        room.messages = room.messages[-room.max_messages:]
+
+                fmtd = _format_chatroom_msg(msg)
+                await _chatroom_broadcast(room_id, fmtd)
+
+            elif msg_type == "thinking" or msg_type == "thinking_end":
+                # Relay thinking status from bots to all subscribers
+                fmtd = _format_chatroom_msg(_ChatroomMsg(
+                    id=f"think-{int(time.time() * 1000)}",
+                    msg_type=msg_type,
+                    username=raw.get("username", ""),
+                    content=raw.get("status", raw.get("content", "")),
+                    timestamp=time.time(),
+                    role="bot",
+                    profile=raw.get("profile", ""),
+                ))
+                await _chatroom_broadcast(room_id, fmtd)
+
+            elif msg_type == "replay":
+                # Client requests replay — resend history
+                async with _CHATROOMS_LOCK:
+                    room = _CHATROOMS.get(room_id)
+                    history = list(room.messages[-100:]) if room else []
+                if history:
+                    await ws.send_json({
+                        "id": f"replay-{int(time.time())}",
+                        "kind": "system",
+                        "text": "",
+                        "sender": "",
+                        "timestamp": time.time(),
+                        "_replay": history,
+                    })
+
+    except WebSocketDisconnect:
+        pass
+    finally:
+        async with _CHATROOMS_LOCK:
+            room = _CHATROOMS.get(room_id)
+            if room:
+                room.subscribers.discard(ws)
+                # Broadcast leave
+                if my_username and my_role != "bot":
+                    leave_msg = _format_chatroom_msg(_ChatroomMsg(
+                        id=f"leave-{int(time.time())}",
+                        msg_type="system",
+                        username="system",
+                        content=f"{my_username} left the room",
+                        timestamp=time.time(),
+                    ))
+                    await _chatroom_broadcast(room_id, leave_msg)
+                if not room.subscribers:
+                    _chatroom_gc_after_delay(room_id)
+
+
+async def _chatroom_broadcast(
+    room_id: str,
+    msg: dict,
+    *,
+    exclude: set[WebSocket] | None = None,
+) -> None:
+    """Send a JSON message to all subscribers of a chatroom."""
+    ex = exclude or set()
+    async with _CHATROOMS_LOCK:
+        room = _CHATROOMS.get(room_id)
+        if room is None:
+            return
+        subs = list(room.subscribers)
+    for ws in subs:
+        if ws in ex:
+            continue
+        try:
+            await ws.send_json(msg)
+        except Exception:
+            pass
+
+
+async def _chatroom_ensure_bots(room_id: str) -> None:
+    """Ensure bot worker subprocesses are spawned for a chatroom."""
+    async with _CHATROOMS_LOCK:
+        room = _CHATROOMS.get(room_id)
+        if room is None:
+            return
+        # Only spawn bots once
+        if room.bot_procs:
+            return
+
+    bots = _get_available_bots()
+    for bot in bots:
+        proc = await _spawn_bot_worker(room_id, bot.profile, bot.id)
+        if proc:
+            async with _CHATROOMS_LOCK:
+                room = _CHATROOMS.get(room_id)
+                if room:
+                    room.bot_procs[bot.id] = proc
+
+
+@app.get("/api/chatroom/bots")
+async def list_chatroom_bots():
+    """Return available legal chatroom bot profiles."""
+    return {
+        "ok": True,
+        "bots": [
+            {
+                "id": b.id,
+                "name": b.name,
+                "kind": b.kind,
+                "icon": b.icon,
+                "profile": b.profile,
+            }
+            for b in _get_available_bots()
+        ],
+    }
+
+
+@app.post("/api/chatroom/{room_id}")
+async def create_chatroom(room_id: str, request: Request):
+    """Create or get a chatroom. Returns room info.
+
+    Body (optional): {project_id: str, workflow_id: str} — if both provided,
+    also compiles a kanban workflow and links it to the room.
+    """
+    if not re.match(r"^[a-zA-Z0-9_.-]+$", room_id):
+        raise HTTPException(status_code=400, detail="Invalid room_id")
+
+    kanban_info: dict = {}
+    body: dict = {}
+    try:
+        body = await request.json() or {}
+    except Exception:
+        pass
+
+    project_id = (body.get("project_id") or "").strip()
+    workflow_id = (body.get("workflow_id") or "").strip()
+
+    if project_id and workflow_id:
+        try:
+            from hermes_cli.kanban_legal_swarm import compile_workflow
+
+            project = _resolve_project(project_id)
+            if not project:
+                raise HTTPException(status_code=404, detail="Project not found")
+            project_dir = project.get("cwd") or project.get("directory") or ""
+            run = compile_workflow(
+                project_dir=project_dir,
+                workflow_id=workflow_id,
+                params=body.get("params") or {},
+            )
+            kanban_info = {
+                "board": run.board,
+                "run_id": run.run_id,
+                "workflow_id": run.workflow_id,
+                "root_task_id": run.root_task_id,
+                "node_count": len(run.node_mappings),
+            }
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        except Exception as e:
+            _log.exception("compile_workflow failed for chatroom %s", room_id)
+            raise HTTPException(status_code=500, detail=str(e))
+
+    return {
+        "ok": True,
+        "room_id": room_id,
+        "bots": [
+            {"id": b.id, "name": b.name, "kind": b.kind}
+            for b in _get_available_bots()
+        ],
+        "kanban": kanban_info or None,
+    }
+
+
 def _normalise_prefix(raw: Optional[str]) -> str:
     """Normalise an X-Forwarded-Prefix header value.
 

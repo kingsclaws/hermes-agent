@@ -7,6 +7,7 @@ FROM ${BASE_IMAGE}
 COPY hermes_cli/kanban_db.py /opt/hermes/hermes_cli/kanban_db.py
 COPY hermes_cli/kanban_legal_swarm.py /opt/hermes/hermes_cli/kanban_legal_swarm.py
 COPY hermes_cli/web_server.py /opt/hermes/hermes_cli/web_server.py
+COPY hermes_cli/chatroom_bot.py /opt/hermes/hermes_cli/chatroom_bot.py
 
 # Pre-built frontend
 COPY hermes_cli/web_dist/ /opt/hermes/hermes_cli/web_dist/
@@ -15,4 +16,5 @@ COPY hermes_cli/web_dist/ /opt/hermes/hermes_cli/web_dist/
 RUN cp /opt/hermes/hermes_cli/kanban_db.py /opt/lex-hermes/hermes_cli/kanban_db.py && \
     cp /opt/hermes/hermes_cli/kanban_legal_swarm.py /opt/lex-hermes/hermes_cli/kanban_legal_swarm.py && \
     cp /opt/hermes/hermes_cli/web_server.py /opt/lex-hermes/hermes_cli/web_server.py && \
+    cp /opt/hermes/hermes_cli/chatroom_bot.py /opt/lex-hermes/hermes_cli/chatroom_bot.py && \
     cp -a /opt/hermes/hermes_cli/web_dist/. /opt/lex-hermes/hermes_cli/web_dist/

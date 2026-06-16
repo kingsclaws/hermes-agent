@@ -20,13 +20,10 @@ import {
   Wifi,
   WifiOff,
   Play,
-  Building2,
-  ChevronRight,
-  MessagesSquare,
 } from "lucide-react";
 import { api } from "@/lib/api";
-import type { RoomMessage, BotInfo, ProjectInfo, WorkflowDefinition } from "@/lib/api";
-import { RoomClient } from "@/lib/roomClient";
+import type { RoomMessage, BotInfo } from "@/lib/api";
+import { ChatroomClient } from "@/lib/roomClient";
 import type { ConnectionState } from "@/lib/roomClient";
 import { cn } from "@/lib/utils";
 import { Button } from "@nous-research/ui/ui/components/button";
@@ -35,7 +32,6 @@ import { Spinner } from "@nous-research/ui/ui/components/spinner";
 import { useToast } from "@nous-research/ui/hooks/use-toast";
 import { Markdown } from "@/components/Markdown";
 import { PluginSlot } from "@/plugins";
-import { Card, CardContent } from "@nous-research/ui/ui/components/card";
 
 // ---------------------------------------------------------------------------
 // Bot avatar icon mapping
@@ -400,74 +396,45 @@ export default function LegalSwarmChat() {
   const board = searchParams.get("board") ?? "";
   const runId = searchParams.get("run") ?? "";
 
+  const isWorkflowRoom = !!(board && runId);
   const [messages, setMessages] = useState<RoomMessage[]>([]);
   const [bots, setBots] = useState<BotInfo[]>([]);
   const [input, setInput] = useState("");
   const [connectionState, setConnectionState] = useState<ConnectionState>("idle");
   const [statusLoading, setStatusLoading] = useState(true);
-  const [compiling] = useState(false);
+  const [compiling, setCompiling] = useState(false);
   const { showToast } = useToast();
   const navigate = useNavigate();
 
-  // ── Launcher state (when no board/run in URL) ────────────────────────
-
-  const [projects, setProjects] = useState<ProjectInfo[]>([]);
-  const [workflowDefs, setWorkflowDefs] = useState<WorkflowDefinition[]>([]);
-  const [selectedProjectId, setSelectedProjectId] = useState("");
-  const [selectedWorkflowId, setSelectedWorkflowId] = useState("");
-  const [launching, setLaunching] = useState(false);
-
-  useEffect(() => {
-    if (board && runId) return;
-    api.fetchProjects().then((d) => {
-      setProjects(d.projects ?? []);
-      if ((d.projects ?? []).length > 0) setSelectedProjectId(d.projects[0].id);
-    }).catch(() => {});
-    api.fetchWorkflowDefinitions().then((d) => {
-      setWorkflowDefs(d.definitions ?? []);
-      if ((d.definitions ?? []).length > 0) setSelectedWorkflowId(d.definitions[0].id);
-    }).catch(() => {});
-  }, [board, runId]);
-
-  const handleLaunch = useCallback(async () => {
-    if (!selectedProjectId || !selectedWorkflowId || launching) return;
-    setLaunching(true);
-    try {
-      const result = await api.createRoom(selectedProjectId, selectedWorkflowId);
-      navigate(
-        `/swarm-chat?board=${encodeURIComponent(result.board)}&run=${encodeURIComponent(result.run_id)}`,
-      );
-    } catch (e: any) {
-      showToast(e?.message ?? "Failed to create chat room", "error");
-      setLaunching(false);
-    }
-  }, [selectedProjectId, selectedWorkflowId, launching, navigate, showToast]);
-
-  const clientRef = useRef<RoomClient | null>(null);
+  const clientRef = useRef<ChatroomClient | null>(null);
   const msgIdSet = useRef<Set<string>>(new Set());
 
-  // ── Connect room client ───────────────────────────────────────────────
+  // ── Connect room / chatroom ────────────────────────────────────────────
 
   useEffect(() => {
-    if (!board || !runId) return;
-
-    const client = new RoomClient();
+    const client = new ChatroomClient();
     clientRef.current = client;
 
     client.onState((s) => setConnectionState(s));
 
     client.onMessage((msg) => {
       setMessages((prev) => {
-        // Deduplicate by message id
         if (msgIdSet.current.has(msg.id)) return prev;
         msgIdSet.current.add(msg.id);
         return [...prev, msg];
       });
     });
 
-    client.connect(board, runId).catch((e) => {
-      showToast(e?.message ?? "Failed to connect to room", "error");
-    });
+    if (isWorkflowRoom) {
+      client.connect(board, runId).catch((e) => {
+        showToast(e?.message ?? "Failed to connect to room", "error");
+      });
+    } else {
+      // Auto-join the default chatroom
+      client.connectChatroom("main").catch((e) => {
+        showToast(e?.message ?? "Failed to connect to chatroom", "error");
+      });
+    }
 
     return () => {
       client.close();
@@ -476,52 +443,67 @@ export default function LegalSwarmChat() {
     };
   }, [board, runId]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // ── Load bots + room status ───────────────────────────────────────────
+  // ── Load bots ──────────────────────────────────────────────────────────
 
   useEffect(() => {
-    if (!board || !runId) return;
     let cancelled = false;
 
     async function load() {
       try {
-        const status = await api.getRoomStatus(board, runId);
-        if (cancelled) return;
-        setBots(status.bots);
-      } catch {
-        // Room or run may not exist yet
-      } finally {
-        if (!cancelled) setStatusLoading(false);
-      }
+        if (isWorkflowRoom) {
+          const status = await api.getRoomStatus(board, runId);
+          if (cancelled) return;
+          setBots(status.bots);
+        } else {
+          const res = await api.fetchChatroomBots();
+          if (cancelled) return;
+          setBots((res.bots ?? []).map((b) => ({
+            id: b.id,
+            name: b.name,
+            kind: b.kind,
+            icon: b.icon,
+            profile: b.profile,
+          } as BotInfo)));
+        }
+      } catch { /* ignore */ }
+      finally { if (!cancelled) setStatusLoading(false); }
     }
     load();
 
-    // Auto-refresh bot status every 15s
     const timer = setInterval(async () => {
       try {
-        const status = await api.getRoomStatus(board, runId);
-        setBots(status.bots);
+        if (isWorkflowRoom) {
+          const status = await api.getRoomStatus(board, runId);
+          setBots(status.bots);
+        } else {
+          const res = await api.fetchChatroomBots();
+          setBots((res.bots ?? []).map((b) => ({
+            id: b.id,
+            name: b.name,
+            kind: b.kind,
+            icon: b.icon,
+            profile: b.profile,
+          } as BotInfo)));
+        }
       } catch { /* ignore */ }
-    }, 15000);
+    }, 30000);
 
-    return () => {
-      cancelled = true;
-      clearInterval(timer);
-    };
-  }, [board, runId]);
+    return () => { cancelled = true; clearInterval(timer); };
+  }, [board, runId, isWorkflowRoom]);
 
-  // ── Load historical messages on first load ────────────────────────────
+  // ── Load historical messages (workflow rooms only) ────────────────────
 
   useEffect(() => {
-    if (!board || !runId) return;
+    if (!isWorkflowRoom) return;
     api.getRoomMessages(board, runId).then((res) => {
       setMessages((prev) => {
-        if (prev.length > 0) return prev; // already have WS messages
+        if (prev.length > 0) return prev;
         const msgs = res.messages ?? [];
         for (const m of msgs) msgIdSet.current.add(m.id);
         return msgs;
       });
-    }).catch(() => { /* ignore */ });
-  }, [board, runId]);
+    }).catch(() => {});
+  }, [board, runId, isWorkflowRoom]);
 
   // ── Handlers ──────────────────────────────────────────────────────────
 
@@ -545,100 +527,9 @@ export default function LegalSwarmChat() {
     setInput((prev) => prev + `@${profile} `);
   }, []);
 
-  const handleRunWorkflow = useCallback(async () => {
-    showToast(
-      "Use LaunchPad to create a room for a workflow, or send a message with @mentions.",
-      "success",
-    );
-  }, [showToast]);
-
-  // ── Launcher (no board/run) ──────────────────────────────────────────
-
-  if (!board || !runId) {
-    const selectedWf = workflowDefs.find((w) => w.id === selectedWorkflowId);
-    return (
-      <div className="flex items-center justify-center h-full">
-        <div className="w-full max-w-lg mx-auto px-4">
-          <div className="text-center mb-6">
-            <MessagesSquare className="w-10 h-10 text-primary/50 mx-auto mb-3" />
-            <h2 className="text-lg font-semibold mb-1">Legal Swarm Chat</h2>
-            <p className="text-sm text-secondary">
-              All legal agent bots — coordinator, drafter, reviewers — in one real-time conversation.
-            </p>
-          </div>
-
-          <Card>
-            <CardContent className="p-4 flex flex-col gap-4">
-              <div>
-                <label className="text-xs font-semibold text-secondary uppercase tracking-wide block mb-1.5">
-                  Project
-                </label>
-                <div className="flex flex-col gap-1 max-h-48 overflow-y-auto">
-                  {projects.map((p) => (
-                    <button
-                      key={p.id}
-                      type="button"
-                      className={cn(
-                        "flex items-center gap-2 px-3 py-2 rounded-md text-left text-sm transition-colors w-full",
-                        p.id === selectedProjectId
-                          ? "bg-primary/10 border border-primary/30"
-                          : "hover:bg-secondary/5 border border-transparent",
-                      )}
-                      onClick={() => setSelectedProjectId(p.id)}
-                    >
-                      <Building2 className="w-3.5 h-3.5 text-secondary shrink-0" />
-                      <span className="truncate">{p.name || p.id}</span>
-                      {p.id === selectedProjectId && (
-                        <ChevronRight className="w-3.5 h-3.5 text-primary shrink-0 ml-auto" />
-                      )}
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              <div>
-                <label className="text-xs font-semibold text-secondary uppercase tracking-wide block mb-1.5">
-                  Workflow
-                </label>
-                <div className="flex flex-col gap-1">
-                  {workflowDefs.map((wf) => (
-                    <button
-                      key={wf.id}
-                      type="button"
-                      className={cn(
-                        "flex flex-col px-3 py-2 rounded-md text-left transition-colors w-full",
-                        wf.id === selectedWorkflowId
-                          ? "bg-primary/10 border border-primary/30"
-                          : "hover:bg-secondary/5 border border-transparent",
-                      )}
-                      onClick={() => setSelectedWorkflowId(wf.id)}
-                    >
-                      <span className="text-sm font-medium">{wf.id}</span>
-                      <span className="text-[11px] text-secondary">{wf.pipeline}</span>
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              <Button
-                onClick={handleLaunch}
-                disabled={!selectedProjectId || !selectedWorkflowId || launching}
-                className="w-full"
-                prefix={launching ? <Spinner className="w-4 h-4" /> : <Play className="w-4 h-4" />}
-              >
-                {launching ? "Creating..." : "Start Chat Room"}
-              </Button>
-              {selectedWf && (
-                <p className="text-[10px] text-secondary text-center -mt-2">
-                  {selectedWf.node_count} bots &middot; {selectedWf.timeout_minutes}min timeout
-                </p>
-              )}
-            </CardContent>
-          </Card>
-        </div>
-      </div>
-    );
-  }
+  const handleRunWorkflow = useCallback(() => {
+    navigate("/kanban");
+  }, [navigate]);
 
   // ── Loading state ────────────────────────────────────────────────────
 
