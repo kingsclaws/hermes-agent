@@ -9,10 +9,10 @@ COPY hermes_cli/kanban_legal_swarm.py /opt/hermes/hermes_cli/kanban_legal_swarm.
 COPY hermes_cli/web_server.py /opt/hermes/hermes_cli/web_server.py
 
 # Pre-built frontend
-COPY hermes_cli/web_dist/ /opt/hermes/web/dist/
+COPY hermes_cli/web_dist/ /opt/hermes/hermes_cli/web_dist/
 
 # Sync to lex-hermes mirror
 RUN cp /opt/hermes/hermes_cli/kanban_db.py /opt/lex-hermes/hermes_cli/kanban_db.py && \
     cp /opt/hermes/hermes_cli/kanban_legal_swarm.py /opt/lex-hermes/hermes_cli/kanban_legal_swarm.py && \
     cp /opt/hermes/hermes_cli/web_server.py /opt/lex-hermes/hermes_cli/web_server.py && \
-    cp -a /opt/hermes/web/dist/. /opt/lex-hermes/web/dist/
+    cp -a /opt/hermes/hermes_cli/web_dist/. /opt/lex-hermes/hermes_cli/web_dist/
