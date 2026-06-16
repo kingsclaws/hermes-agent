@@ -351,6 +351,24 @@ TOOLSETS = {
         "includes": [],
     },
 
+    "kanban_swarm": {
+        "description": (
+            "Kanban 法律蜂群协调 — Coordinator 通过 Board 管理任务，"
+            "Worker (Drafter/Reviewer) 认领、移交、审批。支持多步门禁链。"
+            "Board 存储在项目目录 <project>/kanban/ 下，一个项目一个 Board。"
+        ),
+        "tools": [
+            "swarm_board_create", "swarm_board_info",
+            "swarm_task_create", "swarm_task_assign",
+            "swarm_task_wait", "swarm_workflow_compile",
+            "swarm_board_status",
+            "swarm_task_claim", "swarm_task_read",
+            "swarm_task_handoff", "swarm_task_approve",
+            "swarm_task_reject", "swarm_task_revise",
+        ],
+        "includes": [],
+    },
+
     "discord": {
         "description": "Discord read and participate tools (fetch messages, search members, create threads)",
         "tools": ["discord"],

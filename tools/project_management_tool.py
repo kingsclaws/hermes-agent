@@ -259,6 +259,18 @@ def project_init_handler(args: dict, **kwargs) -> str:
         _active_project_name = name
         _active_project_path = str(project_dir)
 
+        # Auto-create kanban board for the new project
+        kanban_msg = ""
+        try:
+            from tools.kanban_toolset import kanban_board_create_handler
+            result = json.loads(kanban_board_create_handler(
+                {"project_path": str(project_dir), "title": name},
+            ))
+            if result.get("success"):
+                kanban_msg = " Kanban Board 已自动创建。"
+        except Exception:
+            pass
+
         return json.dumps(
             {
                 "success": True,
@@ -271,7 +283,8 @@ def project_init_handler(args: dict, **kwargs) -> str:
                 "message": (
                     f"Project '{name}' created at {project_dir}. "
                     "AGENTS.md is loaded automatically — Coordinator is ready. "
-                    "Use delegate_task to spawn Drafter and Reviewers."
+                    "Use swarm_task_create to delegate work to Drafter and Reviewers."
+                    + kanban_msg
                 ),
             },
             ensure_ascii=False,

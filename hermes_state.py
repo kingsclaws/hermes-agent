@@ -254,6 +254,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     handoff_platform TEXT,
     handoff_error TEXT,
     project_id TEXT,
+    project_cwd TEXT,
     FOREIGN KEY (parent_session_id) REFERENCES sessions(id)
 );
 
@@ -2876,14 +2877,21 @@ class SessionDB:
 
         return self._execute_write(_do)
 
-    def set_session_project(self, session_id: str, project_id: str) -> bool:
-        """Link a session to a project."""
+    def set_session_project(self, session_id: str, project_id: str,
+                            project_cwd: str = "") -> bool:
+        """Link a session to a project, optionally storing the project path."""
 
         def _do(conn):
-            conn.execute(
-                "UPDATE sessions SET project_id = ? WHERE id = ?",
-                (project_id, session_id),
-            )
+            if project_cwd:
+                conn.execute(
+                    "UPDATE sessions SET project_id = ?, project_cwd = ? WHERE id = ?",
+                    (project_id, project_cwd, session_id),
+                )
+            else:
+                conn.execute(
+                    "UPDATE sessions SET project_id = ? WHERE id = ?",
+                    (project_id, session_id),
+                )
 
         self._execute_write(_do)
         return True

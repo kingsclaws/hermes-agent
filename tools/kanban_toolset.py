@@ -1,0 +1,1476 @@
+#!/usr/bin/env python3
+"""
+Kanban Toolset — native legal-swarm coordination via SQLite-backed kanban.
+
+Two tool groups:
+  Coordinator (full 🛠️): board_create, board_info, task_create, task_assign,
+                          task_wait, workflow_compile, board_status
+  Worker (limited):       task_claim, task_read, task_handoff, task_approve,
+                          task_reject, task_revise
+
+Multi-layer gate protocol:
+  Drafter → handoff → Reviewer → approve → (next gate or done)
+  Reviewer → reject  → back to Drafter → revise → handoff → Reviewer
+
+Independent of hermes_cli modules. Board DB lives at <project>/kanban/kanban.db.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import secrets
+import sqlite3
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Optional
+
+# ── Constants ──────────────────────────────────────────────────────────────────
+
+VALID_TASK_STATUSES = {"todo", "in_progress", "in_review", "approved", "rejected", "done"}
+VALID_GATE_TYPES = {"review", "approve", "verify"}
+DEFAULT_CLAIM_TTL_SECONDS = 15 * 60  # 15 min, same as existing kanban
+
+SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS board (
+    id           TEXT PRIMARY KEY,
+    project_path TEXT NOT NULL UNIQUE,
+    title        TEXT NOT NULL,
+    created_at   INTEGER NOT NULL,
+    updated_at   INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS columns (
+    id        TEXT PRIMARY KEY,
+    board_id  TEXT NOT NULL,
+    name      TEXT NOT NULL,
+    position  INTEGER NOT NULL DEFAULT 0,
+    wip_limit INTEGER DEFAULT 0,
+    FOREIGN KEY (board_id) REFERENCES board(id)
+);
+
+CREATE TABLE IF NOT EXISTS tasks (
+    id                    TEXT PRIMARY KEY,
+    board_id              TEXT NOT NULL,
+    column_id             TEXT,
+    title                 TEXT NOT NULL,
+    description           TEXT DEFAULT '',
+    assignee              TEXT,
+    status                TEXT NOT NULL DEFAULT 'todo',
+    priority              INTEGER DEFAULT 0,
+    gates_json            TEXT DEFAULT '[]',
+    gate_index            INTEGER DEFAULT 0,
+    handoff_history_json  TEXT DEFAULT '[]',
+    claim_lock            TEXT,
+    claim_expires         INTEGER,
+    created_by            TEXT,
+    created_at            INTEGER NOT NULL,
+    updated_at            INTEGER NOT NULL,
+    completed_at          INTEGER,
+    session_id            TEXT,
+    FOREIGN KEY (board_id) REFERENCES board(id),
+    FOREIGN KEY (column_id) REFERENCES columns(id)
+);
+
+CREATE TABLE IF NOT EXISTS task_events (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id    TEXT NOT NULL,
+    kind       TEXT NOT NULL,
+    actor      TEXT,
+    payload    TEXT,
+    created_at INTEGER NOT NULL,
+    FOREIGN KEY (task_id) REFERENCES tasks(id)
+);
+
+CREATE TABLE IF NOT EXISTS task_links (
+    parent_id  TEXT NOT NULL,
+    child_id   TEXT NOT NULL,
+    PRIMARY KEY (parent_id, child_id),
+    FOREIGN KEY (parent_id) REFERENCES tasks(id),
+    FOREIGN KEY (child_id) REFERENCES tasks(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_tasks_board_status ON tasks(board_id, status);
+CREATE INDEX IF NOT EXISTS idx_tasks_assignee      ON tasks(assignee, status);
+CREATE INDEX IF NOT EXISTS idx_events_task         ON task_events(task_id, created_at);
+"""
+
+DEFAULT_COLUMNS = [
+    ("col_todo", "To Do", 0, 0),
+    ("col_in_progress", "In Progress", 1, 0),
+    ("col_review", "In Review", 2, 0),
+    ("col_done", "Done", 3, 0),
+]
+
+
+# ── DB helpers ─────────────────────────────────────────────────────────────────
+
+def _now() -> int:
+    return int(time.time())
+
+
+def _uid(prefix: str = "") -> str:
+    return f"{prefix}{secrets.token_hex(6)}"
+
+
+def _connect(project_path: str, title: str = "") -> tuple[sqlite3.Connection, str]:
+    """Open (or create) the kanban DB for a project. Returns (conn, board_id)."""
+    kanban_dir = Path(project_path) / "kanban"
+    kanban_dir.mkdir(parents=True, exist_ok=True)
+    db_path = str(kanban_dir / "kanban.db")
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA foreign_keys=ON")
+    conn.executescript(SCHEMA_SQL)
+    conn.commit()
+    board_id = _ensure_board(conn, str(Path(project_path).resolve()), title or project_path)
+    return conn, board_id
+
+
+def _ensure_board(conn: sqlite3.Connection, project_path: str, title_hint: str) -> str:
+    """Return existing board ID or create a new board for this project."""
+    row = conn.execute(
+        "SELECT id FROM board WHERE project_path = ?", (project_path,)
+    ).fetchone()
+    if row:
+        return row["id"]
+
+    board_id = _uid("brd_")
+    title = Path(title_hint).name if title_hint else "Project Board"
+    now = _now()
+    conn.execute(
+        "INSERT INTO board (id, project_path, title, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+        (board_id, project_path, title, now, now),
+    )
+    for col_id, col_name, pos, wip in DEFAULT_COLUMNS:
+        conn.execute(
+            "INSERT INTO columns (id, board_id, name, position, wip_limit) VALUES (?, ?, ?, ?, ?)",
+            (col_id, board_id, col_name, pos, wip),
+        )
+    conn.commit()
+    return board_id
+
+
+def _board_for_project(project_path: str) -> dict | None:
+    """Read-only lookup: return board dict or None."""
+    kanban_db = Path(project_path) / "kanban" / "kanban.db"
+    if not kanban_db.exists():
+        return None
+    conn = sqlite3.connect(str(kanban_db))
+    conn.row_factory = sqlite3.Row
+    row = conn.execute(
+        "SELECT * FROM board WHERE project_path = ?", (str(Path(project_path).resolve()),)
+    ).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+# ── CAS claim helpers ──────────────────────────────────────────────────────────
+
+def _cas_claim(conn: sqlite3.Connection, task_id: str, assignee: str,
+               ttl: int = DEFAULT_CLAIM_TTL_SECONDS) -> str | None:
+    """Atomically claim a task. Returns claim_token or None if already claimed."""
+    token = secrets.token_hex(16)
+    now = _now()
+    expires = now + ttl
+    cur = conn.execute(
+        """UPDATE tasks SET claim_lock = ?, claim_expires = ?, assignee = ?,
+           status = CASE WHEN status = 'todo' THEN 'in_progress' ELSE status END,
+           updated_at = ?
+           WHERE id = ? AND (claim_expires IS NULL OR claim_expires < ?)""",
+        (token, expires, assignee, now, task_id, now),
+    )
+    if cur.rowcount == 0:
+        return None
+    conn.commit()
+    return token
+
+
+def _cas_handoff(conn: sqlite3.Connection, task_id: str, claim_token: str) -> bool:
+    """Verify claim token still holds. Returns True if CAS check passes."""
+    row = conn.execute(
+        "SELECT claim_lock FROM tasks WHERE id = ?", (task_id,)
+    ).fetchone()
+    if row and row["claim_lock"] == claim_token:
+        return True
+    return False
+
+
+# ── Task helpers ───────────────────────────────────────────────────────────────
+
+def _advance_gate(conn: sqlite3.Connection, task_id: str) -> dict | None:
+    """Move to next gate. Returns next gate dict or None (no more gates = done)."""
+    row = conn.execute("SELECT gates_json, gate_index FROM tasks WHERE id = ?", (task_id,)).fetchone()
+    if not row:
+        return None
+    gates = json.loads(row["gates_json"])
+    next_idx = row["gate_index"] + 1
+    if next_idx >= len(gates):
+        return None  # all gates passed
+    next_gate = gates[next_idx]
+    conn.execute(
+        "UPDATE tasks SET gate_index = ?, status = 'in_review', updated_at = ? WHERE id = ?",
+        (next_idx, _now(), task_id),
+    )
+    conn.commit()
+    return next_gate
+
+
+def _log_event(conn: sqlite3.Connection, task_id: str, kind: str,
+               actor: str = "", payload: dict | None = None):
+    conn.execute(
+        "INSERT INTO task_events (task_id, kind, actor, payload, created_at) VALUES (?, ?, ?, ?, ?)",
+        (task_id, kind, actor, json.dumps(payload or {}, ensure_ascii=False), _now()),
+    )
+    conn.commit()
+
+
+def _task_to_dict(row: sqlite3.Row) -> dict:
+    """Convert a task Row to a JSON-safe dict with parsed gates/history."""
+    t = dict(row)
+    t["gates"] = json.loads(t.pop("gates_json", "[]"))
+    t["handoff_history"] = json.loads(t.pop("handoff_history_json", "[]"))
+    t.pop("claim_lock", None)
+    return t
+
+
+# ── Resolve project context ────────────────────────────────────────────────────
+
+def _resolve_project_path(args: dict, parent_agent=None) -> str | None:
+    """Resolve project path from args or active project context."""
+    project_path = args.get("project_path", "").strip()
+    if project_path:
+        return str(Path(project_path).resolve())
+
+    # Try resolve_selected_project from project_management_tool
+    try:
+        from tools.project_management_tool import resolve_selected_project
+        selected = resolve_selected_project(
+            parent_agent,
+            session_id=getattr(parent_agent, "session_id", None),
+        )
+        if selected and selected.get("path"):
+            return str(Path(selected["path"]).resolve())
+    except Exception:
+        pass
+
+    return None
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# COORDINATOR TOOLS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# ── Schemas ────────────────────────────────────────────────────────────────────
+
+KANBAN_BOARD_CREATE_SCHEMA = {
+    "name": "swarm_board_create",
+    "description": (
+        "为项目创建一个新的 Kanban Board。Board 存储在 <project>/kanban/ 目录下，"
+        "一个项目仅允许一个 Board。如果项目已有 Board 则直接返回已有 Board 信息。"
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "project_path": {
+                "type": "string",
+                "description": "项目根目录的绝对路径。如果省略，使用当前选中的项目。",
+            },
+            "title": {
+                "type": "string",
+                "description": "Board 标题，默认使用项目目录名。",
+            },
+        },
+        "required": [],
+    },
+}
+
+KANBAN_BOARD_INFO_SCHEMA = {
+    "name": "swarm_board_info",
+    "description": (
+        "获取项目的 Kanban Board 信息，包含列定义和各列任务计数。"
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "project_path": {
+                "type": "string",
+                "description": "项目根目录的绝对路径。如果省略，使用当前选中的项目。",
+            },
+        },
+        "required": [],
+    },
+}
+
+KANBAN_TASK_CREATE_SCHEMA = {
+    "name": "swarm_task_create",
+    "description": (
+        "在 Board 上创建一个新任务。Coordinator 可以指定 gates（门禁链）来定义多步审核流程。"
+        "例如：先由 reviewer-content 审核，通过后由 reviewer-format 审核。"
+        "\n\n"
+        "Gates 格式（JSON 数组）：\n"
+        '[{"type": "review", "target_pool": "hpswarm-reviewer-content"},'
+        ' {"type": "approve", "target_pool": "hpswarm-reviewer-format"}]'
+        "\n\n"
+        "不指定 gates 时，任务创建后在 'To Do' 列等待 Worker 认领。"
+        "指定 gates 时，第一个 gate 的 target_pool 即为初始 assignee。"
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "project_path": {
+                "type": "string",
+                "description": "项目根目录的绝对路径。如果省略，使用当前选中的项目。",
+            },
+            "title": {
+                "type": "string",
+                "description": "任务标题（必填）。例如：'起草第三条担保条款'",
+            },
+            "description": {
+                "type": "string",
+                "description": "任务详细描述、要求、参考文件等。",
+            },
+            "assignee": {
+                "type": "string",
+                "description": "初始执行者的 profile 名称，如 'hpswarm-drafter'。省略则放入待认领池。",
+            },
+            "gates": {
+                "type": "string",
+                "description": (
+                    "门禁链 JSON 数组。每项含 type(review/approve/verify) 和 "
+                    "target_pool。例如：'[{\"type\":\"review\",\"target_pool\":\"hpswarm-reviewer-content\"}]'"
+                ),
+            },
+            "priority": {
+                "type": "integer",
+                "description": "优先级（0=普通, 1=高, 2=紧急）。默认 0。",
+            },
+            "column": {
+                "type": "string",
+                "description": "目标列的 ID。省略则放入第一个列（To Do）。",
+            },
+        },
+        "required": ["title"],
+    },
+}
+
+KANBAN_TASK_ASSIGN_SCHEMA = {
+    "name": "swarm_task_assign",
+    "description": (
+        "将任务分配给指定 Worker。Coordinator 可以重新分配未认领或已释放的任务。"
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "task_id": {
+                "type": "string",
+                "description": "任务 ID。",
+            },
+            "assignee": {
+                "type": "string",
+                "description": "目标 Worker 的 profile 名称。",
+            },
+        },
+        "required": ["task_id", "assignee"],
+    },
+}
+
+KANBAN_TASK_WAIT_SCHEMA = {
+    "name": "swarm_task_wait",
+    "description": (
+        "等待任务完成（阻塞式轮询）。Coordinator 创建任务后调用此工具等待结果。"
+        "超时后返回当前状态但不报错。"
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "task_id": {
+                "type": "string",
+                "description": "要等待的任务 ID。",
+            },
+            "timeout_seconds": {
+                "type": "integer",
+                "description": "最大等待秒数（默认 300，即 5 分钟）。",
+            },
+            "poll_interval": {
+                "type": "integer",
+                "description": "轮询间隔秒数（默认 5）。",
+            },
+        },
+        "required": ["task_id"],
+    },
+}
+
+KANBAN_WORKFLOW_COMPILE_SCHEMA = {
+    "name": "swarm_workflow_compile",
+    "description": (
+        "从 YAML 工作流文件编译生成 Kanban 任务。YAML 中的每个节点变成一个 Task，"
+        "节点间的依赖关系通过 task_links 表示。支持 analysis / worker / fanout / gate 节点类型。"
+        "\n\n"
+        "返回所有创建的任务列表。"
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "yaml_path": {
+                "type": "string",
+                "description": "YAML 工作流文件的绝对路径。",
+            },
+            "project_path": {
+                "type": "string",
+                "description": "项目根目录的绝对路径。如果省略，使用当前选中的项目。",
+            },
+        },
+        "required": ["yaml_path"],
+    },
+}
+
+KANBAN_BOARD_STATUS_SCHEMA = {
+    "name": "swarm_board_status",
+    "description": (
+        "获取 Board 的完整状态概览：所有列及其下的所有任务（按优先级和时间排序）。"
+        "Coordinator 用此工具了解全局进度。"
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "project_path": {
+                "type": "string",
+                "description": "项目根目录的绝对路径。如果省略，使用当前选中的项目。",
+            },
+            "status_filter": {
+                "type": "string",
+                "description": "可选：只显示指定状态的任务（todo/in_progress/in_review/approved/rejected/done）。",
+            },
+            "assignee_filter": {
+                "type": "string",
+                "description": "可选：只显示指定 Worker 的任务。",
+            },
+        },
+        "required": [],
+    },
+}
+
+# ── Handlers ───────────────────────────────────────────────────────────────────
+
+def kanban_board_create_handler(args: dict, **kwargs) -> str:
+    project_path = _resolve_project_path(args, kwargs.get("parent_agent"))
+    if not project_path:
+        return json.dumps({"success": False, "error": "无法确定项目路径。请指定 project_path 或先使用 project_select 选择项目。"})
+
+    title = args.get("title", "").strip() or Path(project_path).name
+    conn, board_id = _connect(project_path, title=title)
+
+    # Update title if this was an existing board (ensure title stays current)
+    conn.execute("UPDATE board SET title = ?, updated_at = ? WHERE id = ? AND title != ?",
+                 (title, _now(), board_id, title))
+    conn.commit()
+
+    row = conn.execute("SELECT * FROM board WHERE id = ?", (board_id,)).fetchone()
+    columns = [dict(c) for c in conn.execute(
+        "SELECT * FROM columns WHERE board_id = ? ORDER BY position", (board_id,)
+    ).fetchall()]
+    conn.close()
+
+    return json.dumps({
+        "success": True,
+        "board": {
+            "id": row["id"],
+            "project_path": row["project_path"],
+            "title": row["title"],
+            "created_at": datetime.fromtimestamp(row["created_at"], tz=timezone.utc).isoformat(),
+        },
+        "columns": columns,
+        "message": f"Board '{row['title']}' 已就绪。共 {len(columns)} 列。" if title else f"Board 已存在：'{row['title']}'",
+    }, ensure_ascii=False)
+
+
+def kanban_board_info_handler(args: dict, **kwargs) -> str:
+    project_path = _resolve_project_path(args, kwargs.get("parent_agent"))
+    if not project_path:
+        return json.dumps({"success": False, "error": "无法确定项目路径。"})
+
+    conn, board_id = _connect(project_path)
+    row = conn.execute("SELECT * FROM board WHERE id = ?", (board_id,)).fetchone()
+    if not row:
+        conn.close()
+        return json.dumps({"success": False, "error": "Board 不存在，请先创建。"})
+
+    columns = []
+    for c in conn.execute(
+        "SELECT * FROM columns WHERE board_id = ? ORDER BY position", (board_id,)
+    ).fetchall():
+        cd = dict(c)
+        count_row = conn.execute(
+            "SELECT COUNT(*) as cnt FROM tasks WHERE column_id = ? AND status != 'done'", (c["id"],)
+        ).fetchone()
+        cd["task_count"] = count_row["cnt"] if count_row else 0
+        columns.append(cd)
+
+    total_tasks = conn.execute(
+        "SELECT COUNT(*) as cnt FROM tasks WHERE board_id = ?", (board_id,)
+    ).fetchone()["cnt"]
+
+    conn.close()
+    return json.dumps({
+        "success": True,
+        "board": dict(row),
+        "columns": columns,
+        "total_tasks": total_tasks,
+    }, ensure_ascii=False)
+
+
+def kanban_task_create_handler(args: dict, **kwargs) -> str:
+    title = args.get("title", "").strip()
+    if not title:
+        return json.dumps({"success": False, "error": "任务标题为必填项。"})
+
+    project_path = _resolve_project_path(args, kwargs.get("parent_agent"))
+    if not project_path:
+        return json.dumps({"success": False, "error": "无法确定项目路径。"})
+
+    conn, board_id = _connect(project_path)
+
+    # Parse gates
+    gates = []
+    gates_raw = args.get("gates", "")
+    if gates_raw:
+        try:
+            if isinstance(gates_raw, str):
+                gates = json.loads(gates_raw)
+            else:
+                gates = gates_raw
+        except json.JSONDecodeError:
+            conn.close()
+            return json.dumps({"success": False, "error": "gates 格式错误：必须是有效的 JSON 数组。"})
+
+        for g in gates:
+            if g.get("type") not in VALID_GATE_TYPES:
+                conn.close()
+                return json.dumps({"success": False, "error": f"无效的 gate 类型: {g.get('type')}。有效值: {', '.join(sorted(VALID_GATE_TYPES))}"})
+
+    # Resolve assignee: explicit > first gate's target_pool > None
+    assignee = args.get("assignee", "").strip() or None
+    if not assignee and gates:
+        assignee = gates[0].get("target_pool", "")
+
+    # Resolve column: explicit > first column
+    column_id = args.get("column", "").strip() or None
+    if not column_id:
+        col_row = conn.execute(
+            "SELECT id FROM columns WHERE board_id = ? ORDER BY position LIMIT 1", (board_id,)
+        ).fetchone()
+        if col_row:
+            column_id = col_row["id"]
+
+    priority = args.get("priority", 0)
+    description = args.get("description", "").strip()
+
+    task_id = _uid("tsk_")
+    now = _now()
+    session_id = os.environ.get("HERMES_SESSION_ID", "")
+
+    initial_status = "in_progress" if assignee else "todo"
+
+    conn.execute(
+        """INSERT INTO tasks
+           (id, board_id, column_id, title, description, assignee, status, priority,
+            gates_json, gate_index, created_at, updated_at, session_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (task_id, board_id, column_id, title, description, assignee, initial_status,
+         priority, json.dumps(gates, ensure_ascii=False), 0, now, now, session_id),
+    )
+    _log_event(conn, task_id, "created", actor=kwargs.get("parent_agent", {}).get("name", "coordinator"),
+               payload={"title": title, "gates": gates, "assignee": assignee})
+
+    row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+    conn.close()
+
+    return json.dumps({
+        "success": True,
+        "task": _task_to_dict(row),
+        "message": f"任务 '{title}' 已创建（ID: {task_id}）。" + (f" 门禁链: {len(gates)} 步。" if gates else ""),
+    }, ensure_ascii=False)
+
+
+def kanban_task_assign_handler(args: dict, **kwargs) -> str:
+    task_id = args.get("task_id", "").strip()
+    assignee = args.get("assignee", "").strip()
+    if not task_id or not assignee:
+        return json.dumps({"success": False, "error": "task_id 和 assignee 为必填项。"})
+
+    # Find the board from task_id — we need to search across known projects
+    project_path = _resolve_project_path(args, kwargs.get("parent_agent"))
+    if not project_path:
+        return json.dumps({"success": False, "error": "无法确定项目路径。"})
+
+    conn, board_id = _connect(project_path)
+    row = conn.execute("SELECT * FROM tasks WHERE id = ? AND board_id = ?", (task_id, board_id)).fetchone()
+    if not row:
+        conn.close()
+        return json.dumps({"success": False, "error": f"任务未找到: {task_id}"})
+
+    prev_assignee = row["assignee"]
+    now = _now()
+    conn.execute(
+        "UPDATE tasks SET assignee = ?, status = 'in_progress', updated_at = ? WHERE id = ?",
+        (assignee, now, task_id),
+    )
+    _log_event(conn, task_id, "assigned", actor="coordinator",
+               payload={"from": prev_assignee, "to": assignee})
+
+    updated = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+    conn.close()
+
+    return json.dumps({
+        "success": True,
+        "task": _task_to_dict(updated),
+        "message": f"任务已从 {prev_assignee or '（未分配）'} 分配给 {assignee}。",
+    }, ensure_ascii=False)
+
+
+def kanban_task_wait_handler(args: dict, **kwargs) -> str:
+    task_id = args.get("task_id", "").strip()
+    if not task_id:
+        return json.dumps({"success": False, "error": "task_id 为必填项。"})
+
+    timeout = int(args.get("timeout_seconds", 300))
+    interval = int(args.get("poll_interval", 5))
+    project_path = _resolve_project_path(args, kwargs.get("parent_agent"))
+    if not project_path:
+        return json.dumps({"success": False, "error": "无法确定项目路径。"})
+
+    conn, board_id = _connect(project_path)
+    start = time.time()
+
+    while True:
+        row = conn.execute(
+            "SELECT * FROM tasks WHERE id = ? AND board_id = ?", (task_id, board_id)
+        ).fetchone()
+        if not row:
+            conn.close()
+            return json.dumps({"success": False, "error": f"任务未找到: {task_id}"})
+
+        status = row["status"]
+        if status in ("done", "approved", "rejected"):
+            conn.close()
+            return json.dumps({
+                "success": True,
+                "task": _task_to_dict(row),
+                "final_status": status,
+                "elapsed_seconds": int(time.time() - start),
+            }, ensure_ascii=False)
+
+        if time.time() - start >= timeout:
+            conn.close()
+            return json.dumps({
+                "success": True,
+                "task": _task_to_dict(row),
+                "timed_out": True,
+                "message": f"等待超时（{timeout}s），任务当前状态: {status}。",
+            }, ensure_ascii=False)
+
+        time.sleep(interval)
+
+
+def kanban_workflow_compile_handler(args: dict, **kwargs) -> str:
+    yaml_path = args.get("yaml_path", "").strip()
+    if not yaml_path:
+        return json.dumps({"success": False, "error": "yaml_path 为必填项。"})
+
+    if not Path(yaml_path).is_file():
+        return json.dumps({"success": False, "error": f"YAML 文件未找到: {yaml_path}"})
+
+    project_path = _resolve_project_path(args, kwargs.get("parent_agent"))
+    if not project_path:
+        return json.dumps({"success": False, "error": "无法确定项目路径。"})
+
+    try:
+        import yaml as _yaml
+    except ImportError:
+        return json.dumps({"success": False, "error": "需要 PyYAML 库。请安装: pip install pyyaml"})
+
+    with open(yaml_path, "r", encoding="utf-8") as fh:
+        workflow = _yaml.safe_load(fh)
+
+    conn, board_id = _connect(project_path)
+    now = _now()
+    created_tasks = []
+
+    nodes = workflow.get("nodes", [])
+    if isinstance(nodes, dict):
+        nodes = list(nodes.values())
+
+    task_id_map: dict[str, str] = {}  # node_key -> task_id
+
+    for node in nodes:
+        node_key = node.get("key", node.get("id", ""))
+        node_title = node.get("title", node.get("name", node_key))
+        node_kind = node.get("kind", "worker")
+        node_profile = node.get("profile", node.get("assignee", ""))
+        node_desc = node.get("description", node.get("desc", ""))
+
+        task_id = _uid("tsk_")
+        initial_status = "in_progress" if node_profile else "todo"
+
+        gates = []
+        if node_kind == "gate":
+            gate_def = node.get("gate", {})
+            if gate_def:
+                gates = [{
+                    "type": gate_def.get("type", "review"),
+                    "target_pool": gate_def.get("target_pool", gate_def.get("target", "")),
+                }]
+
+        conn.execute(
+            """INSERT INTO tasks
+               (id, board_id, title, description, assignee, status,
+                gates_json, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (task_id, board_id, node_title, node_desc, node_profile or None,
+             initial_status, json.dumps(gates, ensure_ascii=False), now, now),
+        )
+        _log_event(conn, task_id, "created", actor="workflow_compile",
+                   payload={"node_key": node_key, "kind": node_kind, "yaml": yaml_path})
+
+        task_id_map[node_key] = task_id
+        created_tasks.append({
+            "task_id": task_id,
+            "title": node_title,
+            "kind": node_kind,
+            "assignee": node_profile or None,
+            "node_key": node_key,
+        })
+
+    # Wire dependencies
+    edges = workflow.get("edges", [])
+    if not edges and isinstance(nodes, list):
+        # Linear implicit edges: node[i] depends on node[i-1]
+        for i in range(1, len(nodes)):
+            prev_key = nodes[i - 1].get("key", nodes[i - 1].get("id", ""))
+            curr_key = nodes[i].get("key", nodes[i].get("id", ""))
+            if prev_key in task_id_map and curr_key in task_id_map:
+                edges.append({"from": prev_key, "to": curr_key})
+
+    for edge in edges:
+        parent_id = task_id_map.get(edge.get("from", ""))
+        child_id = task_id_map.get(edge.get("to", ""))
+        if parent_id and child_id:
+            conn.execute(
+                "INSERT OR IGNORE INTO task_links (parent_id, child_id) VALUES (?, ?)",
+                (parent_id, child_id),
+            )
+
+    conn.commit()
+    conn.close()
+
+    return json.dumps({
+        "success": True,
+        "workflow_file": yaml_path,
+        "tasks_created": len(created_tasks),
+        "tasks": created_tasks,
+        "edges": len(edges),
+    }, ensure_ascii=False)
+
+
+def kanban_board_status_handler(args: dict, **kwargs) -> str:
+    project_path = _resolve_project_path(args, kwargs.get("parent_agent"))
+    if not project_path:
+        return json.dumps({"success": False, "error": "无法确定项目路径。"})
+
+    conn, board_id = _connect(project_path)
+    board_row = conn.execute("SELECT * FROM board WHERE id = ?", (board_id,)).fetchone()
+
+    columns = conn.execute(
+        "SELECT * FROM columns WHERE board_id = ? ORDER BY position", (board_id,)
+    ).fetchall()
+
+    status_filter = args.get("status_filter", "").strip() or None
+    assignee_filter = args.get("assignee_filter", "").strip() or None
+
+    board_data = {
+        "board": dict(board_row),
+        "columns": [],
+    }
+
+    for col in columns:
+        cd = dict(col)
+        query = "SELECT * FROM tasks WHERE board_id = ? AND column_id = ?"
+        params: list[Any] = [board_id, col["id"]]
+
+        if status_filter:
+            query += " AND status = ?"
+            params.append(status_filter)
+        if assignee_filter:
+            query += " AND assignee = ?"
+            params.append(assignee_filter)
+
+        query += " ORDER BY priority DESC, created_at ASC"
+
+        tasks_rows = conn.execute(query, params).fetchall()
+        cd["tasks"] = [_task_to_dict(r) for r in tasks_rows]
+        cd["task_count"] = len(tasks_rows)
+        board_data["columns"].append(cd)
+
+    conn.close()
+    return json.dumps({"success": True, **board_data}, ensure_ascii=False)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# WORKER TOOLS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+KANBAN_TASK_CLAIM_SCHEMA = {
+    "name": "swarm_task_claim",
+    "description": (
+        "认领一个待处理的任务。使用 CAS（Compare-And-Swap）原子操作，"
+        "确保同一任务不会被多个 Worker 同时认领。成功认领后返回任务详情和 claim_token。"
+        "\n\n"
+        "Worker 必须先认领任务才能对其进行操作（handoff / revise）。"
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "task_id": {
+                "type": "string",
+                "description": "要认领的任务 ID。",
+            },
+        },
+        "required": ["task_id"],
+    },
+}
+
+KANBAN_TASK_READ_SCHEMA = {
+    "name": "swarm_task_read",
+    "description": (
+        "读取任务的完整详情，包括门禁链状态、handoff 历史、事件日志。"
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "task_id": {
+                "type": "string",
+                "description": "任务 ID。",
+            },
+        },
+        "required": ["task_id"],
+    },
+}
+
+KANBAN_TASK_HANDOFF_SCHEMA = {
+    "name": "swarm_task_handoff",
+    "description": (
+        "将完成当前阶段工作的任务移交给下一个门禁的审核者（Reviewer）。"
+        "Worker（Drafter）完成任务起草后调用此工具，将任务流转到审核阶段。"
+        "\n\n"
+        "如果有门禁链，任务进入 'in_review' 状态，等待 Reviewer 审批。"
+        "如果没有任何门禁，任务直接标记为 'done'。"
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "task_id": {
+                "type": "string",
+                "description": "要移交的任务 ID。",
+            },
+            "note": {
+                "type": "string",
+                "description": "移交说明（做了什么、注意事项、需要审核的要点）。",
+            },
+            "claim_token": {
+                "type": "string",
+                "description": "认领时获得的 claim_token。用于验证操作权限。",
+            },
+        },
+        "required": ["task_id", "claim_token"],
+    },
+}
+
+KANBAN_TASK_APPROVE_SCHEMA = {
+    "name": "swarm_task_approve",
+    "description": (
+        "Reviewer 批准当前门禁。如果还有后续门禁，任务自动流转到下一个门禁。"
+        "所有门禁通过后，任务标记为 'approved'（最终完成）。"
+        "\n\n"
+        "这是 Reviewer 的核心操作——确认 Drafter 的工作合格，允许流程继续。"
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "task_id": {
+                "type": "string",
+                "description": "要批准的任务 ID。",
+            },
+            "note": {
+                "type": "string",
+                "description": "批准说明（通过了哪些检查、备注）。",
+            },
+            "claim_token": {
+                "type": "string",
+                "description": "认领时获得的 claim_token。",
+            },
+        },
+        "required": ["task_id", "claim_token"],
+    },
+}
+
+KANBAN_TASK_REJECT_SCHEMA = {
+    "name": "swarm_task_reject",
+    "description": (
+        "Reviewer 拒绝当前门禁。任务回到上一环节的 Worker（Drafter）手中，"
+        "状态变为 'rejected'。Worker 需要修改后重新 handoff。"
+        "\n\n"
+        "拒绝时必须提供明确的理由，以便 Worker 知道哪里需要修改。"
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "task_id": {
+                "type": "string",
+                "description": "要拒绝的任务 ID。",
+            },
+            "reason": {
+                "type": "string",
+                "description": "拒绝理由（必填）。说明哪里不符合要求，需要如何修改。",
+            },
+            "claim_token": {
+                "type": "string",
+                "description": "认领时获得的 claim_token。",
+            },
+        },
+        "required": ["task_id", "reason", "claim_token"],
+    },
+}
+
+KANBAN_TASK_REVISE_SCHEMA = {
+    "name": "swarm_task_revise",
+    "description": (
+        "Worker（Drafter）在被 Reviewer 拒绝后，完成修改并重新提交。"
+        "任务状态从 'rejected' 变回 'in_review'，等待 Reviewer 再次审批。"
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "task_id": {
+                "type": "string",
+                "description": "要重新提交的任务 ID。",
+            },
+            "note": {
+                "type": "string",
+                "description": "修改说明（改了哪些地方，如何回应 Reviewer 的意见）。",
+            },
+            "claim_token": {
+                "type": "string",
+                "description": "认领时获得的 claim_token。",
+            },
+        },
+        "required": ["task_id", "claim_token"],
+    },
+}
+
+
+# ── Worker handlers ────────────────────────────────────────────────────────────
+
+def _find_task_db(task_id: str, project_path: str | None = None) -> tuple[sqlite3.Connection, str, sqlite3.Row | None]:
+    """Open the DB for the board containing task_id. Returns (conn, board_id, task_row)."""
+    # If project_path given, look there
+    if project_path:
+        conn, board_id = _connect(project_path)
+        row = conn.execute("SELECT * FROM tasks WHERE id = ? AND board_id = ?", (task_id, board_id)).fetchone()
+        if row:
+            return conn, board_id, row
+        conn.close()
+
+    return None, "", None  # type: ignore[return-value]
+
+
+def _resolve_task_db(task_id: str, args: dict, parent_agent=None) -> tuple[sqlite3.Connection, sqlite3.Row, str]:
+    """Resolve project path and find task. Returns (conn, task_row, board_id). Raises ValueError on failure."""
+    project_path = _resolve_project_path(args, parent_agent)
+    if not project_path:
+        raise ValueError("无法确定项目路径。请使用 project_path 或先通过 project_select 选择项目。")
+
+    conn, board_id = _connect(project_path)
+    row = conn.execute("SELECT * FROM tasks WHERE id = ? AND board_id = ?", (task_id, board_id)).fetchone()
+    if not row:
+        conn.close()
+        raise ValueError(f"任务未找到: {task_id}")
+
+    return conn, row, board_id
+
+
+def kanban_task_claim_handler(args: dict, **kwargs) -> str:
+    task_id = args.get("task_id", "").strip()
+    if not task_id:
+        return json.dumps({"success": False, "error": "task_id 为必填项。"})
+
+    parent_agent = kwargs.get("parent_agent")
+    try:
+        conn, row, board_id = _resolve_task_db(task_id, args, parent_agent)
+    except ValueError as e:
+        return json.dumps({"success": False, "error": str(e)})
+
+    if row["status"] not in ("todo", "in_progress", "in_review", "rejected"):
+        conn.close()
+        return json.dumps({"success": False, "error": f"任务状态为 '{row['status']}'，无法认领。只有 todo/in_progress/in_review/rejected 状态的任务可以认领。"})
+
+    assignee = getattr(parent_agent, "name", None) or os.environ.get("HERMES_PROFILE", "worker")
+    token = _cas_claim(conn, task_id, assignee)
+    if not token:
+        current = conn.execute(
+            "SELECT assignee, claim_expires FROM tasks WHERE id = ?", (task_id,)
+        ).fetchone()
+        conn.close()
+        holder = current["assignee"] if current else "unknown"
+        expires = current["claim_expires"] if current else 0
+        return json.dumps({
+            "success": False,
+            "error": f"任务已被认领。当前持有者: {holder}，过期时间: {expires}",
+        })
+
+    _log_event(conn, task_id, "claimed", actor=assignee)
+    updated = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+    task_dict = _task_to_dict(updated)
+    task_dict["claim_token"] = token  # Only returned on successful claim
+    conn.close()
+
+    return json.dumps({
+        "success": True,
+        "task": task_dict,
+        "message": f"任务 '{updated['title']}' 已认领。请开始工作。",
+    }, ensure_ascii=False)
+
+
+def kanban_task_read_handler(args: dict, **kwargs) -> str:
+    task_id = args.get("task_id", "").strip()
+    if not task_id:
+        return json.dumps({"success": False, "error": "task_id 为必填项。"})
+
+    parent_agent = kwargs.get("parent_agent")
+    try:
+        conn, row, board_id = _resolve_task_db(task_id, args, parent_agent)
+    except ValueError as e:
+        return json.dumps({"success": False, "error": str(e)})
+
+    task_dict = _task_to_dict(row)
+
+    # Include event log
+    events = [
+        dict(e) for e in conn.execute(
+            "SELECT * FROM task_events WHERE task_id = ? ORDER BY created_at", (task_id,)
+        ).fetchall()
+    ]
+    conn.close()
+
+    return json.dumps({
+        "success": True,
+        "task": task_dict,
+        "events": events,
+        "event_count": len(events),
+    }, ensure_ascii=False)
+
+
+def kanban_task_handoff_handler(args: dict, **kwargs) -> str:
+    task_id = args.get("task_id", "").strip()
+    note = args.get("note", "").strip()
+    claim_token = args.get("claim_token", "").strip()
+
+    if not task_id or not claim_token:
+        return json.dumps({"success": False, "error": "task_id 和 claim_token 为必填项。"})
+
+    parent_agent = kwargs.get("parent_agent")
+    try:
+        conn, row, board_id = _resolve_task_db(task_id, args, parent_agent)
+    except ValueError as e:
+        return json.dumps({"success": False, "error": str(e)})
+
+    if not _cas_handoff(conn, task_id, claim_token):
+        conn.close()
+        return json.dumps({"success": False, "error": "claim_token 无效或已过期。请重新认领任务。"})
+
+    if row["status"] not in ("in_progress", "rejected"):
+        conn.close()
+        return json.dumps({"success": False, "error": f"任务状态为 '{row['status']}'，无法移交。"})
+
+    now = _now()
+    gates = json.loads(row["gates_json"])
+    history = json.loads(row["handoff_history_json"])
+    actor = getattr(parent_agent, "name", "worker")
+
+    history.append({
+        "action": "handoff",
+        "from": row["assignee"],
+        "note": note,
+        "timestamp": now,
+    })
+
+    if gates and row["gate_index"] < len(gates):
+        # Move to review at current gate
+        current_gate = gates[row["gate_index"]]
+        next_assignee = current_gate.get("target_pool", "")
+        conn.execute(
+            """UPDATE tasks SET status = 'in_review', assignee = ?,
+               handoff_history_json = ?, claim_lock = NULL, claim_expires = NULL,
+               updated_at = ? WHERE id = ?""",
+            (next_assignee, json.dumps(history, ensure_ascii=False), now, task_id),
+        )
+        _log_event(conn, task_id, "handoff", actor=actor,
+                   payload={"note": note, "to": next_assignee, "gate_index": row["gate_index"]})
+        msg = f"已移交给 {next_assignee} 审核（门禁 {row['gate_index'] + 1}/{len(gates)}）。"
+    else:
+        # No gates — mark done directly
+        conn.execute(
+            """UPDATE tasks SET status = 'done', handoff_history_json = ?,
+               claim_lock = NULL, claim_expires = NULL, completed_at = ?,
+               updated_at = ? WHERE id = ?""",
+            (json.dumps(history, ensure_ascii=False), now, now, task_id),
+        )
+        _log_event(conn, task_id, "completed", actor=actor, payload={"note": note})
+        msg = "任务已完成（无门禁链）。"
+
+    updated = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+    conn.close()
+
+    return json.dumps({
+        "success": True,
+        "task": _task_to_dict(updated),
+        "message": msg,
+    }, ensure_ascii=False)
+
+
+def kanban_task_approve_handler(args: dict, **kwargs) -> str:
+    task_id = args.get("task_id", "").strip()
+    note = args.get("note", "").strip()
+    claim_token = args.get("claim_token", "").strip()
+
+    if not task_id or not claim_token:
+        return json.dumps({"success": False, "error": "task_id 和 claim_token 为必填项。"})
+
+    parent_agent = kwargs.get("parent_agent")
+    try:
+        conn, row, board_id = _resolve_task_db(task_id, args, parent_agent)
+    except ValueError as e:
+        return json.dumps({"success": False, "error": str(e)})
+
+    if not _cas_handoff(conn, task_id, claim_token):
+        conn.close()
+        return json.dumps({"success": False, "error": "claim_token 无效或已过期。"})
+
+    if row["status"] != "in_review":
+        conn.close()
+        return json.dumps({"success": False, "error": f"任务状态为 '{row['status']}'，无法批准。只有 in_review 状态的任务可以批准。"})
+
+    now = _now()
+    history = json.loads(row["handoff_history_json"])
+    actor = getattr(parent_agent, "name", "reviewer")
+
+    history.append({
+        "action": "approved",
+        "by": actor,
+        "note": note,
+        "timestamp": now,
+    })
+
+    # Advance to next gate
+    gates = json.loads(row["gates_json"])
+    next_gate = None
+    next_idx = row["gate_index"] + 1
+    if next_idx < len(gates):
+        next_gate = gates[next_idx]
+
+    if next_gate:
+        next_assignee = next_gate.get("target_pool", "")
+        conn.execute(
+            """UPDATE tasks SET status = 'in_review', gate_index = ?,
+               assignee = ?, handoff_history_json = ?, claim_lock = NULL,
+               claim_expires = NULL, updated_at = ? WHERE id = ?""",
+            (next_idx, next_assignee, json.dumps(history, ensure_ascii=False), now, task_id),
+        )
+        _log_event(conn, task_id, "approved", actor=actor,
+                   payload={"note": note, "next_gate": next_gate, "next_assignee": next_assignee})
+        msg = f"已批准（门禁 {row['gate_index'] + 1}/{len(gates)}）。流转到下一门禁: {next_assignee}。"
+    else:
+        # All gates passed — final approval
+        conn.execute(
+            """UPDATE tasks SET status = 'approved', handoff_history_json = ?,
+               claim_lock = NULL, claim_expires = NULL, completed_at = ?,
+               updated_at = ? WHERE id = ?""",
+            (json.dumps(history, ensure_ascii=False), now, now, task_id),
+        )
+        _log_event(conn, task_id, "approved", actor=actor,
+                   payload={"note": note, "final": True})
+        msg = f"全部门禁已通过（共 {len(gates)} 步）。任务最终批准！"
+
+    updated = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+    conn.close()
+
+    return json.dumps({
+        "success": True,
+        "task": _task_to_dict(updated),
+        "message": msg,
+    }, ensure_ascii=False)
+
+
+def kanban_task_reject_handler(args: dict, **kwargs) -> str:
+    task_id = args.get("task_id", "").strip()
+    reason = args.get("reason", "").strip()
+    claim_token = args.get("claim_token", "").strip()
+
+    if not task_id or not reason or not claim_token:
+        return json.dumps({"success": False, "error": "task_id、reason 和 claim_token 为必填项。"})
+
+    parent_agent = kwargs.get("parent_agent")
+    try:
+        conn, row, board_id = _resolve_task_db(task_id, args, parent_agent)
+    except ValueError as e:
+        return json.dumps({"success": False, "error": str(e)})
+
+    if not _cas_handoff(conn, task_id, claim_token):
+        conn.close()
+        return json.dumps({"success": False, "error": "claim_token 无效或已过期。"})
+
+    if row["status"] != "in_review":
+        conn.close()
+        return json.dumps({"success": False, "error": f"任务状态为 '{row['status']}'，无法拒绝。只有 in_review 状态的任务可以拒绝。"})
+
+    now = _now()
+    history = json.loads(row["handoff_history_json"])
+    actor = getattr(parent_agent, "name", "reviewer")
+
+    # Find the previous assignee (the drafter/worker)
+    prev_assignee = None
+    for h in reversed(history):
+        if h.get("action") == "handoff":
+            prev_assignee = h.get("from")
+            break
+
+    history.append({
+        "action": "rejected",
+        "by": actor,
+        "reason": reason,
+        "timestamp": now,
+    })
+
+    conn.execute(
+        """UPDATE tasks SET status = 'rejected', assignee = ?,
+           handoff_history_json = ?, claim_lock = NULL, claim_expires = NULL,
+           updated_at = ? WHERE id = ?""",
+        (prev_assignee, json.dumps(history, ensure_ascii=False), now, task_id),
+    )
+    _log_event(conn, task_id, "rejected", actor=actor,
+               payload={"reason": reason, "return_to": prev_assignee})
+
+    updated = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+    conn.close()
+
+    return json.dumps({
+        "success": True,
+        "task": _task_to_dict(updated),
+        "message": f"已拒绝并退回给 {prev_assignee or '上一环节'}。理由: {reason}",
+    }, ensure_ascii=False)
+
+
+def kanban_task_revise_handler(args: dict, **kwargs) -> str:
+    task_id = args.get("task_id", "").strip()
+    note = args.get("note", "").strip()
+    claim_token = args.get("claim_token", "").strip()
+
+    if not task_id or not claim_token:
+        return json.dumps({"success": False, "error": "task_id 和 claim_token 为必填项。"})
+
+    parent_agent = kwargs.get("parent_agent")
+    try:
+        conn, row, board_id = _resolve_task_db(task_id, args, parent_agent)
+    except ValueError as e:
+        return json.dumps({"success": False, "error": str(e)})
+
+    if not _cas_handoff(conn, task_id, claim_token):
+        conn.close()
+        return json.dumps({"success": False, "error": "claim_token 无效或已过期。"})
+
+    if row["status"] != "rejected":
+        conn.close()
+        return json.dumps({"success": False, "error": f"任务状态为 '{row['status']}'，无法重新提交。只有 rejected 状态的任务可以 revise。"})
+
+    now = _now()
+    history = json.loads(row["handoff_history_json"])
+    actor = getattr(parent_agent, "name", "drafter")
+
+    # Find the reviewer to handoff back to
+    reviewer = None
+    for h in reversed(history):
+        if h.get("action") == "rejected":
+            reviewer = h.get("by")
+            break
+
+    history.append({
+        "action": "revised",
+        "by": actor,
+        "note": note,
+        "timestamp": now,
+    })
+
+    conn.execute(
+        """UPDATE tasks SET status = 'in_review', assignee = ?,
+           handoff_history_json = ?, claim_lock = NULL, claim_expires = NULL,
+           updated_at = ? WHERE id = ?""",
+        (reviewer, json.dumps(history, ensure_ascii=False), now, task_id),
+    )
+    _log_event(conn, task_id, "revised", actor=actor,
+               payload={"note": note, "handoff_to": reviewer})
+
+    updated = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+    conn.close()
+
+    return json.dumps({
+        "success": True,
+        "task": _task_to_dict(updated),
+        "message": f"修改完成，已重新提交给 {reviewer or '审核者'}。",
+    }, ensure_ascii=False)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# REGISTRATION — at least one top-level register() for AST discovery
+# ═══════════════════════════════════════════════════════════════════════════════
+
+from tools.registry import registry, tool_error, tool_result  # noqa: E402
+
+
+def _check_kanban(**kwargs) -> bool:
+    """Kanban toolset is always available — no external deps beyond stdlib."""
+    return True
+
+
+# Coordinator tools
+registry.register(
+    name="swarm_board_create",
+    toolset="kanban_swarm",
+    schema=KANBAN_BOARD_CREATE_SCHEMA,
+    handler=lambda args, **kw: kanban_board_create_handler(args, **kw),
+    check_fn=_check_kanban,
+    description="为项目创建 Kanban Board",
+    emoji="📋",
+)
+
+registry.register(
+    name="swarm_board_info",
+    toolset="kanban_swarm",
+    schema=KANBAN_BOARD_INFO_SCHEMA,
+    handler=lambda args, **kw: kanban_board_info_handler(args, **kw),
+    check_fn=_check_kanban,
+    description="查看 Board 信息与列状态",
+    emoji="ℹ️",
+)
+
+registry.register(
+    name="swarm_task_create",
+    toolset="kanban_swarm",
+    schema=KANBAN_TASK_CREATE_SCHEMA,
+    handler=lambda args, **kw: kanban_task_create_handler(args, **kw),
+    check_fn=_check_kanban,
+    description="创建带门禁链的 Kanban 任务",
+    emoji="➕",
+)
+
+registry.register(
+    name="swarm_task_assign",
+    toolset="kanban_swarm",
+    schema=KANBAN_TASK_ASSIGN_SCHEMA,
+    handler=lambda args, **kw: kanban_task_assign_handler(args, **kw),
+    check_fn=_check_kanban,
+    description="分配/重新分配任务",
+    emoji="👤",
+)
+
+registry.register(
+    name="swarm_task_wait",
+    toolset="kanban_swarm",
+    schema=KANBAN_TASK_WAIT_SCHEMA,
+    handler=lambda args, **kw: kanban_task_wait_handler(args, **kw),
+    check_fn=_check_kanban,
+    description="等待任务完成（阻塞轮询）",
+    emoji="⏳",
+)
+
+registry.register(
+    name="swarm_workflow_compile",
+    toolset="kanban_swarm",
+    schema=KANBAN_WORKFLOW_COMPILE_SCHEMA,
+    handler=lambda args, **kw: kanban_workflow_compile_handler(args, **kw),
+    check_fn=_check_kanban,
+    description="从 YAML 编译工作流为 Kanban 任务",
+    emoji="⚙️",
+)
+
+registry.register(
+    name="swarm_board_status",
+    toolset="kanban_swarm",
+    schema=KANBAN_BOARD_STATUS_SCHEMA,
+    handler=lambda args, **kw: kanban_board_status_handler(args, **kw),
+    check_fn=_check_kanban,
+    description="获取 Board 完整状态概览",
+    emoji="📊",
+)
+
+# Worker tools
+registry.register(
+    name="swarm_task_claim",
+    toolset="kanban_swarm",
+    schema=KANBAN_TASK_CLAIM_SCHEMA,
+    handler=lambda args, **kw: kanban_task_claim_handler(args, **kw),
+    check_fn=_check_kanban,
+    description="Worker 认领任务（CAS 原子操作）",
+    emoji="✋",
+)
+
+registry.register(
+    name="swarm_task_read",
+    toolset="kanban_swarm",
+    schema=KANBAN_TASK_READ_SCHEMA,
+    handler=lambda args, **kw: kanban_task_read_handler(args, **kw),
+    check_fn=_check_kanban,
+    description="Worker 读取任务完整详情",
+    emoji="📖",
+)
+
+registry.register(
+    name="swarm_task_handoff",
+    toolset="kanban_swarm",
+    schema=KANBAN_TASK_HANDOFF_SCHEMA,
+    handler=lambda args, **kw: kanban_task_handoff_handler(args, **kw),
+    check_fn=_check_kanban,
+    description="Worker 移交任务给审核者",
+    emoji="↗️",
+)
+
+registry.register(
+    name="swarm_task_approve",
+    toolset="kanban_swarm",
+    schema=KANBAN_TASK_APPROVE_SCHEMA,
+    handler=lambda args, **kw: kanban_task_approve_handler(args, **kw),
+    check_fn=_check_kanban,
+    description="Reviewer 批准当前门禁",
+    emoji="✅",
+)
+
+registry.register(
+    name="swarm_task_reject",
+    toolset="kanban_swarm",
+    schema=KANBAN_TASK_REJECT_SCHEMA,
+    handler=lambda args, **kw: kanban_task_reject_handler(args, **kw),
+    check_fn=_check_kanban,
+    description="Reviewer 拒绝并退回任务",
+    emoji="❌",
+)
+
+registry.register(
+    name="swarm_task_revise",
+    toolset="kanban_swarm",
+    schema=KANBAN_TASK_REVISE_SCHEMA,
+    handler=lambda args, **kw: kanban_task_revise_handler(args, **kw),
+    check_fn=_check_kanban,
+    description="Worker 修改后重新提交",
+    emoji="🔧",
+)

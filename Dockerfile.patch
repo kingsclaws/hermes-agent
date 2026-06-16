@@ -1,20 +1,43 @@
-# Minimal patch build — Phase 10 chat room deployment
-# docker build -t localhost:6678/lex-hermes:latest -f Dockerfile.patch .
+# Patch build — overlay changed lexitool + tool files on latest image
+# Build: docker build --pull=never -t localhost:6678/lex-hermes:latest -f Dockerfile.patch .
 ARG BASE_IMAGE=localhost:6678/lex-hermes:latest
 FROM ${BASE_IMAGE}
 
-# Backend Python modules (Phase 10 + low_temperature fix)
-COPY hermes_cli/kanban_db.py /opt/hermes/hermes_cli/kanban_db.py
-COPY hermes_cli/kanban_legal_swarm.py /opt/hermes/hermes_cli/kanban_legal_swarm.py
-COPY hermes_cli/web_server.py /opt/hermes/hermes_cli/web_server.py
-COPY hermes_cli/chatroom_bot.py /opt/hermes/hermes_cli/chatroom_bot.py
+# ── Changed lexitool vendored modules ──
+COPY vendor/lexitool/lexitool/edit_ops.py /opt/lexitool/lexitool/edit_ops.py
+COPY vendor/lexitool/lexitool/markup.py /opt/lexitool/lexitool/markup.py
+COPY vendor/lexitool/lexitool/ocr.py /opt/lexitool/lexitool/ocr.py
+COPY vendor/lexitool/lexitool/ocr_cli.py /opt/lexitool/lexitool/ocr_cli.py
+COPY vendor/lexitool/lexitool/openxml_opc.py /opt/lexitool/lexitool/openxml_opc.py
+COPY vendor/lexitool/lexitool/review_detailed.py /opt/lexitool/lexitool/review_detailed.py
 
-# Pre-built frontend
-COPY hermes_cli/web_dist/ /opt/hermes/hermes_cli/web_dist/
+# Also update the hermes vendored copy
+COPY vendor/lexitool/lexitool/edit_ops.py /opt/hermes/vendor/lexitool/lexitool/edit_ops.py
+COPY vendor/lexitool/lexitool/markup.py /opt/hermes/vendor/lexitool/lexitool/markup.py
+COPY vendor/lexitool/lexitool/ocr.py /opt/hermes/vendor/lexitool/lexitool/ocr.py
+COPY vendor/lexitool/lexitool/ocr_cli.py /opt/hermes/vendor/lexitool/lexitool/ocr_cli.py
+COPY vendor/lexitool/lexitool/openxml_opc.py /opt/hermes/vendor/lexitool/lexitool/openxml_opc.py
+COPY vendor/lexitool/lexitool/review_detailed.py /opt/hermes/vendor/lexitool/lexitool/review_detailed.py
 
-# Sync to lex-hermes mirror
-RUN cp /opt/hermes/hermes_cli/kanban_db.py /opt/lex-hermes/hermes_cli/kanban_db.py && \
-    cp /opt/hermes/hermes_cli/kanban_legal_swarm.py /opt/lex-hermes/hermes_cli/kanban_legal_swarm.py && \
-    cp /opt/hermes/hermes_cli/web_server.py /opt/lex-hermes/hermes_cli/web_server.py && \
-    cp /opt/hermes/hermes_cli/chatroom_bot.py /opt/lex-hermes/hermes_cli/chatroom_bot.py && \
-    cp -a /opt/hermes/hermes_cli/web_dist/. /opt/lex-hermes/hermes_cli/web_dist/
+# ── Changed tool registration ──
+COPY tools/kanban_toolset.py /opt/hermes/tools/kanban_toolset.py
+COPY tools/lexitool_tool.py /opt/hermes/tools/lexitool_tool.py
+COPY tools/project_management_tool.py /opt/hermes/tools/project_management_tool.py
+COPY tools/legal_orchestration_tool.py /opt/hermes/tools/legal_orchestration_tool.py
+COPY toolsets.py /opt/hermes/toolsets.py
+
+# ── Updated HPSwarm SOPs ──
+RUN mkdir -p /opt/hermes/.hermes-project/roles
+COPY .hermes-project/roles/hpswarm-coordinator.md /opt/hermes/.hermes-project/roles/hpswarm-coordinator.md
+COPY .hermes-project/roles/hpswarm-drafter.md /opt/hermes/.hermes-project/roles/hpswarm-drafter.md
+COPY .hermes-project/roles/hpswarm-reviewer-content.md /opt/hermes/.hermes-project/roles/hpswarm-reviewer-content.md
+COPY .hermes-project/roles/hpswarm-reviewer-format.md /opt/hermes/.hermes-project/roles/hpswarm-reviewer-format.md
+
+# ── Updated session/project binding ──
+COPY hermes_state.py /opt/hermes/hermes_state.py
+
+# ── Clear bytecode cache so Python recompiles from updated sources ──
+RUN find /opt/lexitool/lexitool/__pycache__ -name '*.pyc' -delete 2>/dev/null; \
+    find /opt/hermes/vendor/lexitool/lexitool/__pycache__ -name '*.pyc' -delete 2>/dev/null; \
+    find /opt/hermes/tools/__pycache__ -name '*.pyc' -delete 2>/dev/null; \
+    python3 -c "import lexitool.edit_ops, lexitool.markup, lexitool.ocr, lexitool.ocr_cli, lexitool.openxml_opc, lexitool.review_detailed; print('All modules import OK')"

@@ -15,6 +15,65 @@
 
 ## 核心工具
 
+### Kanban 协调模式（推荐 🆕）
+
+Kanban 工具集 (`kanban_swarm`) 是新的蜂群协调原语。Project 创建时 Board 已自动就绪，直接用任务管理取代手动 delegate。
+
+**Coordinator 工具：**
+
+| 工具 | 用途 |
+|------|------|
+| `swarm_board_status` | 查看 Board 全貌（列+任务+状态） |
+| `swarm_task_create` | 创建任务，指定 assignee + 门禁链 |
+| `swarm_task_assign` | 分配/重新分配任务 |
+| `swarm_task_wait` | 等待任务完成（阻塞轮询） |
+| `swarm_workflow_compile` | 从 YAML 工作流编译任务 |
+
+**Worker 工具（Drafter/Reviewer 使用）：**
+
+| 工具 | 用途 |
+|------|------|
+| `swarm_task_claim` | 认领任务（CAS 原子操作） |
+| `swarm_task_read` | 读取任务详情 + 事件日志 |
+| `swarm_task_handoff` | 完成工作后移交给下一个门禁 |
+| `swarm_task_approve` | 批准当前门禁（流转到下一步或完成） |
+| `swarm_task_reject` | 拒绝并退回上一环节 |
+| `swarm_task_revise` | 修改后重新提交 |
+
+### 典型 Kanban 工作流
+
+```
+1. Coordinator 创建任务，指定门禁链：
+   swarm_task_create(
+     title="起草第三条担保条款",
+     assignee="hpswarm-drafter",
+     gates='[
+       {"type":"review","target_pool":"hpswarm-reviewer-content"},
+       {"type":"approve","target_pool":"hpswarm-reviewer-format"}
+     ]'
+   )
+
+2. Drafter 认领 → 起草 → handoff → 任务自动进入 in_review
+
+3. Reviewer-Content 认领 → 审阅 → approve 或 reject
+   批准: approve → 自动流转到下一个门禁（Format）
+   拒绝: reject → 退回 Drafter → Drafter revise → 重新 handoff
+
+4. 全部门禁通过 → 任务 status=approved → swarm_task_wait 返回
+```
+
+### 门禁链设计指南
+
+| 文档操作 | 推荐门禁链 |
+|---------|-----------|
+| 起草新文档 | drafter → reviewer-content → reviewer-format → reviewer-xref |
+| 修改已有合同 | drafter → reviewer-content → reviewer-ts-consistency |
+| 快速单段编辑 | drafter → reviewer-content（1 步） |
+| 仅格式调整 | drafter → reviewer-format（1 步） |
+| 无审核（简单操作） | 不设置 gates，handoff 直接标记 done |
+
+### 旧版委派（兼容保留）
+
 `delegate_task` — 派发子任务给你的团队成员：
 ```
 delegate_task(

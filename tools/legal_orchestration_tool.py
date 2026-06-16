@@ -181,6 +181,15 @@ LEGAL_ORCHESTRATE_SCHEMA = {
                 },
                 "description": "For task_type=review, override the default review bundle with an explicit reviewer set.",
             },
+            "mode": {
+                "type": "string",
+                "enum": ["direct", "kanban"],
+                "description": (
+                    "协调模式。'direct'（默认）使用 delegate_task 直接派发子 Agent。"
+                    "'kanban' 使用 kanban_swarm 工具集——在项目 Board 上创建任务，"
+                    "Drafter/Reviewer 通过认领→移交→审批流程协作。"
+                ),
+            },
         },
         "required": ["task_type"],
     },
@@ -957,6 +966,103 @@ def _build_review_subtasks(
     return tasks
 
 
+def _handle_kanban_mode(
+    task_type: str,
+    project_root: Path,
+    document_path: str | None,
+    instructions: str | None,
+    args: dict,
+    parent_agent,
+) -> str:
+    """Bridge legal_orchestrate task_types to kanban swarm tasks.
+
+    Maps high-level legal workflow types to concrete kanban tasks with gate chains.
+    """
+    from tools.kanban_toolset import (
+        kanban_board_create_handler,
+        kanban_task_create_handler,
+    )
+
+    project_path = str(project_root)
+
+    # Ensure board exists
+    board_result = json.loads(kanban_board_create_handler(
+        {"project_path": project_path},
+        parent_agent=parent_agent,
+    ))
+    board_id = board_result.get("board", {}).get("id", "")
+
+    created_tasks = []
+
+    if task_type in ("draft", "draft_iterative", "revise"):
+        # Single task: Drafter → Reviewer-Content → Reviewer-Format
+        gates = [
+            {"type": "review", "target_pool": "hpswarm-reviewer-content"},
+            {"type": "approve", "target_pool": "hpswarm-reviewer-format"},
+        ]
+        title = instructions or f"起草文档: {document_path or '新文档'}"
+        result = json.loads(kanban_task_create_handler({
+            "project_path": project_path,
+            "title": title,
+            "description": f"task_type={task_type}\ndocument_path={document_path}\ninstructions={instructions}",
+            "assignee": "hpswarm-drafter",
+            "gates": json.dumps(gates),
+        }, parent_agent=parent_agent))
+        if result.get("success"):
+            created_tasks.append(result["task"])
+
+    elif task_type == "plan":
+        # Plan mode: compile YAML workflow if provided
+        workflow_type = args.get("workflow_type", "")
+        yaml_path = str(project_root / ".hermes-project" / "workflows" / f"{workflow_type}.yaml")
+        if Path(yaml_path).is_file():
+            from tools.kanban_toolset import kanban_workflow_compile_handler
+            result = json.loads(kanban_workflow_compile_handler({
+                "yaml_path": yaml_path,
+                "project_path": project_path,
+            }, parent_agent=parent_agent))
+            if result.get("success"):
+                created_tasks.extend(result.get("tasks", []))
+
+    elif task_type in ("review", "proofread"):
+        # Review: create tasks for each review type
+        review_types = args.get("review_types") or [
+            "review_content", "review_format", "review_ts", "review_xref",
+        ]
+        for rt in review_types:
+            reviewer_map = {
+                "review_content": "hpswarm-reviewer-content",
+                "review_format": "hpswarm-reviewer-format",
+                "review_ts": "hpswarm-reviewer-ts",
+                "review_xref": "hpswarm-reviewer-xref",
+                "review_translation": "hpswarm-reviewer-translation",
+            }
+            reviewer = reviewer_map.get(rt, f"hpswarm-reviewer-{rt.replace('review_', '')}")
+            result = json.loads(kanban_task_create_handler({
+                "project_path": project_path,
+                "title": f"审阅 ({rt}): {document_path or '文档'}",
+                "description": f"document_path={document_path}\ninstructions={instructions}",
+                "assignee": reviewer,
+                "gates": json.dumps([{"type": "review", "target_pool": "hpswarm-coordinator"}]),
+            }, parent_agent=parent_agent))
+            if result.get("success"):
+                created_tasks.append(result["task"])
+
+    return json.dumps({
+        "success": True,
+        "mode": "kanban",
+        "board_id": board_id,
+        "project_path": project_path,
+        "task_type": task_type,
+        "tasks_created": len(created_tasks),
+        "tasks": created_tasks,
+        "message": (
+            f"已在 Kanban Board 上创建 {len(created_tasks)} 个任务。"
+            f"Worker 可以用 swarm_task_claim 认领。"
+        ),
+    }, ensure_ascii=False)
+
+
 def _handle_legal_orchestrate(args: dict, **kwargs) -> str:
     parent_agent = kwargs.get("parent_agent")
     if parent_agent is None:
@@ -984,6 +1090,18 @@ def _handle_legal_orchestrate(args: dict, **kwargs) -> str:
     learning_workflow_type = workflow_type or ("proofread_review" if task_type == "proofread" else "contract_revision")
     if task_type == "draft_iterative" and not workflow_type:
         learning_workflow_type = "document_drafting"
+    mode = str(args.get("mode") or "direct").strip().lower()
+
+    # ── Kanban bridge mode ──────────────────────────────────────────────────
+    if mode == "kanban":
+        return _handle_kanban_mode(
+            task_type=task_type,
+            project_root=project_root,
+            document_path=document_path,
+            instructions=instructions,
+            args=args,
+            parent_agent=parent_agent,
+        )
 
     if task_type == "deliver":
         from tools.registry import registry as _registry

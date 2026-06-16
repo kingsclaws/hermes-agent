@@ -604,7 +604,7 @@ def _apply_project_context(session: dict, project: dict | None, agent=None, db_s
         db = _get_db()
         if db is not None:
             try:
-                db.set_session_project(db_session_id, project_id)
+                db.set_session_project(db_session_id, project_id, project_cwd=project_path)
             except Exception:
                 logger.debug("failed to link session %s to project %s", db_session_id, project_id, exc_info=True)
 

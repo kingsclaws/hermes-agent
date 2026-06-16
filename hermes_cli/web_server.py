@@ -2913,7 +2913,8 @@ async def create_project_session(project_id: str, request: Request):
         db = SessionDB()
         try:
             db.create_session(session_id, source)
-            db.set_session_project(session_id, project.get("id") or project_id)
+            db.set_session_project(session_id, project.get("id") or project_id,
+                                   project_cwd=mgmt_dir)
         finally:
             db.close()
     except Exception as e:
