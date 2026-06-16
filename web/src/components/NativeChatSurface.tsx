@@ -147,6 +147,8 @@ export function NativeChatSurface({
   const [running, setRunning] = useState(false);
   const [stopping, setStopping] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const projectContextRef = useRef(projectContext);
+  projectContextRef.current = projectContext;
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const scrollRefNarrow = useRef<HTMLDivElement | null>(null);
   const assistantIdRef = useRef<string | null>(null);
@@ -388,13 +390,13 @@ export function NativeChatSurface({
         if (resumeTarget) {
           return gw.request<ResumeResult>("session.resume", {
             session_id: resumeTarget,
-            project_context: { ...swarmHint, ...(projectContext ?? {}) },
+            project_context: { ...swarmHint, ...(projectContextRef.current ?? {}) },
             swarm: swarmHint,
           }).catch((e: Error) => {
             // Stale session from localStorage — fall back to creating a fresh one.
             if (/not found/i.test(e.message)) {
               return gw.request<{ session_id: string }>("session.create", {
-                project_context: { ...swarmHint, ...(projectContext ?? {}) },
+                project_context: { ...swarmHint, ...(projectContextRef.current ?? {}) },
                 swarm: swarmHint,
               });
             }
@@ -402,7 +404,7 @@ export function NativeChatSurface({
           });
         }
         return gw.request<{ session_id: string }>("session.create", {
-          project_context: { ...swarmHint, ...(projectContext ?? {}) },
+          project_context: { ...swarmHint, ...(projectContextRef.current ?? {}) },
           swarm: swarmHint,
         });
       })
@@ -441,7 +443,7 @@ export function NativeChatSurface({
       offSubagentComplete();
       gw.close();
     };
-  }, [gw, projectContext, resumeTarget]);
+  }, [gw, resumeTarget]);
 
   // Propagate sessionId to parent (for per-tab persistence).
   useEffect(() => {

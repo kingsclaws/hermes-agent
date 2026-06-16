@@ -59,6 +59,16 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
     }
   }, [activeTabId]);
 
+  // Stable project-context objects: only changes when `projects` refetches,
+  // not on every render.  Prevents NativeChatSurface re-renders.
+  const projectContextCache = useMemo(() => {
+    const cache: Record<string, { id: string; name: string; client?: string; goal?: string; directory?: string; cwd?: string; status?: string }> = {};
+    for (const p of projects) {
+      cache[p.id] = { id: p.id, name: p.name, client: p.client, goal: p.goal, directory: p.directory, cwd: p.cwd, status: p.status };
+    }
+    return cache;
+  }, [projects]);
+
   // ── Responsive state ──────────────────────────────────────────────
   const [narrow, setNarrow] = useState(() =>
     typeof window !== "undefined"
@@ -357,20 +367,7 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
                   <NativeChatSurface
                     projectContext={
                       tab.projectId
-                        ? (() => {
-                            const p = projects.find((pr) => pr.id === tab.projectId);
-                            return p
-                              ? {
-                                  id: p.id,
-                                  name: p.name,
-                                  client: p.client,
-                                  goal: p.goal,
-                                  directory: p.directory,
-                                  cwd: p.cwd,
-                                  status: p.status,
-                                }
-                              : { id: tab.projectId, name: tab.projectId };
-                          })()
+                        ? projectContextCache[tab.projectId] ?? { id: tab.projectId, name: tab.projectId }
                         : null
                     }
                     resumeTarget={tab.sessionId}
