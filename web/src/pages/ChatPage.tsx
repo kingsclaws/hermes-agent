@@ -178,7 +178,7 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
   // terminal session when it changes.
   const resumeParam = searchParams.get("resume");
   const projectParam = searchParams.get("project");
-  const channel = useMemo(() => generateChannelId(), [resumeParam]);
+  const channel = useMemo(() => generateChannelId(), []);
   const [projects, setProjects] = useState<ProjectInfo[]>([]);
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const [selectedProjectId, setSelectedProjectId] = useState<string>(() => {
@@ -204,31 +204,6 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
       setMountedTabs((prev) => new Set(prev).add(activeTabId));
     }
   }, [activeTabId]);
-
-  useEffect(() => {
-    if (!resumeParam) return;
-
-    let cancelled = false;
-
-    api
-      .getSessionLatestDescendant(resumeParam)
-      .then((res) => {
-        if (cancelled || !res.session_id || res.session_id === resumeParam) {
-          return;
-        }
-
-        const next = new URLSearchParams(searchParams);
-        next.set("resume", res.session_id);
-        setSearchParams(next, { replace: true });
-      })
-      .catch(() => {
-        // Best-effort: old servers or missing sessions should not block chat.
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [resumeParam, searchParams, setSearchParams]);
 
   useEffect(() => {
     if (!projectParam || projectParam === selectedProjectId) return;
