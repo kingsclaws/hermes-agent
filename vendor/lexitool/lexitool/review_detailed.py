@@ -215,6 +215,128 @@ def rich_inspect(docx_path: str, para_range: tuple[int, int] | None = None,
     return result
 
 
+def review_workflow(docx_path: str) -> dict:
+    """End-to-end legal review workflow: read → discover → audit → recommend.
+
+    Composes existing lexitool modules into a single structured report.
+    Read-only — does not modify the document.
+
+    Returns a dict with phases:
+        document_profile, clause_inventory, term_audit, lint_results,
+        recommendations, verification_checklist.
+    """
+    from .markup import lex_read, lex_read_structured
+    from .clause_ops import list_clauses
+    from .defined_terms import term_format_audit_all
+    from .lint import check as lint_check
+
+    result: dict = {
+        "document_profile": {},
+        "clause_inventory": {},
+        "term_audit": {},
+        "lint_results": {},
+        "recommendations": [],
+        "verification_checklist": [],
+    }
+
+    # Phase 1: Document profile
+    try:
+        stats_raw = lex_read(docx_path, mode="stats")
+        result["document_profile"]["stats"] = stats_raw
+    except Exception as exc:
+        result["document_profile"]["error"] = str(exc)
+
+    try:
+        paras = lex_read_structured(docx_path, include_comments=True)
+        heading_count = sum(1 for p in paras if p["role"] == "heading")
+        body_count = sum(1 for p in paras if p["role"] == "body")
+        spacer_count = sum(1 for p in paras if p["role"] == "spacer")
+        tc_paras = [p["para_num"] for p in paras if p["tc_count"] > 0]
+        result["document_profile"].update({
+            "total_paragraphs": len(paras),
+            "heading_count": heading_count,
+            "body_count": body_count,
+            "spacer_count": spacer_count,
+            "paragraphs_with_tc": len(tc_paras),
+            "tc_paragraph_numbers": tc_paras[:50],
+        })
+    except Exception as exc:
+        result["document_profile"]["structured_error"] = str(exc)
+
+    # Phase 2: Clause inventory
+    try:
+        clauses = list_clauses(docx_path)
+        result["clause_inventory"] = {
+            "total_clauses": len(clauses),
+            "clauses": [
+                {
+                    "num": c.para_num if hasattr(c, "para_num") else i + 1,
+                    "level": c.level if hasattr(c, "level") else "",
+                    "heading": c.heading[:200] if hasattr(c, "heading") else "",
+                }
+                for i, c in enumerate(clauses[:80])
+            ],
+        }
+    except Exception as exc:
+        result["clause_inventory"]["error"] = str(exc)
+
+    # Phase 3: Defined term audit
+    try:
+        audit = term_format_audit_all(docx_path)
+        result["term_audit"] = {
+            "total_terms": audit.get("total_terms", 0) if isinstance(audit, dict) else 0,
+            "formatted_count": audit.get("formatted_count", 0) if isinstance(audit, dict) else 0,
+            "unformatted": audit.get("unformatted", []) if isinstance(audit, dict) else [],
+        }
+    except Exception as exc:
+        result["term_audit"]["error"] = str(exc)
+
+    # Phase 4: Lint
+    try:
+        lint = lint_check(docx_path)
+        result["lint_results"] = {
+            "total_rules": len(lint) if isinstance(lint, list) else 0,
+            "failures": [
+                r for r in (lint if isinstance(lint, list) else [])
+                if isinstance(r, dict) and not r.get("pass", True)
+            ],
+        }
+    except Exception as exc:
+        result["lint_results"]["error"] = str(exc)
+
+    # Phase 5: Recommendations
+    recs: list[str] = []
+    tc_count = result["document_profile"].get("paragraphs_with_tc", 0)
+    if tc_count:
+        recs.append(f"Document has {tc_count} paragraphs with tracked changes — review and accept/reject before finalizing.")
+    unformatted = result["term_audit"].get("unformatted", [])
+    if unformatted:
+        recs.append(f"{len(unformatted)} defined terms are not bolded — run lex_bold_terms on affected paragraphs.")
+    lint_failures = result["lint_results"].get("failures", [])
+    if lint_failures:
+        recs.append(f"{len(lint_failures)} lint rules failed — run lex_lint with fix mode to auto-correct.")
+    spacer_count = result["document_profile"].get("spacer_count", 0)
+    if spacer_count > 10:
+        recs.append(f"Document has {spacer_count} empty paragraphs — consider cleanup with lex_cleanup.")
+    if not recs:
+        recs.append("Document looks clean. Verify formatting against convention profile and proceed to finalize.")
+    result["recommendations"] = recs
+
+    # Phase 6: Verification checklist
+    result["verification_checklist"] = [
+        "Accept or reject all tracked changes",
+        "Verify defined terms are consistently bolded",
+        "Check heading numbering is continuous",
+        "Validate page breaks and section breaks",
+        "Audit headers and footers for stale entities",
+        "Confirm font consistency across body text",
+        "Check table formatting consistency",
+        "Verify cross-references resolve correctly",
+    ]
+
+    return result
+
+
 def format_rich_output(paras: list[dict]) -> str:
     """格式化为 agent 可读的文本输出。"""
     lines = []

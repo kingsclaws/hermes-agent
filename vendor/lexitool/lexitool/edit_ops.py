@@ -389,12 +389,16 @@ def insert_text(docx_path: str, para: int, text: str, *,
                 author: str = "agent",
                 bold: bool = False, italic: bool = False,
                 font: str = "宋体", font_size: float = 11.0,
+                inherit_format: bool = True,
                 output: str | None = None) -> EditResult:
     """
     在指定段落末尾插入文字。
 
     tc=False（默认）：直接插入 w:r 文本（无修订标记）
     tc=True：通过 <w:ins> 注入 Track Changes
+
+    当 inherit_format=True（默认）时，从段落继承字体的 rPr，
+    除非调用者显式传入了 font / font_size / bold / italic。
     """
     doc_xml, other = _read_docx(docx_path)
     root = etree.fromstring(doc_xml)
@@ -404,6 +408,40 @@ def insert_text(docx_path: str, para: int, text: str, *,
 
     sz = float(font_size) * 2  # half-points
 
+    # Resolve formatting: inherit from paragraph when no explicit overrides
+    base_rPr = _first_run_rpr(p) if inherit_format else None
+
+    if base_rPr is not None and font == "宋体" and font_size == 11.0 and not bold and not italic:
+        # Full inheritance — no explicit overrides
+        run = _make_text_run_from_rpr(text, base_rPr)
+    elif base_rPr is not None:
+        # Partial inheritance — explicit overrides applied on top of clone
+        rPr = copy.deepcopy(base_rPr)
+        rFonts = rPr.find(f"{W}rFonts")
+        if rFonts is None:
+            rFonts = etree.SubElement(rPr, f"{W}rFonts")
+        if font != "宋体":
+            rFonts.set(f"{W}ascii", font)
+            rFonts.set(f"{W}hAnsi", font)
+            rFonts.set(f"{W}eastAsia", font)
+        sz_el = rPr.find(f"{W}sz")
+        if sz_el is None:
+            sz_el = etree.SubElement(rPr, f"{W}sz")
+        sz_el.set(f"{W}val", str(int(sz)))
+        szCs_el = rPr.find(f"{W}szCs")
+        if szCs_el is None:
+            szCs_el = etree.SubElement(rPr, f"{W}szCs")
+        szCs_el.set(f"{W}val", str(int(sz)))
+        if bold:
+            if rPr.find(f"{W}b") is None:
+                etree.SubElement(rPr, f"{W}b")
+        if italic:
+            if rPr.find(f"{W}i") is None:
+                etree.SubElement(rPr, f"{W}i")
+        run = _make_text_run_from_rpr(text, rPr)
+    else:
+        run = _make_run(text, bold=bold, italic=italic, font=font, sz=sz)
+
     if tc:
         tid = _next_tc_id(root)
         from datetime import datetime
@@ -411,7 +449,7 @@ def insert_text(docx_path: str, para: int, text: str, *,
         ins.set(f"{W}id", str(tid))
         ins.set(f"{W}author", author)
         ins.set(f"{W}date", datetime.now().strftime("%Y-%m-%dT%H:%M:%SZ"))
-        ins.append(_make_run(text, bold=bold, italic=italic, font=font, sz=sz))
+        ins.append(run)
         p.append(ins)
         _write_docx(docx_path, etree.tostring(root, xml_declaration=True,
                                               encoding="UTF-8", standalone=True),
@@ -420,7 +458,7 @@ def insert_text(docx_path: str, para: int, text: str, *,
                           message=f"TC 插入段落 {para} 完成（id={tid}）",
                           path=output or docx_path)
     else:
-        p.append(_make_run(text, bold=bold, italic=italic, font=font, sz=sz))
+        p.append(run)
         _write_docx(docx_path, etree.tostring(root, xml_declaration=True,
                                               encoding="UTF-8", standalone=True),
                     other, output=output)
@@ -1741,6 +1779,11 @@ def find_and_replace_all(
     match_count = 0
     errors: list[str] = []
 
+    # TC mode: pre-allocate id range.  Each replacement can consume several
+    # del + ins ids; we re-scan after each call to stay safe.
+    if tc:
+        dt = datetime.now().strftime("%Y-%m-%dT%H:%M:%SZ")
+
     for para in reversed(search_paras):
         pid = id(para)
         if pid not in by_para:
@@ -1748,8 +1791,15 @@ def find_and_replace_all(
         # Sort matches in reverse start order
         span_matches = sorted(by_para[pid], key=lambda x: x[0], reverse=True)
         for s, e in span_matches:
-            rendered = render_paragraph(para, include_deleted=True)
-            ok = replace_span(rendered, s, e, replace)
+            if tc:
+                tid = _next_tc_id(root)
+                ok = _replace_text_with_tc_precise(
+                    para, s, e, replace,
+                    tc_id=tid, author=author, date=dt,
+                )
+            else:
+                rendered = render_paragraph(para, include_deleted=True)
+                ok = replace_span(rendered, s, e, replace)
             if not ok:
                 errors.append(f"failed to replace at offset {s}-{e} in a paragraph")
                 continue
@@ -1776,4 +1826,252 @@ def find_and_replace_all(
         "paragraphs_touched": len(by_para),
         "errors": errors or None,
         "path": out_path,
+    }
+
+
+# ── Patch Transaction ─────────────────────────────────────────────────────────
+
+
+@dataclass
+class PatchEdit:
+    """A single edit queued inside a PatchTransaction."""
+    op: str
+    kwargs: dict
+    desc: str = ""
+
+
+class PatchTransaction:
+    """Bundle multiple edits into one planned, applied, and verified unit.
+
+    Usage::
+
+        pt = PatchTransaction("doc.docx", author="JT")
+        pt.add("replace_text", para=2, old="甲方", new="乙方")
+        pt.add("insert_text", para=3, text="新增条款内容")
+        pt.plan()
+        result = pt.apply()
+        if result["applied"] == 2:
+            print(pt.summary())
+    """
+
+    _SUPPORTED = {
+        "insert_text", "replace_text", "replace_text_in_place",
+        "insert_paragraph_block", "delete_text", "delete_paragraph_tc",
+        "set_table_cells_by_position",
+    }
+
+    def __init__(self, docx_path: str, *, author: str = "agent"):
+        self._path = docx_path
+        self._author = author
+        self._edits: list[PatchEdit] = []
+        self._plan_result: dict = {}
+        self._apply_result: dict = {}
+        self._verify_result: dict = {}
+
+    # ── fluent API ─────────────────────────────────────────────────────────
+
+    def add(self, op: str, *, desc: str = "", **kwargs) -> "PatchTransaction":
+        if op not in self._SUPPORTED:
+            raise ValueError(f"unsupported patch op {op!r}; supported: {sorted(self._SUPPORTED)}")
+        if "author" not in kwargs:
+            kwargs["author"] = self._author
+        self._edits.append(PatchEdit(op=op, kwargs=kwargs, desc=desc))
+        return self
+
+    @property
+    def edit_count(self) -> int:
+        return len(self._edits)
+
+    # ── plan ────────────────────────────────────────────────────────────────
+
+    def plan(self) -> dict:
+        """Resolve all targets and validate BEFORE applying.
+
+        Returns a dict with *valid* (bool), *edits_planned* (int), and
+        *warnings* (list[str]) for things that are suspicious but not fatal.
+        """
+        warnings: list[str] = []
+        doc_xml, other = _read_docx(self._path)
+        root = etree.fromstring(doc_xml)
+
+        for i, edit in enumerate(self._edits):
+            kw = edit.kwargs
+            para = kw.get("para")
+
+            if para is not None:
+                p = _find_para(root, para)
+                if p is None:
+                    warnings.append(f"[{i}] {edit.op}: paragraph {para} not found — will fail at apply")
+
+        self._plan_result = {
+            "valid": len([w for w in warnings if "not found" in w]) == 0,
+            "edits_planned": len(self._edits),
+            "warnings": warnings or None,
+        }
+        return self._plan_result
+
+    # ── apply ───────────────────────────────────────────────────────────────
+
+    def apply(self, *, stop_on_error: bool = False) -> dict:
+        """Execute every queued edit.  Each edit writes through to the
+        document immediately so later edits see the updated state.
+
+        Set *stop_on_error* to ``True`` to abort on the first failure.
+        """
+        applied: list[dict] = []
+        errors: list[str] = []
+
+        for i, edit in enumerate(self._edits):
+            try:
+                result = self._dispatch(edit)
+                if isinstance(result, EditResult):
+                    if result.ok:
+                        applied.append({"idx": i, "op": edit.op, "message": result.message})
+                    else:
+                        errors.append(f"[{i}] {edit.op}: {result.message}")
+                        if stop_on_error:
+                            break
+                elif isinstance(result, dict):
+                    if result.get("ok"):
+                        applied.append({"idx": i, "op": edit.op, "message": result.get("message", "ok")})
+                    else:
+                        errors.append(f"[{i}] {edit.op}: {result.get('error', result.get('message', 'failed'))}")
+                        if stop_on_error:
+                            break
+                else:
+                    applied.append({"idx": i, "op": edit.op})
+            except Exception as exc:
+                errors.append(f"[{i}] {edit.op}: {exc}")
+                if stop_on_error:
+                    break
+
+        self._apply_result = {
+            "applied": len(applied),
+            "total": len(self._edits),
+            "details": applied,
+            "errors": errors or None,
+        }
+        return self._apply_result
+
+    def _dispatch(self, edit: PatchEdit):
+        kw = dict(edit.kwargs)
+        kw.setdefault("output", self._path)
+        op = edit.op
+
+        if op == "insert_text":
+            return insert_text(self._path, **kw)
+        elif op == "replace_text":
+            return replace_text(self._path, **kw)
+        elif op == "replace_text_in_place":
+            return replace_text_in_place(self._path, **kw)
+        elif op == "insert_paragraph_block":
+            return insert_paragraph_block(self._path, **kw)
+        elif op == "delete_text":
+            return delete_text(self._path, **kw)
+        elif op == "delete_paragraph_tc":
+            return delete_paragraph_tc(self._path, **kw)
+        elif op == "set_table_cells_by_position":
+            return set_table_cells_by_position(self._path, **kw)
+        else:
+            raise ValueError(f"unknown op {op!r}")
+
+    # ── verify ──────────────────────────────────────────────────────────────
+
+    def verify(self) -> dict:
+        """Re-read affected paragraphs and confirm expected changes.
+
+        Each edit can carry optional *verify_contains* and
+        *verify_not_contains* keys that are checked after apply.
+        """
+        affected: set[int] = set()
+        checks: list[dict] = []
+        mismatches: list[dict] = []
+
+        for edit in self._edits:
+            kw = edit.kwargs
+            para = kw.get("para")
+            if para is not None:
+                affected.add(para)
+            if "verify_contains" in kw or "verify_not_contains" in kw:
+                checks.append({
+                    "para": para,
+                    "should_contain": kw.get("verify_contains"),
+                    "should_not_contain": kw.get("verify_not_contains"),
+                })
+
+        if not affected and not checks:
+            self._verify_result = {"verified": 0, "mismatches": None, "note": "no verification criteria"}
+            return self._verify_result
+
+        # Read back affected paragraphs via lex_read markup
+        from .markup import lex_read as _lex_read
+        try:
+            text = _lex_read(self._path, paras=sorted(affected), mode="full", show_tc="all")
+        except Exception as exc:
+            self._verify_result = {"verified": 0, "mismatches": None, "error": str(exc)}
+            return self._verify_result
+
+        for check in checks:
+            if check["should_contain"] and check["should_contain"] not in text:
+                mismatches.append({**check, "issue": "expected text not found"})
+            if check["should_not_contain"] and check["should_not_contain"] in text:
+                mismatches.append({**check, "issue": "unexpected text still present"})
+
+        self._verify_result = {
+            "verified": len(affected),
+            "checks_run": len(checks),
+            "mismatches": mismatches or None,
+        }
+        return self._verify_result
+
+    # ── summary ─────────────────────────────────────────────────────────────
+
+    def summary(self) -> dict:
+        """Emit a structured change report combining plan, apply, and verify."""
+        return {
+            "path": self._path,
+            "plan": self._plan_result,
+            "apply": self._apply_result,
+            "verify": self._verify_result,
+        }
+
+
+def verify_edits(
+    docx_path: str,
+    expected: list[dict],
+) -> dict:
+    """Verify that edits were applied correctly by re-reading affected paragraphs.
+
+    Each entry in *expected* is a dict with:
+        - ``para`` (int): 1-indexed paragraph number.
+        - ``should_contain`` (list[str]): text snippets that must be present.
+        - ``should_not_contain`` (list[str]): text snippets that must NOT be present.
+
+    Returns a dict with keys: ``verified``, ``checks_run``, ``mismatches``.
+    """
+    from .markup import lex_read as _lex_read
+
+    affected = sorted({e["para"] for e in expected if "para" in e})
+    if not affected:
+        return {"verified": 0, "checks_run": 0, "mismatches": None, "note": "no paragraphs to verify"}
+
+    try:
+        text = _lex_read(docx_path, paras=affected, mode="full", show_tc="all")
+    except Exception as exc:
+        return {"verified": 0, "checks_run": 0, "mismatches": None, "error": str(exc)}
+
+    mismatches = []
+    for check in expected:
+        para = check.get("para")
+        for snippet in check.get("should_contain") or []:
+            if snippet not in text:
+                mismatches.append({"para": para, "issue": "expected text not found", "expected": snippet})
+        for snippet in check.get("should_not_contain") or []:
+            if snippet in text:
+                mismatches.append({"para": para, "issue": "unexpected text still present", "unexpected": snippet})
+
+    return {
+        "verified": len(affected),
+        "checks_run": len(expected),
+        "mismatches": mismatches or None,
     }

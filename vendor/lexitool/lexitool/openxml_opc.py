@@ -180,6 +180,93 @@ def ensure_override_content_type(
     return True
 
 
+class RelationshipGraph:
+    """In-memory graph of all OPC relationships loaded from a package.
+
+    Parses every .rels file in the zip at construction time and indexes
+    relationships by source, target, and type for efficient lookups.
+
+    Usage:
+        with zipfile.ZipFile(docx_path) as zf:
+            graph = RelationshipGraph(zf)
+            rel = graph.resolve("word/document.xml", "rId5")
+            back_refs = graph.reverse_lookup("word/styles.xml")
+            headers = graph.list_by_type(
+                "http://schemas.openxmlformats.org/officeDocument/2006/"
+                "relationships/header"
+            )
+            print(graph.audit())
+    """
+
+    def __init__(self, zf: zipfile.ZipFile):
+        # source_rels_path → {rId: Relationship}
+        self._source_map: dict[str, dict[str, Relationship]] = {}
+        # resolved_target → [(source_rels_path, rId, Relationship)]
+        self._target_index: dict[str, list[tuple[str, str, Relationship]]] = {}
+        # rel_type → [(source_rels_path, rId, Relationship)]
+        self._type_index: dict[str, list[tuple[str, str, Relationship]]] = {}
+
+        for name in zf.namelist():
+            if not name.endswith(".rels"):
+                continue
+            rels = parse_relationships_xml(zf.read(name))
+            if not rels:
+                continue
+            self._source_map[name] = rels
+            for rid, rel in rels.items():
+                if rel.target:
+                    resolved = resolve_target_path(name, rel.target)
+                else:
+                    resolved = ""
+                self._target_index.setdefault(resolved, []).append(
+                    (name, rid, rel)
+                )
+                self._type_index.setdefault(rel.rel_type, []).append(
+                    (name, rid, rel)
+                )
+
+    def resolve(self, source: str, rId: str) -> Relationship | None:
+        """Resolve a relationship ID from a source part path.
+
+        Args:
+            source: Source part path, e.g. "word/document.xml".
+            rId: Relationship ID, e.g. "rId5".
+        """
+        rels_file = rels_member_for_part(source)
+        rels = self._source_map.get(rels_file, {})
+        return rels.get(rId)
+
+    def reverse_lookup(self, target: str) -> list[tuple[str, str, Relationship]]:
+        """Find all relationships pointing to a resolved target path.
+
+        Returns list of (source_rels_path, rId, Relationship) tuples.
+        """
+        return self._target_index.get(target, [])
+
+    def list_by_type(
+        self, rel_type: str
+    ) -> list[tuple[str, str, Relationship]]:
+        """List all relationships of a given type URI.
+
+        Returns list of (source_rels_path, rId, Relationship) tuples.
+        """
+        return self._type_index.get(rel_type, [])
+
+    def audit(self) -> dict:
+        """Return a summary of all relationship types and counts."""
+        summary: dict[str, dict] = {}
+        for rel_type, items in self._type_index.items():
+            short = rel_type.split("/")[-1] if "/" in rel_type else rel_type
+            summary[short] = {"type": rel_type, "count": len(items)}
+        return {
+            "total_rels_files": len(self._source_map),
+            "total_relationships": sum(
+                len(r) for r in self._source_map.values()
+            ),
+            "by_type": summary,
+        }
+
+
 def document_relationships(zf: zipfile.ZipFile) -> dict[str, Relationship]:
     return read_relationships(zf, "word/_rels/document.xml.rels")
 

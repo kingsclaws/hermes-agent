@@ -1275,6 +1275,196 @@ def _load_comment_map(docx_path: str) -> dict[int, list[str]]:
     return comment_map
 
 
+# ── Structured paragraph export ────────────────────────────────────────────────
+
+def _extract_para_font_summary(para_el) -> dict:
+    """Collect unique fonts and size range across all runs in a paragraph."""
+    fonts: set[str] = set()
+    sizes: set[float] = set()
+    for rPr in para_el.iter(f"{W}rPr"):
+        rFonts = rPr.find(f"{W}rFonts")
+        if rFonts is not None:
+            for attr in ("eastAsia", "ascii", "hAnsi", "cs"):
+                val = rFonts.get(f"{W}{attr}", "")
+                if val:
+                    fonts.add(val)
+        sz = rPr.find(f"{W}sz") or rPr.find(f"{W}szCs")
+        if sz is not None:
+            try:
+                sizes.add(float(sz.get(f"{W}val", "0")) / 2)
+            except (ValueError, TypeError):
+                pass
+    return {
+        "fonts": sorted(fonts),
+        "size_pt_min": min(sizes) if sizes else None,
+        "size_pt_max": max(sizes) if sizes else None,
+    }
+
+
+def _extract_para_indent(pPr) -> dict | None:
+    """Extract indent values (left, right, firstLine, hanging) in twips."""
+    if pPr is None:
+        return None
+    ind = pPr.find(f"{W}ind")
+    if ind is None:
+        return None
+    result: dict[str, int] = {}
+    for attr in ("left", "right", "firstLine", "hanging"):
+        val = ind.get(f"{W}{attr}")
+        if val is not None:
+            try:
+                result[attr] = int(val)
+            except (ValueError, TypeError):
+                pass
+    return result if result else None
+
+
+def _extract_para_spacing(pPr) -> dict | None:
+    """Extract spacing values (before, after, line, lineRule) in twips."""
+    if pPr is None:
+        return None
+    spacing = pPr.find(f"{W}spacing")
+    if spacing is None:
+        return None
+    result: dict = {}
+    for attr in ("before", "after", "line"):
+        val = spacing.get(f"{W}{attr}")
+        if val is not None:
+            try:
+                result[attr] = int(val)
+            except (ValueError, TypeError):
+                pass
+    lineRule = spacing.get(f"{W}lineRule")
+    if lineRule:
+        result["lineRule"] = lineRule
+    return result if result else None
+
+
+def _extract_para_numbering(pPr) -> dict | None:
+    """Extract numbering info (numId, ilvl) from pPr."""
+    if pPr is None:
+        return None
+    numPr = pPr.find(f"{W}numPr")
+    if numPr is None:
+        return None
+    result: dict = {}
+    numId = numPr.find(f"{W}numId")
+    if numId is not None:
+        result["numId"] = numId.get(f"{W}val", "")
+    ilvl = numPr.find(f"{W}ilvl")
+    if ilvl is not None:
+        try:
+            result["ilvl"] = int(ilvl.get(f"{W}val", "0"))
+        except (ValueError, TypeError):
+            pass
+    return result if result else None
+
+
+def _has_cross_reference(para_el) -> bool:
+    """Check if paragraph contains cross-reference fields (REF, PAGEREF, NOTEREF, STYLEREF)."""
+    for instr in para_el.iter(f"{W}instrText"):
+        text = (instr.text or "").strip()
+        if text:
+            ft = text.split()[0].upper()
+            if ft in ("REF", "PAGEREF", "NOTEREF", "STYLEREF"):
+                return True
+    return False
+
+
+def _determine_para_role(style_id: str, pPr, para_el) -> str:
+    """Classify paragraph as heading, toc, body, or spacer."""
+    if style_id:
+        sid = style_id.lower()
+        if "heading" in sid or "标题" in sid:
+            return "heading"
+        if "toc" in sid:
+            return "toc"
+    inferred = _infer_heading(para_el, pPr)
+    if inferred:
+        return "heading"
+    if not _plain_final_text(para_el):
+        return "spacer"
+    return "body"
+
+
+def lex_read_structured(
+    path: str,
+    paras: list[int] | None = None,
+    *,
+    include_comments: bool = True,
+) -> list[dict]:
+    """Read document as structured paragraph metadata.
+
+    Returns a list of dicts, one per paragraph, with keys:
+        para_num, role, style_id, outline_level, numbering, text,
+        tc_count, has_comment, has_cross_reference, risk_flags,
+        indent, spacing, alignment, font_summary.
+
+    This is designed for agents that need structured metadata
+    (role, style, numbering, risk flags) without parsing text markup.
+    """
+    with zipfile.ZipFile(path, "r") as zf:
+        doc_xml = zf.read("word/document.xml")
+
+    root = etree.fromstring(doc_xml)
+    body = root.find(f"{W}body")
+    if body is None:
+        return []
+
+    comment_map = _load_comment_map(path) if include_comments else {}
+    para_set = {int(p) for p in paras} if paras else None
+
+    result: list[dict] = []
+    para_count = 0
+
+    for child in body:
+        if child.tag != f"{W}p":
+            continue
+        para_count += 1
+        if para_set is not None and para_count not in para_set:
+            continue
+
+        pPr = child.find(f"{W}pPr")
+
+        style_id = ""
+        outline_level = None
+        if pPr is not None:
+            pStyle = pPr.find(f"{W}pStyle")
+            if pStyle is not None:
+                style_id = pStyle.get(f"{W}val", "")
+            ol = pPr.find(f"{W}outlineLvl")
+            if ol is not None:
+                try:
+                    outline_level = int(ol.get(f"{W}val", "0"))
+                except (ValueError, TypeError):
+                    pass
+
+        role = _determine_para_role(style_id, pPr, child)
+        text = _plain_final_text(child)
+        tc_count = _count_tc_segments(child)
+        risk_flags = _classify_legal_text(text) if text else []
+
+        entry = {
+            "para_num": para_count,
+            "role": role,
+            "style_id": style_id,
+            "outline_level": outline_level,
+            "numbering": _extract_para_numbering(pPr),
+            "text": text,
+            "tc_count": tc_count,
+            "has_comment": para_count in comment_map,
+            "has_cross_reference": _has_cross_reference(child),
+            "risk_flags": risk_flags,
+            "indent": _extract_para_indent(pPr),
+            "spacing": _extract_para_spacing(pPr),
+            "alignment": pPr.find(f"{W}jc").get(f"{W}val", "") if pPr is not None and pPr.find(f"{W}jc") is not None else None,
+            "font_summary": _extract_para_font_summary(child),
+        }
+        result.append(entry)
+
+    return result
+
+
 def lex_read(
     path: str,
     paras: list[int] | None = None,
@@ -1292,6 +1482,7 @@ def lex_read(
         mode: "full" (all content), "structure" (headings only),
             "legal_structure" (Word headings plus legal-style Chinese clauses),
             "review" (legal review dashboard: structure, TC hotspots, comments),
+            "structured" (JSON list of paragraph metadata dicts),
             "stats" (counts), "headers_footers" (only section header/footer mapping).
         show_tc: Track Changes mode.
             True or "all" — show [ins]/[del] markup (default).
@@ -1306,6 +1497,10 @@ def lex_read(
     Returns:
         Annotated text with §-prefixed paragraph markers.
     """
+    if mode == "structured":
+        import json
+        data = lex_read_structured(path, paras, include_comments=include_comments)
+        return json.dumps(data, ensure_ascii=False, indent=2)
     if mode == "structure":
         return _export_structure(path)
     if mode in {"legal_structure", "legal-outline", "legal_outline"}:

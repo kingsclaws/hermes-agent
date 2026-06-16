@@ -4,6 +4,20 @@
 > 当 lexitool 或 lex_docx 工具出现问题，或需要修改/新增工具时，
 > 将此文件内容粘贴给 Claude，Claude 即可获得完整的工具参数上下文来协助修复。
 
+## Agent skills
+
+### Issue tracker
+
+Local markdown issues under `.scratch/<feature-slug>/`. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Default canonical labels (`needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`). See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: one `CONTEXT.md` at repo root, one `docs/adr/`. See `docs/agents/domain.md`.
+
 ## 项目概述
 
 这是 [Hermes Agent](https://github.com/NousResearch/hermes-agent) 的 fork，

@@ -609,6 +609,112 @@ def test_legal_harness_workflows_handoffs_and_scorecard(tmp_path):
     assert passing_scorecard["status"] == "passed"
 
 
+def test_insert_text_inherits_paragraph_format(tmp_path):
+    """insert_text(inherit_format=True) copies the first run's rPr from the paragraph."""
+    from lexitool.edit_ops import insert_text
+
+    path = tmp_path / "inherit.docx"
+    doc = Document()
+    p = doc.add_paragraph()
+    run = p.add_run("现有文本")
+    run.font.size = Pt(16)
+    run.font.name = "Calibri"
+    doc.save(path)
+
+    result = insert_text(str(path), 0, "追加文本", inherit_format=True, tc=False)
+
+    assert result.ok is True
+
+    with zipfile.ZipFile(path, "r") as zf:
+        root = etree.fromstring(zf.read("word/document.xml"))
+    para = next(root.iter(f"{W}p"))
+    runs = list(para.iter(f"{W}r"))
+    last_run = runs[-1]
+    rPr = last_run.find(f"{W}rPr")
+    assert rPr is not None
+    sz = rPr.find(f"{W}sz")
+    assert sz is not None
+    assert sz.get(f"{W}val") == "32"  # 16pt × 2
+    rFonts = rPr.find(f"{W}rFonts")
+    assert rFonts is not None
+    assert rFonts.get(f"{W}ascii") == "Calibri"
+
+
+def test_insert_text_explicit_format_overrides_inherited(tmp_path):
+    """Explicit font/size kwargs override inherited paragraph formatting."""
+    from lexitool.edit_ops import insert_text
+
+    path = tmp_path / "override.docx"
+    doc = Document()
+    p = doc.add_paragraph()
+    run = p.add_run("现有文本")
+    run.font.size = Pt(16)
+    run.font.name = "Calibri"
+    doc.save(path)
+
+    result = insert_text(str(path), 0, "追加文本",
+                         font="Times New Roman", font_size=14.0,
+                         inherit_format=True, tc=False)
+
+    assert result.ok is True
+
+    with zipfile.ZipFile(path, "r") as zf:
+        root = etree.fromstring(zf.read("word/document.xml"))
+    para = next(root.iter(f"{W}p"))
+    last_run = list(para.iter(f"{W}r"))[-1]
+    rPr = last_run.find(f"{W}rPr")
+    sz = rPr.find(f"{W}sz")
+    assert sz.get(f"{W}val") == "28"  # 14pt × 2
+    rFonts = rPr.find(f"{W}rFonts")
+    assert rFonts.get(f"{W}ascii") == "Times New Roman"
+
+
+def test_find_and_replace_all_tc_mode_produces_del_and_ins(tmp_path):
+    """find_and_replace_all(tc=True) wraps changes in w:del / w:ins."""
+    from lexitool.edit_ops import find_and_replace_all
+
+    path = tmp_path / "tc-replace-all.docx"
+    doc = Document()
+    doc.add_paragraph("本公司承诺提供支持。")
+    doc.add_paragraph("本公司不承担担保义务。")
+    doc.save(path)
+
+    result = find_and_replace_all(str(path), "本公司", "甲方", tc=True, author="JT")
+
+    assert result["ok"] is True
+    assert result["match_count"] == 2
+
+    with zipfile.ZipFile(path, "r") as zf:
+        root = etree.fromstring(zf.read("word/document.xml"))
+    del_elements = list(root.iter(f"{W}del"))
+    ins_elements = list(root.iter(f"{W}ins"))
+    assert len(del_elements) >= 2
+    assert len(ins_elements) >= 2
+
+    del_texts = "".join(t.text or "" for t in root.iter(f"{W}delText"))
+    ins_texts = "".join(t.text or "" for t in root.iter(f"{W}t"))
+    assert "本公司" in del_texts
+    assert "甲方" in ins_texts
+
+
+def test_reload_purges_vendored_modules():
+    """reload_lexitool_tools() purges lexitool.* from sys.modules before re-import."""
+    import sys as _sys
+    from tools.lexitool_tool import reload_lexitool_tools
+
+    # Ensure a vendored module is present before reload
+    import lexitool.edit_ops  # noqa: F811
+    assert "lexitool.edit_ops" in _sys.modules
+
+    result = reload_lexitool_tools()
+
+    assert result["vendored_modules_purged"] > 0
+    # After purge, vendored modules are re-imported lazily on first use.
+    import importlib
+    eo = importlib.import_module("lexitool.edit_ops")
+    assert eo is not None
+
+
 def test_legal_harness_tools_are_exposed_in_lex_toolsets():
     from toolsets import resolve_toolset
 

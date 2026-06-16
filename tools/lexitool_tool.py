@@ -4550,6 +4550,71 @@ def _handle_comment(args: dict, **kwargs) -> str:
 
 # ── Registration ──────────────────────────────────────────────────────────────
 
+LEX_REVIEW_WORKFLOW_SCHEMA = {
+    "name": "lex_review_workflow",
+    "description": "End-to-end legal review workflow: read, discover clauses, audit terms, lint, recommend. Read-only.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "path": {
+                "type": "string",
+                "description": "Path to the .docx file.",
+            },
+        },
+        "required": ["path"],
+    },
+}
+
+def _handle_review_workflow(args: dict, **kwargs) -> str:
+    from lexitool.review_detailed import review_workflow
+    path = _resolve_path(args["path"])
+    try:
+        result = review_workflow(path)
+        return tool_result(result)
+    except Exception as exc:
+        return tool_error(str(exc))
+
+
+LEX_VERIFY_EDITS_SCHEMA = {
+    "name": "lex_verify_edits",
+    "description": "Verify that edits were applied correctly. Re-reads affected paragraphs and checks expectations.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "path": {
+                "type": "string",
+                "description": "Path to the .docx file.",
+            },
+            "expected": {
+                "type": "string",
+                "description": "JSON array of expected results, each with: para (int), should_contain (list[str]), should_not_contain (list[str]).",
+            },
+            "output": {
+                "type": "string",
+                "description": "Optional output path for verification report.",
+            },
+        },
+        "required": ["path", "expected"],
+    },
+}
+
+def _handle_verify_edits(args: dict, **kwargs) -> str:
+    import json
+    from lexitool.edit_ops import verify_edits
+    path = _resolve_path(args["path"])
+    try:
+        expected = json.loads(args["expected"])
+    except (json.JSONDecodeError, TypeError) as exc:
+        return tool_error(f"Invalid 'expected' JSON: {exc}")
+    try:
+        result = verify_edits(path, expected)
+        return tool_result(result)
+    except Exception as exc:
+        return tool_error(str(exc))
+
+
+# ── Registration ──────────────────────────────────────────────────────────────
+
 _TOOLS = [
     # Read
     ("lex_read",     "lexitool", LEX_READ_SCHEMA,     _handle_read),
@@ -4589,6 +4654,8 @@ _TOOLS = [
     ("lex_convention_profile", "lexitool", LEX_CONVENTION_PROFILE_SCHEMA, _handle_lex_convention_profile),
     ("legal_review_plan",      "lexitool", LEGAL_REVIEW_PLAN_SCHEMA,      _handle_legal_review_plan),
     ("edit_verification_record", "lexitool", EDIT_VERIFICATION_RECORD_SCHEMA, _handle_edit_verification_record),
+    ("lex_review_workflow",    "lexitool", LEX_REVIEW_WORKFLOW_SCHEMA,    _handle_review_workflow),
+    ("lex_verify_edits",       "lexitool", LEX_VERIFY_EDITS_SCHEMA,       _handle_verify_edits),
     ("legal_harness_migrate",  "lexitool", LEGAL_HARNESS_MIGRATE_SCHEMA,  _handle_legal_harness_migrate),
     ("legal_harness_workflow", "lexitool", LEGAL_HARNESS_WORKFLOW_SCHEMA, _handle_legal_harness_workflow),
     ("legal_handoff_record",   "lexitool", LEGAL_HANDOFF_RECORD_SCHEMA,   _handle_legal_handoff_record),
@@ -4615,15 +4682,28 @@ for _name, _toolset, _schema, _handler in _TOOLS:
 
 
 def reload_lexitool_tools() -> dict:
-    """Hot-reload all lexitool tools by re-importing this module."""
+    """Hot-reload all lexitool tools by re-importing this module.
+
+    Purges vendored ``lexitool.*`` modules from ``sys.modules`` before
+    re-import so that handler-level lazy imports resolve to fresh code.
+    """
+    import sys
+    import importlib
+    import tools.lexitool_tool
+
     before = set(registry.get_tool_names_for_toolset("lexitool"))
+
+    # Purge vendored lexitool modules so the re-import picks up fresh code.
+    purged = 0
+    for key in sorted(sys.modules.keys()):
+        if key == "lexitool" or key.startswith("lexitool."):
+            del sys.modules[key]
+            purged += 1
 
     with registry.batch_tools_changed():
         for name in list(before):
             registry.deregister(name)
 
-        import importlib
-        import tools.lexitool_tool
         importlib.reload(tools.lexitool_tool)
 
     invalidate_check_fn_cache()
@@ -4633,4 +4713,5 @@ def reload_lexitool_tools() -> dict:
         "deregistered": len(before),
         "reregistered": len(after),
         "tools": sorted(after),
+        "vendored_modules_purged": purged,
     }
