@@ -6021,7 +6021,12 @@ def _ws_auth_ok(ws: "WebSocket") -> bool:
             return False
 
     token = ws.query_params.get("token", "")
-    return hmac.compare_digest(token.encode(), _SESSION_TOKEN.encode())
+    ok = hmac.compare_digest(token.encode(), _SESSION_TOKEN.encode())
+    if not ok:
+        _log.warning("WS auth failed: path=%s token_len=%d session_len=%d token_head=%s",
+                     ws.url.path, len(token), len(_SESSION_TOKEN),
+                     token[:8] if len(token) >= 8 else token)
+    return ok
 
 # Per-channel subscriber registry used by /api/pub (PTY-side gateway → dashboard)
 # and /api/events (dashboard → browser sidebar).  Keyed by an opaque channel id
@@ -6710,6 +6715,8 @@ _CHATROOM_GC_SECONDS = 600  # 10 min idle before GC
 class ChatRoom:
     room_id: str
     subscribers: set[WebSocket] = field(default_factory=set)
+    # Track which subscribers are bots so we can GC rooms that only have bots
+    bot_subscribers: set[WebSocket] = field(default_factory=set)
     # In-memory message log for replay on join
     messages: list[dict] = field(default_factory=list)
     max_messages: int = 200
@@ -6814,6 +6821,7 @@ async def _spawn_bot_worker(
         env["ROOM_ID"] = room_id
         env["RELAY_WS_URL"] = ws_url
         env["HERMES_SESSION_TOKEN"] = _SESSION_TOKEN
+        env["SIMULATE"] = "1"  # FIXME: Remove after debugging
 
         proc = await asyncio.create_subprocess_exec(
             python,
@@ -6869,6 +6877,8 @@ async def chatroom_ws(ws: WebSocket, room_id: str) -> None:
     to @mentions via Hermes CLIsubprocesses.
     """
     if not _ws_auth_ok(ws):
+        await ws.accept()
+        await ws.close(code=4401, reason="Unauthorized")
         return
 
     # Validate room_id
@@ -6901,6 +6911,8 @@ async def chatroom_ws(ws: WebSocket, room_id: str) -> None:
                             _CHATROOMS[room_id].gc_timer.cancel()
                     room = _CHATROOMS[room_id]
                     room.subscribers.add(ws)
+                    if my_role == "bot":
+                        room.bot_subscribers.add(ws)
 
                 # Send history replay to the joining client
                 async with _CHATROOMS_LOCK:
@@ -6939,7 +6951,8 @@ async def chatroom_ws(ws: WebSocket, room_id: str) -> None:
 
                 # Auto-spawn bot workers if this is the first user
                 if my_role != "bot":
-                    await _chatroom_ensure_bots(room_id)
+                    pass  # DISABLED: subprocess bots replaced by in-process @mention handling
+                    # await _chatroom_ensure_bots(room_id)
 
             elif msg_type == "message":
                 content = (raw.get("content") or "").strip()
@@ -6972,6 +6985,15 @@ async def chatroom_ws(ws: WebSocket, room_id: str) -> None:
                 fmtd = _format_chatroom_msg(msg)
                 await _chatroom_broadcast(room_id, fmtd)
 
+                # Handle @mentions — spawn background tasks for bot responses
+                mentions = _parse_mentions(content)
+                if mentions:
+                    for bot_name in mentions:
+                        if bot_name in _CHATROOM_BOT_PROFILES:
+                            asyncio.create_task(
+                                _handle_chatroom_mention(room_id, bot_name, content, my_username)
+                            )
+
             elif msg_type == "thinking" or msg_type == "thinking_end":
                 # Relay thinking status from bots to all subscribers
                 fmtd = _format_chatroom_msg(_ChatroomMsg(
@@ -7003,22 +7025,109 @@ async def chatroom_ws(ws: WebSocket, room_id: str) -> None:
     except WebSocketDisconnect:
         pass
     finally:
+        # Remove from room and decide if bots should be evicted
+        do_gc = False
+        evict_bots: list[WebSocket] = []
+        kill_procs: list["asyncio.subprocess.Process"] = []
+        leave_msg_data: dict | None = None
         async with _CHATROOMS_LOCK:
             room = _CHATROOMS.get(room_id)
             if room:
                 room.subscribers.discard(ws)
-                # Broadcast leave
+                room.bot_subscribers.discard(ws)
                 if my_username and my_role != "bot":
-                    leave_msg = _format_chatroom_msg(_ChatroomMsg(
+                    leave_msg_data = _format_chatroom_msg(_ChatroomMsg(
                         id=f"leave-{int(time.time())}",
                         msg_type="system",
                         username="system",
                         content=f"{my_username} left the room",
                         timestamp=time.time(),
                     ))
-                    await _chatroom_broadcast(room_id, leave_msg)
+                    # If no human subscribers remain, evict bots so room can GC
+                    human_count = len(room.subscribers) - len(room.bot_subscribers)
+                    if human_count <= 0:
+                        evict_bots = list(room.bot_subscribers)
+                        kill_procs = list(room.bot_procs.values())
+                        room.bot_procs.clear()
                 if not room.subscribers:
+                    do_gc = True
+
+        # Broadcast leave (outside lock to avoid deadlock with bot disconnects)
+        if leave_msg_data is not None:
+            await _chatroom_broadcast(room_id, leave_msg_data)
+
+        # Kill bot processes so they don't reconnect
+        for proc in kill_procs:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+
+        # Close bot connections (outside lock — their disconnect handlers need it)
+        for bot_ws in evict_bots:
+            try:
+                await bot_ws.close(4001, "Room empty")
+            except Exception:
+                pass
+
+        if do_gc:
+            async with _CHATROOMS_LOCK:
+                if room_id in _CHATROOMS and not _CHATROOMS[room_id].subscribers:
                     _chatroom_gc_after_delay(room_id)
+
+
+def _parse_mentions(content: str) -> list[str]:
+    """Extract @botname mentions from a message. Returns deduplicated list."""
+    import re as _re
+    names: list[str] = []
+    seen: set[str] = set()
+    for m in _re.finditer(r"@([a-zA-Z][a-zA-Z0-9_.-]*)", content):
+        name = m.group(1)
+        if name not in seen:
+            seen.add(name)
+            names.append(name)
+    return names
+
+
+async def _handle_chatroom_mention(
+    room_id: str,
+    bot_name: str,
+    user_message: str,
+    sender: str,
+) -> None:
+    """Process an @mention for a bot and send its response to the room."""
+    profile = bot_name  # Bot name IS the profile name (e.g. "lex-drafter")
+    display_name = bot_name.replace("lex-", "").replace("-", " ").title()
+
+    # Send thinking status
+    thinking_msg = _format_chatroom_msg(_ChatroomMsg(
+        id=f"think-{int(time.time() * 1000)}-{bot_name}",
+        msg_type="thinking",
+        username=bot_name,
+        content="processing",
+        timestamp=time.time(),
+        role="bot",
+        profile=profile,
+    ))
+    await _chatroom_broadcast(room_id, thinking_msg)
+
+    # Generate reply (simulated for now, real Hermes CLIsubprocess later)
+    try:
+        reply = f"[{display_name}] Simulation mode — I received: \"{user_message[:150]}\" and would respond as {profile}."
+    except Exception:
+        reply = f"[{display_name}] Error processing your request."
+
+    # Send reply
+    reply_msg = _format_chatroom_msg(_ChatroomMsg(
+        id=f"msg-{int(time.time() * 1000)}-{bot_name}",
+        msg_type="message",
+        username=bot_name,
+        content=reply,
+        timestamp=time.time(),
+        role="bot",
+        profile=profile,
+    ))
+    await _chatroom_broadcast(room_id, reply_msg)
 
 
 async def _chatroom_broadcast(
@@ -7032,19 +7141,25 @@ async def _chatroom_broadcast(
     async with _CHATROOMS_LOCK:
         room = _CHATROOMS.get(room_id)
         if room is None:
+            _log.warning("CHATROOM BROADCAST room=%s NOT FOUND", room_id)
             return
         subs = list(room.subscribers)
-    for ws in subs:
+    _log.debug("CHATROOM BROADCAST room=%s subs=%d ex=%d", room_id, len(subs), len(ex))
+
+    async def _send_one(ws: WebSocket) -> None:
         if ws in ex:
-            continue
+            return
         try:
-            await ws.send_json(msg)
-        except Exception:
-            pass
+            await asyncio.wait_for(ws.send_json(msg), timeout=1.0)
+        except Exception as e:
+            _log.debug("CHATROOM SEND FAIL ws=%s err=%s", id(ws), e)
+
+    await asyncio.gather(*(_send_one(ws) for ws in subs), return_exceptions=True)
 
 
 async def _chatroom_ensure_bots(room_id: str) -> None:
     """Ensure bot worker subprocesses are spawned for a chatroom."""
+    _log.debug("CHATROOM ENSURE_BOTS room=%s START pid=%d", room_id, os.getpid())
     async with _CHATROOMS_LOCK:
         room = _CHATROOMS.get(room_id)
         if room is None:
@@ -7057,9 +7172,11 @@ async def _chatroom_ensure_bots(room_id: str) -> None:
         for bid in dead:
             del room.bot_procs[bid]
         if room.bot_procs:
+            _log.debug("CHATROOM ENSURE_BOTS room=%s bots already running", room_id)
             return
 
     bots = _get_available_bots()
+    _log.debug("CHATROOM ENSURE_BOTS room=%s spawning %d bots", room_id, len(bots))
     for bot in bots:
         proc = await _spawn_bot_worker(room_id, bot.profile, bot.id)
         if proc:
@@ -7067,6 +7184,11 @@ async def _chatroom_ensure_bots(room_id: str) -> None:
                 room = _CHATROOMS.get(room_id)
                 if room:
                     room.bot_procs[bot.id] = proc
+
+    async with _CHATROOMS_LOCK:
+        room = _CHATROOMS.get(room_id)
+        sub_cnt = len(room.subscribers) if room else -1
+    _log.debug("CHATROOM ENSURE_BOTS room=%s DONE subs=%d", room_id, sub_cnt)
 
 
 @app.get("/api/chatroom/bots")
