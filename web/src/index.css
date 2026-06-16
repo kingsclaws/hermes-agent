@@ -63,38 +63,60 @@
   --background-base: #041c1c;
   --background-alpha: 1;
 
+  /* ── Readability overrides (override DS Collapse/Mondwest) ──────── */
+
+  /* Swap the DS display fonts for a system-native stack.  The upstream
+     Hermes Desktop (apps/desktop) uses Segoe UI / SF Pro exclusively for
+     UI chrome; Collapse is reserved for the BrandMark wordmark only. */
+  --font-sans: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+    "SF Pro Text", "SF Pro Display", Roboto, "Helvetica Neue", Arial,
+    sans-serif;
+  --font-mono: "JetBrains Mono", "Cascadia Code", "SF Mono", ui-monospace,
+    Menlo, Monaco, Consolas, monospace;
+
+  /* Keep display utility classes legible — DS `text-display` forces
+     uppercase + 0.05em tracking.  With a system font that's acceptable;
+     with Collapse or Mondwest it's illegible. */
+  --font-rules-compressed: var(--font-sans);
+  --font-rules-expanded: var(--font-sans);
+  --font-mondwest: var(--font-sans);
+
   /* Consumed by <Backdrop />; also theme-switchable. */
   --warm-glow: rgba(255, 189, 56, 0.35);
-  --noise-opacity-mul: 1;
+  --noise-opacity-mul: 0.25;
+
+  /* Improve DS text-secondary / text-tertiary contrast.  DS defaults
+     (80% / 65% midground) are hard to read on dark backgrounds. */
+  --text-secondary: color-mix(in srgb, var(--midground-base) 88%, transparent);
+  --text-tertiary: color-mix(in srgb, var(--midground-base) 78%, transparent);
+  --text-disabled: color-mix(in srgb, var(--midground-base) 55%, transparent);
 
   /* Typography tokens — rewritten by ThemeProvider. Defaults match the
      system stack so themes that don't override look native. */
-  --theme-font-sans: system-ui, -apple-system, "Segoe UI", Roboto,
-    "Helvetica Neue", Arial, sans-serif;
-  --theme-font-mono: ui-monospace, "SF Mono", "Cascadia Mono", Menlo,
-    Consolas, monospace;
+  --theme-font-sans: var(--font-sans);
+  --theme-font-mono: var(--font-mono);
   --theme-font-display: var(--theme-font-sans);
-  --theme-base-size: 15px;
-  --theme-line-height: 1.55;
+  --theme-base-size: 16px;
+  --theme-line-height: 1.6;
   --theme-letter-spacing: 0;
 
   /* Layout tokens. */
   --radius: 0.5rem;
   --theme-radius: 0.5rem;
-  --theme-spacing-mul: 0.85;
-  --theme-density: compact;
+  --theme-spacing-mul: 1.0;
+  --theme-density: comfortable;
 
   /* Desktop-aligned chrome tokens.  These mirror the desktop app's
      pane/surface hierarchy without importing Electron-only runtime code. */
   --dt-background: var(--background-base);
   --dt-foreground: var(--midground);
   --dt-sidebar: color-mix(in srgb, var(--background-base) 88%, #000);
-  --dt-panel: color-mix(in srgb, var(--midground-base) 5%, var(--background-base));
-  --dt-panel-strong: color-mix(in srgb, var(--midground-base) 8%, var(--background-base));
-  --dt-panel-border: color-mix(in srgb, var(--midground-base) 16%, transparent);
-  --dt-panel-border-strong: color-mix(in srgb, var(--midground-base) 26%, transparent);
-  --dt-hover: color-mix(in srgb, var(--midground-base) 10%, transparent);
-  --dt-active: color-mix(in srgb, var(--midground-base) 16%, transparent);
+  --dt-panel: color-mix(in srgb, var(--midground-base) 6%, var(--background-base));
+  --dt-panel-strong: color-mix(in srgb, var(--midground-base) 10%, var(--background-base));
+  --dt-panel-border: color-mix(in srgb, var(--midground-base) 22%, transparent);
+  --dt-panel-border-strong: color-mix(in srgb, var(--midground-base) 32%, transparent);
+  --dt-hover: color-mix(in srgb, var(--midground-base) 12%, transparent);
+  --dt-active: color-mix(in srgb, var(--midground-base) 18%, transparent);
   --dt-statusbar: color-mix(in srgb, var(--background-base) 94%, #000);
   --dt-shadow: 0 24px 80px rgba(0, 0, 0, 0.28);
 }
@@ -183,8 +205,8 @@ code { font-size: 0.875rem; }
   --color-destructive-foreground: #ffffff;
   --color-success: #4ade80;
   --color-warning: #ffbd38;
-  --color-border: color-mix(in srgb, var(--midground-base) 15%, transparent);
-  --color-input: color-mix(in srgb, var(--midground-base) 15%, transparent);
+  --color-border: color-mix(in srgb, var(--midground-base) 22%, transparent);
+  --color-input: color-mix(in srgb, var(--midground-base) 22%, transparent);
   --color-ring: var(--midground);
   --color-popover: color-mix(in srgb, var(--midground-base) 4%, var(--background-base));
   --color-popover-foreground: var(--midground);

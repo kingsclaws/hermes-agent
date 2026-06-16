@@ -20,9 +20,11 @@ import {
   Wifi,
   WifiOff,
   Play,
+  Building2,
+  ChevronDown,
 } from "lucide-react";
 import { api } from "@/lib/api";
-import type { RoomMessage, BotInfo } from "@/lib/api";
+import type { RoomMessage, BotInfo, ProjectInfo, WorkflowDefinition } from "@/lib/api";
 import { ChatroomClient } from "@/lib/roomClient";
 import type { ConnectionState } from "@/lib/roomClient";
 import { cn } from "@/lib/utils";
@@ -83,12 +85,16 @@ function BotSidebar({
   onMention,
   onRunWorkflow,
   compiling,
+  workflowDefs,
+  projectName,
 }: {
   bots: BotInfo[];
   connectionState: ConnectionState;
   onMention: (profile: string) => void;
-  onRunWorkflow?: () => void;
+  onRunWorkflow?: (workflowId: string) => void;
   compiling?: boolean;
+  workflowDefs?: WorkflowDefinition[];
+  projectName?: string;
 }) {
   const statusTone = (status: string): "success" | "warning" | "secondary" | "destructive" => {
     if (status === "done") return "success";
@@ -145,21 +151,48 @@ function BotSidebar({
       </div>
 
       {onRunWorkflow && (
-        <div className="p-2 border-t border-border">
-          <Button
-            size="xs"
-            ghost
-            className="w-full text-xs justify-start"
-            onClick={onRunWorkflow}
-            disabled={compiling}
-          >
-            {compiling ? (
-              <Spinner className="w-3 h-3" />
-            ) : (
-              <Play className="w-3 h-3" />
-            )}
-            <span className="ml-1">Run Workflow</span>
-          </Button>
+        <div className="p-2 border-t border-border flex flex-col gap-1">
+          {projectName && (
+            <div className="flex items-center gap-1.5 px-1 mb-1">
+              <Building2 className="w-3 h-3 text-secondary shrink-0" />
+              <span className="text-[10px] font-medium text-secondary truncate">{projectName}</span>
+            </div>
+          )}
+          {workflowDefs && workflowDefs.length > 0 ? (
+            workflowDefs.map((wf) => (
+              <Button
+                key={wf.id}
+                size="xs"
+                ghost
+                className="w-full text-xs justify-start"
+                onClick={() => onRunWorkflow(wf.id)}
+                disabled={compiling}
+              >
+                {compiling ? (
+                  <Spinner className="w-3 h-3" />
+                ) : (
+                  <Play className="w-3 h-3" />
+                )}
+                <span className="ml-1 truncate">{wf.id.replace(/_/g, " ")}</span>
+                <span className="text-[9px] text-secondary ml-auto shrink-0">{wf.node_count}n</span>
+              </Button>
+            ))
+          ) : (
+            <Button
+              size="xs"
+              ghost
+              className="w-full text-xs justify-start"
+              onClick={() => onRunWorkflow("")}
+              disabled={compiling}
+            >
+              {compiling ? (
+                <Spinner className="w-3 h-3" />
+              ) : (
+                <Play className="w-3 h-3" />
+              )}
+              <span className="ml-1">Run Workflow</span>
+            </Button>
+          )}
         </div>
       )}
     </div>
@@ -392,9 +425,10 @@ function RoomComposer({
 // ---------------------------------------------------------------------------
 
 export default function LegalSwarmChat() {
-  const [searchParams] = useSearchParams();
+  const [searchParams, setSearchParams] = useSearchParams();
   const board = searchParams.get("board") ?? "";
   const runId = searchParams.get("run") ?? "";
+  const projectId = searchParams.get("project") ?? "";
 
   const isWorkflowRoom = !!(board && runId);
   const [messages, setMessages] = useState<RoomMessage[]>([]);
@@ -403,11 +437,16 @@ export default function LegalSwarmChat() {
   const [connectionState, setConnectionState] = useState<ConnectionState>("idle");
   const [statusLoading, setStatusLoading] = useState(true);
   const [compiling, setCompiling] = useState(false);
+  const [project, setProject] = useState<ProjectInfo | null>(null);
+  const [projects, setProjects] = useState<ProjectInfo[]>([]);
+  const [projectSelectorOpen, setProjectSelectorOpen] = useState(false);
+  const [workflowDefs, setWorkflowDefs] = useState<WorkflowDefinition[]>([]);
   const { showToast } = useToast();
   const navigate = useNavigate();
 
   const clientRef = useRef<ChatroomClient | null>(null);
   const msgIdSet = useRef<Set<string>>(new Set());
+  const selectorRef = useRef<HTMLDivElement>(null);
 
   // ── Connect room / chatroom ────────────────────────────────────────────
 
@@ -443,6 +482,36 @@ export default function LegalSwarmChat() {
     };
   }, [board, runId]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // ── Load project context ───────────────────────────────────────────────
+
+  useEffect(() => {
+    if (projectId) {
+      api.getProject(projectId).then(setProject).catch(() => setProject(null));
+      api.fetchWorkflowDefinitions().then((res) => {
+        setWorkflowDefs(res.definitions ?? []);
+      }).catch(() => {});
+    } else {
+      setProject(null);
+      setWorkflowDefs([]);
+      // Load all projects for the selector dropdown
+      api.fetchProjects().then((res) => {
+        setProjects(res.projects ?? []);
+      }).catch(() => {});
+    }
+  }, [projectId]);
+
+  // Close project selector on outside click
+  useEffect(() => {
+    if (!projectSelectorOpen) return;
+    const handler = (e: MouseEvent) => {
+      if (selectorRef.current && !selectorRef.current.contains(e.target as Node)) {
+        setProjectSelectorOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [projectSelectorOpen]);
+
   // ── Load bots ──────────────────────────────────────────────────────────
 
   useEffect(() => {
@@ -463,6 +532,7 @@ export default function LegalSwarmChat() {
             kind: b.kind,
             icon: b.icon,
             profile: b.profile,
+            description: b.kind || "",
           } as BotInfo)));
         }
       } catch { /* ignore */ }
@@ -483,6 +553,7 @@ export default function LegalSwarmChat() {
             kind: b.kind,
             icon: b.icon,
             profile: b.profile,
+            description: b.kind || "",
           } as BotInfo)));
         }
       } catch { /* ignore */ }
@@ -527,9 +598,22 @@ export default function LegalSwarmChat() {
     setInput((prev) => prev + `@${profile} `);
   }, []);
 
-  const handleRunWorkflow = useCallback(() => {
-    navigate("/kanban");
-  }, [navigate]);
+  const handleRunWorkflow = useCallback(async (workflowId: string) => {
+    if (!projectId || compiling) return;
+    setCompiling(true);
+    try {
+      const result = await api.compileSwarmWorkflow(projectId, workflowId);
+      const params = new URLSearchParams();
+      params.set("board", result.board);
+      params.set("run", result.run_id);
+      params.set("project", projectId);
+      navigate(`/swarm-chat?${params.toString()}`);
+    } catch (e: any) {
+      showToast(e?.message ?? "Failed to compile workflow", "error");
+    } finally {
+      setCompiling(false);
+    }
+  }, [projectId, compiling, navigate, showToast]);
 
   // ── Loading state ────────────────────────────────────────────────────
 
@@ -541,19 +625,82 @@ export default function LegalSwarmChat() {
     );
   }
 
+  // ── Project selection ─────────────────────────────────────────────────
+
+  const selectProject = useCallback((id: string) => {
+    const params = new URLSearchParams(searchParams);
+    params.set("project", id);
+    setSearchParams(params);
+    setProjectSelectorOpen(false);
+  }, [searchParams, setSearchParams]);
+
   // ── Render ────────────────────────────────────────────────────────────
 
   return (
     <div className="flex flex-col h-full">
       <PluginSlot name="swarmchat:top" />
 
+      {/* Project context bar */}
+      {!projectId && !isWorkflowRoom && (
+        <div className="px-4 py-2 border-b border-border bg-card/30 flex items-center gap-3">
+          <Building2 className="w-4 h-4 text-secondary shrink-0" />
+          <span className="text-xs text-secondary">No project selected. </span>
+          <div className="relative" ref={selectorRef}>
+            <Button
+              size="xs"
+              ghost
+              className="text-xs"
+              onClick={() => setProjectSelectorOpen((v) => !v)}
+            >
+              <span>Select a project</span>
+              <ChevronDown className="w-3 h-3 ml-1" />
+            </Button>
+            {projectSelectorOpen && (
+              <div className="absolute top-full left-0 mt-1 w-64 max-h-48 overflow-y-auto bg-popover border border-border rounded-md shadow-lg z-50">
+                {projects.length === 0 ? (
+                  <p className="text-xs text-secondary p-2">No projects available</p>
+                ) : (
+                  projects.map((p) => (
+                    <button
+                      key={p.id}
+                      type="button"
+                      className="flex items-center gap-2 px-3 py-1.5 w-full text-left hover:bg-secondary/10 text-xs"
+                      onClick={() => selectProject(p.id)}
+                    >
+                      <Building2 className="w-3 h-3 text-secondary shrink-0" />
+                      <span className="font-medium truncate">{p.name || p.id}</span>
+                    </button>
+                  ))
+                )}
+              </div>
+            )}
+          </div>
+          <span className="text-[10px] text-secondary ml-auto">
+            Select a project to enable workflow compilation
+          </span>
+        </div>
+      )}
+
+      {/* Project header badge (when project is selected) */}
+      {projectId && project && !isWorkflowRoom && (
+        <div className="px-4 py-1.5 border-b border-border bg-primary/5 flex items-center gap-2">
+          <Building2 className="w-3.5 h-3.5 text-primary shrink-0" />
+          <span className="text-xs font-medium">{project.name || projectId}</span>
+          {project.client && (
+            <span className="text-[10px] text-secondary">{project.client}</span>
+          )}
+        </div>
+      )}
+
       <div className="flex flex-1 min-h-0">
         <BotSidebar
           bots={bots}
           connectionState={connectionState}
           onMention={handleMention}
-          onRunWorkflow={handleRunWorkflow}
+          onRunWorkflow={projectId ? handleRunWorkflow : undefined}
           compiling={compiling}
+          workflowDefs={projectId && !isWorkflowRoom ? workflowDefs : undefined}
+          projectName={project?.name || projectId}
         />
 
         <div className="flex flex-1 flex-col min-w-0">

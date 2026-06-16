@@ -77,6 +77,7 @@ import ProfilesPage from "@/pages/ProfilesPage";
 import SkillsPage from "@/pages/SkillsPage";
 import PluginsPage from "@/pages/PluginsPage";
 import ChatPage from "@/pages/ChatPage";
+import { ChatTabProvider } from "@/contexts/ChatTabContext";
 import ProjectFilesPage from "@/pages/ProjectFilesPage";
 import ProjectDashboardPage from "@/pages/ProjectDashboardPage";
 import LaunchPad from "@/pages/LaunchPad";
@@ -805,16 +806,18 @@ export default function App() {
                 </Routes>
 
                 {embeddedChat && !chatOverriddenByPlugin && (
-                  <div
-                    data-chat-active={isChatRoute ? "true" : "false"}
-                    className={cn(
-                      "min-h-0 min-w-0",
-                      isChatRoute ? "flex flex-1 flex-col" : "hidden",
-                    )}
-                    aria-hidden={!isChatRoute}
-                  >
-                    <ChatPage isActive={isChatRoute} />
-                  </div>
+                  <ChatTabProvider>
+                    <div
+                      data-chat-active={isChatRoute ? "true" : "false"}
+                      className={cn(
+                        "min-h-0 min-w-0",
+                        isChatRoute ? "flex flex-1 flex-col" : "hidden",
+                      )}
+                      aria-hidden={!isChatRoute}
+                    >
+                      <ChatPage isActive={isChatRoute} />
+                    </div>
+                  </ChatTabProvider>
                 )}
               </div>
               <PluginSlot name="post-main" />

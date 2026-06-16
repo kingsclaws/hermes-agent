@@ -195,7 +195,7 @@ export default function LaunchPad() {
       try {
         const result = await api.compileSwarmWorkflow(selectedId, workflowId);
         navigate(
-          `/swarm-board?board=${encodeURIComponent(result.board)}&run=${encodeURIComponent(result.run_id)}`,
+          `/swarm-board?board=${encodeURIComponent(result.board)}&run=${encodeURIComponent(result.run_id)}&project=${encodeURIComponent(selectedId)}`,
         );
       } catch (e: any) {
         showToast(e?.message ?? "Failed to compile workflow", "error");
@@ -212,7 +212,7 @@ export default function LaunchPad() {
       try {
         const result = await api.createRoom(selectedId, workflowId);
         navigate(
-          `/swarm-chat?board=${encodeURIComponent(result.board)}&run=${encodeURIComponent(result.run_id)}`,
+          `/swarm-chat?board=${encodeURIComponent(result.board)}&run=${encodeURIComponent(result.run_id)}&project=${encodeURIComponent(selectedId)}`,
         );
       } catch (e: any) {
         showToast(e?.message ?? "Failed to create chat room", "error");

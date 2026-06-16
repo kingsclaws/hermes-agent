@@ -10,8 +10,10 @@ import { Markdown } from "@/components/Markdown";
 import { GatewayClient, type ConnectionState } from "@/lib/gatewayClient";
 import { executeSlash, parseSlash } from "@/lib/slashExec";
 import { cn } from "@/lib/utils";
-import { Bot, GitBranch, Send, Square } from "lucide-react";
+import { Bot, GitBranch, LoaderCircle, Send, Square } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { SubagentBubble, type SubagentProps } from "@/components/SubagentBubble";
+import { getSwarmProfile, SWARM_PROFILES } from "@/lib/swarmProfiles";
 
 type ChatMessage = {
   id: string;
@@ -23,6 +25,9 @@ type SubagentLine = {
   id: string;
   goal: string;
   role?: string;
+  profile?: string;
+  icon?: string;
+  color?: string;
   model?: string;
   status: "running" | "done" | "error";
   toolName?: string;
@@ -56,7 +61,8 @@ export type NativeProjectContext = {
 
 function textFromMessage(raw: unknown): string {
   if (!raw || typeof raw !== "object") return "";
-  const content = (raw as { content?: unknown }).content;
+  const m = raw as Record<string, unknown>;
+  const content = m.content;
   if (typeof content === "string") return content;
   if (Array.isArray(content)) {
     return content
@@ -68,13 +74,21 @@ function textFromMessage(raw: unknown): string {
       .filter(Boolean)
       .join("\n");
   }
+  // session.resume returns history messages with a top-level ``text`` field
+  // (no ``content`` wrapper). Tool messages use ``context``.
+  const text = m.text;
+  if (typeof text === "string") return text;
+  const ctx = m.context;
+  if (typeof ctx === "string") return ctx ? `[${m.name ?? "tool"}] ${ctx}` : "";
   return "";
 }
 
 function roleFromMessage(raw: unknown): ChatMessage["role"] | null {
   if (!raw || typeof raw !== "object") return null;
   const role = (raw as { role?: unknown }).role;
-  return role === "user" || role === "assistant" ? role : null;
+  if (role === "user" || role === "assistant") return role;
+  if (role === "tool") return "status";
+  return null;
 }
 
 function messagesFromResume(result: ResumeResult, fallback: string): ChatMessage[] {
@@ -99,9 +113,11 @@ function messagesFromResume(result: ResumeResult, fallback: string): ChatMessage
 export function NativeChatSurface({
   projectContext,
   resumeTarget,
+  onSessionCreated,
 }: {
   projectContext?: NativeProjectContext;
   resumeTarget?: string | null;
+  onSessionCreated?: (sessionId: string) => void;
 }) {
   const gw = useMemo(() => new GatewayClient(), []);
   const [conn, setConn] = useState<ConnectionState>("idle");
@@ -111,6 +127,23 @@ export function NativeChatSurface({
   const [subagents, setSubagents] = useState<SubagentLine[]>([]);
   const [thinkingBlocks, setThinkingBlocks] = useState<ThinkingBlockData[]>([]);
   const [input, setInput] = useState("");
+
+  const toSubagentProps = useCallback(
+    (agent: SubagentLine): SubagentProps => ({
+      id: agent.id,
+      goal: agent.goal,
+      role: agent.role,
+      profile: agent.profile,
+      model: agent.model,
+      status: agent.status,
+      toolName: agent.toolName,
+      preview: agent.preview,
+      summary: agent.summary,
+      startedAt: agent.startedAt,
+      completedAt: agent.completedAt,
+    }),
+    [],
+  );
   const [running, setRunning] = useState(false);
   const [stopping, setStopping] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -118,6 +151,9 @@ export function NativeChatSurface({
   const scrollRefNarrow = useRef<HTMLDivElement | null>(null);
   const assistantIdRef = useRef<string | null>(null);
   const thinkingIdRef = useRef<string | null>(null);
+  const queuedRef = useRef<string | null>(null);
+  const [hasQueued, setHasQueued] = useState(false);
+  const submitRef = useRef<(text: string) => Promise<void>>(async () => {});
 
   useEffect(() => {
     let cancelled = false;
@@ -256,12 +292,20 @@ export function NativeChatSurface({
       const text = String(
         payload.text ?? payload.tool_preview ?? payload.preview ?? "",
       );
+
+      const profileHint =
+        (typeof payload.profile === "string" ? payload.profile : null) ??
+        (typeof payload.role === "string" ? payload.role : null) ??
+        "";
+      const meta = getSwarmProfile(profileHint);
+
       setSubagents((prev) => {
         const existing = prev.find((item) => item.id === id);
         const next: SubagentLine = {
           id,
           goal: String(payload.goal ?? existing?.goal ?? "delegated task"),
           role: payload.role ? String(payload.role) : existing?.role,
+          profile: meta.id !== "unknown" ? meta.id : (existing?.profile ?? profileHint),
           model: payload.model ? String(payload.model) : existing?.model,
           status,
           toolName: payload.tool_name
@@ -328,14 +372,29 @@ export function NativeChatSurface({
     gw.connect()
       .then(() => {
         if (cancelled) return null;
+
+        const swarmHint = {
+          _swarm: {
+            enabled: true,
+            profiles: SWARM_PROFILES.map((p) => ({
+              id: p.id,
+              name: p.name,
+              role: p.role,
+              description: p.description,
+            })),
+          },
+        };
+
         if (resumeTarget) {
           return gw.request<ResumeResult>("session.resume", {
             session_id: resumeTarget,
-            project_context: projectContext,
+            project_context: { ...swarmHint, ...(projectContext ?? {}) },
+            swarm: swarmHint,
           });
         }
         return gw.request<{ session_id: string }>("session.create", {
-          project_context: projectContext,
+          project_context: { ...swarmHint, ...(projectContext ?? {}) },
+          swarm: swarmHint,
         });
       })
       .then((created) => {
@@ -375,6 +434,21 @@ export function NativeChatSurface({
     };
   }, [gw, projectContext, resumeTarget]);
 
+  // Propagate sessionId to parent (for per-tab persistence).
+  useEffect(() => {
+    if (sessionId && onSessionCreated) onSessionCreated(sessionId);
+  }, [sessionId, onSessionCreated]);
+
+  // Auto-submit queued message when the current turn finishes.
+  useEffect(() => {
+    if (!running && queuedRef.current) {
+      const text = queuedRef.current;
+      queuedRef.current = null;
+      setHasQueued(false);
+      setTimeout(() => submitRef.current(text), 0);
+    }
+  }, [running]);
+
   useEffect(() => {
     const el = scrollRef.current ?? scrollRefNarrow.current;
     el?.scrollTo({
@@ -396,9 +470,9 @@ export function NativeChatSurface({
       }
       if (running) {
         setInput(trimmed);
-        setError(
-          "A turn is already running. Submit this after the current turn finishes.",
-        );
+        queuedRef.current = trimmed;
+        setHasQueued(true);
+        setError(null);
         return;
       }
 
@@ -438,6 +512,21 @@ export function NativeChatSurface({
           }
         }
 
+        if (name === "queue" && arg) {
+          setInput("");
+          queuedRef.current = arg;
+          setHasQueued(true);
+          setMessages((prev) => [
+            ...prev,
+            {
+              id: `queued-${Date.now()}`,
+              role: "status",
+              text: `已排队消息，当前轮次完成后自动提交：${arg.slice(0, 80)}${arg.length > 80 ? "…" : ""}`,
+            },
+          ]);
+          return;
+        }
+
         await executeSlash({
           command: trimmed,
           sessionId,
@@ -474,6 +563,7 @@ export function NativeChatSurface({
     },
     [gw, projectContext, running, sessionId],
   );
+  submitRef.current = submit;
 
   const interrupt = useCallback(async () => {
     if (!sessionId || !running || stopping) return;
@@ -585,38 +675,55 @@ export function NativeChatSurface({
             </div>
           )}
 
-          {messages.map((message) => (
-            <div key={message.id}>
-              {message.role === "assistant" &&
-                thinkingBlocks.length > 0 &&
-                message.id ===
-                  messages.filter((m) => m.role === "assistant").slice(-1)[0]
-                    ?.id && (
-                  <ThinkingStream blocks={thinkingBlocks} className="mb-2" />
-                )}
+          {(() => {
+            const lastUserIdx = messages.reduce(
+              (acc, m, i) => (m.role === "user" ? i : acc),
+              -1,
+            );
+            return messages.map((message, idx) => (
+              <div key={message.id}>
+                {message.role === "assistant" &&
+                  thinkingBlocks.length > 0 &&
+                  message.id ===
+                    messages.filter((m) => m.role === "assistant").slice(-1)[0]
+                      ?.id && (
+                    <ThinkingStream blocks={thinkingBlocks} className="mb-2" />
+                  )}
 
-              <div
-                className={cn(
-                  "max-w-[92%] rounded-lg border px-3 py-2 text-sm leading-6",
-                  message.role === "user"
-                    ? "ml-auto border-primary/30 bg-primary/10"
-                    : message.role === "status"
-                      ? "mx-auto border-current/10 bg-muted/10 text-xs text-muted-foreground"
-                      : "mr-auto border-current/10 bg-black/10",
+                <div
+                  className={cn(
+                    "max-w-[92%] rounded-lg border px-3 py-2 text-sm leading-6",
+                    message.role === "user"
+                      ? "ml-auto border-primary/30 bg-primary/10"
+                      : message.role === "status"
+                        ? "mx-auto border-current/10 bg-muted/10 text-xs text-muted-foreground"
+                        : "mr-auto border-current/10 bg-black/10",
+                  )}
+                >
+                  {message.role === "assistant" && message.text ? (
+                    <Markdown
+                      content={message.text}
+                      streaming={running &&
+                        message.id === assistantIdRef.current}
+                    />
+                  ) : message.text || message.role === "assistant" ? (
+                    message.text || "…"
+                  ) : null}
+                </div>
+
+                {idx === lastUserIdx && subagents.length > 0 && (
+                  <div className="mt-1 space-y-1">
+                    {subagents.map((agent) => (
+                      <SubagentBubble
+                        key={agent.id}
+                        agent={toSubagentProps(agent)}
+                      />
+                    ))}
+                  </div>
                 )}
-              >
-                {message.role === "assistant" && message.text ? (
-                  <Markdown
-                    content={message.text}
-                    streaming={running &&
-                      message.id === assistantIdRef.current}
-                  />
-                ) : message.text || message.role === "assistant" ? (
-                  message.text || "…"
-                ) : null}
               </div>
-            </div>
-          ))}
+            ));
+          })()}
         </div>
       </div>
 
@@ -635,38 +742,55 @@ export function NativeChatSurface({
             </div>
           )}
 
-          {messages.map((message) => (
-            <div key={message.id}>
-              {message.role === "assistant" &&
-                thinkingBlocks.length > 0 &&
-                message.id ===
-                  messages.filter((m) => m.role === "assistant").slice(-1)[0]
-                    ?.id && (
-                  <ThinkingStream blocks={thinkingBlocks} className="mb-2" />
-                )}
+          {(() => {
+            const lastUserIdx = messages.reduce(
+              (acc, m, i) => (m.role === "user" ? i : acc),
+              -1,
+            );
+            return messages.map((message, idx) => (
+              <div key={message.id}>
+                {message.role === "assistant" &&
+                  thinkingBlocks.length > 0 &&
+                  message.id ===
+                    messages.filter((m) => m.role === "assistant").slice(-1)[0]
+                      ?.id && (
+                    <ThinkingStream blocks={thinkingBlocks} className="mb-2" />
+                  )}
 
-              <div
-                className={cn(
-                  "max-w-[92%] rounded-lg border px-3 py-2 text-sm leading-6",
-                  message.role === "user"
-                    ? "ml-auto border-primary/30 bg-primary/10"
-                    : message.role === "status"
-                      ? "mx-auto border-current/10 bg-muted/10 text-xs text-muted-foreground"
-                      : "mr-auto border-current/10 bg-black/10",
+                <div
+                  className={cn(
+                    "max-w-[92%] rounded-lg border px-3 py-2 text-sm leading-6",
+                    message.role === "user"
+                      ? "ml-auto border-primary/30 bg-primary/10"
+                      : message.role === "status"
+                        ? "mx-auto border-current/10 bg-muted/10 text-xs text-muted-foreground"
+                        : "mr-auto border-current/10 bg-black/10",
+                  )}
+                >
+                  {message.role === "assistant" && message.text ? (
+                    <Markdown
+                      content={message.text}
+                      streaming={running &&
+                        message.id === assistantIdRef.current}
+                    />
+                  ) : message.text || message.role === "assistant" ? (
+                    message.text || "…"
+                  ) : null}
+                </div>
+
+                {idx === lastUserIdx && subagents.length > 0 && (
+                  <div className="mt-1 space-y-1">
+                    {subagents.map((agent) => (
+                      <SubagentBubble
+                        key={agent.id}
+                        agent={toSubagentProps(agent)}
+                      />
+                    ))}
+                  </div>
                 )}
-              >
-                {message.role === "assistant" && message.text ? (
-                  <Markdown
-                    content={message.text}
-                    streaming={running &&
-                      message.id === assistantIdRef.current}
-                  />
-                ) : message.text || message.role === "assistant" ? (
-                  message.text || "…"
-                ) : null}
               </div>
-            </div>
-          ))}
+            ));
+          })()}
         </div>
 
         <div className="min-h-0 w-80 shrink-0 border-l border-current/10">
@@ -698,6 +822,32 @@ export function NativeChatSurface({
       {error && (
         <div className="border-t border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive">
           {error}
+        </div>
+      )}
+
+      {/* Queue indicator */}
+      {hasQueued && (
+        <div className="flex items-center gap-2 border-t border-amber-500/30 bg-amber-500/[0.06] px-3 py-2 text-xs">
+          <LoaderCircle className="h-3 w-3 shrink-0 animate-spin text-amber-400" />
+          <span className="flex-1 text-amber-300/80">
+            Message queued — will submit when current turn completes.{" "}
+            {queuedRef.current && (
+              <span className="text-muted-foreground/60">
+                ({queuedRef.current.slice(0, 50)}
+                {queuedRef.current.length > 50 ? "…" : ""})
+              </span>
+            )}
+          </span>
+          <button
+            type="button"
+            onClick={() => {
+              queuedRef.current = null;
+              setHasQueued(false);
+            }}
+            className="shrink-0 rounded border border-current/20 px-1.5 py-0.5 text-[0.65rem] hover:bg-amber-500/10"
+          >
+            cancel
+          </button>
         </div>
       )}
 

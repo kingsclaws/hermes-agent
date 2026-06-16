@@ -94,16 +94,6 @@ export class ChatroomClient {
 
   // ── Auth helper ───────────────────────────────────────────────────────
 
-  private authParams(): { name: string; value: string } {
-    if (window.__HERMES_AUTH_REQUIRED__) {
-      return { name: "ticket", value: "" };
-    }
-    return {
-      name: "token",
-      value: window.__HERMES_SESSION_TOKEN__ ?? "",
-    };
-  }
-
   private async resolveAuth(): Promise<{ name: string; value: string }> {
     if (window.__HERMES_AUTH_REQUIRED__) {
       const { ticket } = await getWsTicket();

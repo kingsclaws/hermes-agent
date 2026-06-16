@@ -34,6 +34,8 @@ import { useSearchParams } from "react-router-dom";
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "@/components/ResizablePanel";
 import { loadPanelSize, savePanelSize } from "@/lib/layout-persistence";
 import { ChatSidebar } from "@/components/ChatSidebar";
+import { ChatTabBar } from "@/components/ChatTabBar";
+import { useChatTabs } from "@/contexts/ChatTabContext";
 import {
   dispatchWorkflowPrompt,
   type NativeProjectContext,
@@ -46,13 +48,6 @@ import type { ProjectInfo, SessionInfo } from "@/lib/api";
 import { PluginSlot } from "@/plugins";
 
 const CHAT_PROJECT_KEY = "hermes.lex.chat.project";
-
-function sessionLabel(session: SessionInfo): string {
-  const title = session.title?.trim() || session.preview?.trim() || "Untitled session";
-  const shortId = session.id.slice(0, 8);
-  const active = session.is_active ? " · active" : "";
-  return `${title.slice(0, 72)} · ${shortId}${active}`;
-}
 
 function projectLabel(project: ProjectInfo): string {
   const client = project.client?.trim();
@@ -195,7 +190,12 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
     }
   });
   const [selectorError, setSelectorError] = useState<string | null>(null);
-  const [selectorBusy, setSelectorBusy] = useState(false);
+  const [selectorBusy, setSelectorBusy] = useState(true);
+  const didAutoResume = useRef(false);
+  const didInitTabs = useRef(false);
+
+  // --- Chat tab state ---
+  const { tabs, activeTabId, addTab, updateTab } = useChatTabs();
 
   useEffect(() => {
     if (!resumeParam) return;
@@ -295,6 +295,112 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
     [searchParams, setSearchParams],
   );
 
+  // Auto-resume the most recent session when the chat page becomes active
+  // without an explicit resume target.  The guard lets it fire each time the
+  // user navigates to /chat from another tab (ChatPage is mounted persistently
+  // outside <Routes>, so the first mount may not be /chat at all).
+  useEffect(() => {
+    if (!isActive || didAutoResume.current || resumeParam || sessions.length === 0 || selectorBusy) return;
+    didAutoResume.current = true;
+    const withMessages = sessions.filter((s) => s.message_count > 0);
+    const pick = withMessages[0] ?? sessions[0];
+    if (pick) {
+      updateChatSearch({ resume: pick.id });
+    }
+  }, [isActive, resumeParam, sessions, selectorBusy, updateChatSearch]);
+
+  // When a project is selected on the chat page, bind it to a session.
+  // Only fires when the chat tab is active to avoid polluting URLs on other pages.
+  const creatingSessionRef = useRef(false);
+  useEffect(() => {
+    if (!isActive || !selectedProjectId || resumeParam || selectorBusy) return;
+    if (creatingSessionRef.current) return;
+
+    // Prefer sessions that already have messages (same heuristic as
+    // auto-resume), otherwise fall back to the newest session for this project.
+    if (sessions.length > 0) {
+      const withMessages = sessions.filter((s) => s.message_count > 0);
+      updateChatSearch({ resume: (withMessages[0] ?? sessions[0]).id });
+      return;
+    }
+
+    // No sessions — create one bound to this project.
+    let cancelled = false;
+    creatingSessionRef.current = true;
+    api.createProjectSession(selectedProjectId)
+      .then((created) => {
+        if (cancelled || !created?.session_id) return;
+        updateChatSearch({ resume: created.session_id });
+      })
+      .catch(() => {
+        // Best-effort: the user can still chat with just the project context.
+      })
+      .finally(() => {
+        if (!cancelled) creatingSessionRef.current = false;
+      });
+    return () => { cancelled = true; };
+  }, [isActive, selectedProjectId, sessions, resumeParam, selectorBusy, updateChatSearch]);
+
+  // Reset per-visit guards when the user leaves the chat page so auto-resume
+  // and project-binding can fire again the next time they return to /chat.
+  useEffect(() => {
+    if (!isActive) {
+      didAutoResume.current = false;
+      creatingSessionRef.current = false;
+      didInitTabs.current = false;
+    }
+  }, [isActive]);
+
+  // Create a default tab when there are no tabs yet (first visit).
+  useEffect(() => {
+    if (!isActive || didInitTabs.current) return;
+    if (tabs.length === 0) {
+      didInitTabs.current = true;
+      addTab({
+        title: "New Chat",
+        sessionId: null,
+        projectId: null,
+        projectName: null,
+        type: "native",
+      });
+    } else {
+      didInitTabs.current = true;
+    }
+  }, [isActive, tabs.length, addTab]);
+
+  // Tab → URL: when active tab changes, sync URL to match tab state.
+  useEffect(() => {
+    if (!isActive) return;
+    const active = tabs.find((t) => t.id === activeTabId);
+    if (!active) return;
+
+    if (
+      active.sessionId !== resumeParam ||
+      (active.projectId || null) !== (selectedProjectId || null)
+    ) {
+      updateChatSearch({ resume: active.sessionId, project: active.projectId });
+    }
+  }, [activeTabId, isActive]);
+
+  // URL → Tab: when URL session/project changes externally (auto-resume,
+  // project-binding), record it on the active tab.
+  useEffect(() => {
+    if (!isActive || !activeTabId) return;
+    const active = tabs.find((t) => t.id === activeTabId);
+    if (!active) return;
+
+    if (
+      active.sessionId === resumeParam &&
+      active.projectId === (selectedProjectId || null)
+    )
+      return;
+
+    updateTab(activeTabId, {
+      sessionId: resumeParam,
+      projectId: selectedProjectId || null,
+    });
+  }, [resumeParam, selectedProjectId]);
+
   const handleSelectProject = useCallback(
     (projectId: string) => {
       setSelectedProjectId(projectId);
@@ -304,14 +410,8 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
       } catch {
         // Ignore storage failures; URL state remains canonical.
       }
-      updateChatSearch({ project: projectId || null });
-    },
-    [updateChatSearch],
-  );
-
-  const handleSelectSession = useCallback(
-    (sessionId: string) => {
-      updateChatSearch({ resume: sessionId || null });
+      // Clear resume so the binding effect above picks the right session.
+      updateChatSearch({ project: projectId || null, resume: null });
     },
     [updateChatSearch],
   );
@@ -332,6 +432,24 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
       status: project.status,
     };
   }, [projects, selectedProjectId]);
+
+  // Derive tab title from session/project (only overwrites default "New Chat").
+  useEffect(() => {
+    if (!isActive || !activeTabId) return;
+    const active = tabs.find((t) => t.id === activeTabId);
+    if (!active) return;
+
+    let title: string | null = null;
+    if (selectedProject && typeof selectedProject === "object") {
+      title = selectedProject.name || null;
+    } else if (resumeParam) {
+      title = resumeParam.slice(0, 16) + "…";
+    }
+
+    if (title && active.title === "New Chat") {
+      updateTab(activeTabId, { title });
+    }
+  }, [resumeParam, selectedProject, selectedProjectId]);
 
   useEffect(() => {
     const mql = window.matchMedia("(max-width: 1023px)");
@@ -982,8 +1100,10 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
       <PluginSlot name="chat:top" />
       {mobileModelToolsPortal}
 
+      <ChatTabBar />
+
       <div className="hermes-desktop-pane flex shrink-0 flex-col gap-2 rounded-lg px-3 py-2 sm:flex-row sm:items-center sm:justify-between">
-        <div className="flex min-w-0 flex-1 flex-col gap-2 sm:flex-row">
+        <div className="flex min-w-0 flex-1 items-center gap-2">
           <label className="flex min-w-0 flex-1 items-center gap-2 text-[0.65rem] uppercase tracking-[0.14em] text-text-tertiary">
             <span className="shrink-0">Project</span>
             <select
@@ -1000,31 +1120,37 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
             </select>
           </label>
 
-          <label className="flex min-w-0 flex-1 items-center gap-2 text-[0.65rem] uppercase tracking-[0.14em] text-text-tertiary">
-            <span className="shrink-0">Session</span>
-            <select
-              value={resumeParam ?? ""}
-              onChange={(event) => handleSelectSession(event.target.value)}
-              className="min-w-0 flex-1 rounded border border-current/15 bg-background-base/80 px-2 py-1 text-xs normal-case tracking-normal text-text-primary outline-none hover:border-current/30 focus:border-primary/50"
-            >
-              <option value="">New session</option>
-              {sessions.map((session) => (
-                <option key={session.id} value={session.id}>
-                  {sessionLabel(session)}
-                </option>
-              ))}
-            </select>
-          </label>
+          {selectedProjectId && (
+            <span className="hidden shrink-0 items-center gap-2 text-[0.65rem] uppercase tracking-[0.14em] text-text-tertiary sm:flex">
+              <span className="text-text-tertiary/40">|</span>
+              {selectorBusy
+                ? "loading..."
+                : creatingSessionRef.current
+                  ? "creating session..."
+                  : (() => {
+                      const s = resumeParam ? sessions.find((x) => x.id === resumeParam) : null;
+                      if (s) {
+                        const label = s.title || s.id.slice(0, 12);
+                        return `session: ${label} · ${s.message_count}msgs`;
+                      }
+                      return resumeParam
+                        ? `session ${resumeParam.slice(0, 8)}`
+                        : "no session";
+                    })()}
+            </span>
+          )}
         </div>
 
         <div className="shrink-0 text-[0.65rem] uppercase tracking-[0.14em] text-text-tertiary">
-          {selectorBusy
-            ? "Loading context..."
-            : selectorError
-              ? selectorError
-              : resumeParam
-                ? `resume ${resumeParam.slice(0, 8)}`
-                : "new session"}
+          {selectorError
+            ? `ERR:${selectorError.slice(0, 30)}`
+            : resumeParam
+              ? `bound ${resumeParam.slice(0,12)}`
+              : sessions.length > 0
+                ? `${sessions.length}sess msgs=${sessions.filter(s=>s.message_count>0).length}`
+                : selectorBusy
+                  ? "loading..."
+                  : "select a project"}
         </div>
       </div>
 
@@ -1077,12 +1203,40 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
             </span>
           </div>
 
-          <div className="flex min-h-0 min-w-0 flex-1">
-            <NativeChatSurface
-              projectContext={selectedProject}
-              resumeTarget={resumeParam}
-            />
-          </div>
+          {tabs.map((tab) => (
+            <div
+              key={tab.id}
+              className="flex min-h-0 min-w-0 flex-1"
+              style={{ display: tab.id === activeTabId ? undefined : "none" }}
+            >
+              <NativeChatSurface
+                projectContext={
+                  tab.projectId
+                    ? (() => {
+                        const p = projects.find((pr) => pr.id === tab.projectId);
+                        return p
+                          ? {
+                              id: p.id,
+                              name: p.name,
+                              client: p.client,
+                              goal: p.goal,
+                              directory: p.directory,
+                              cwd: p.cwd,
+                              status: p.status,
+                            }
+                          : { id: tab.projectId, name: tab.projectId };
+                      })()
+                    : null
+                }
+                resumeTarget={tab.sessionId}
+                onSessionCreated={(sid) => {
+                  if (tab.sessionId !== sid) {
+                    updateTab(tab.id, { sessionId: sid });
+                  }
+                }}
+              />
+            </div>
+          ))}
         </div>
       ) : (
         <ResizablePanelGroup orientation="horizontal" className="flex-1">

@@ -151,6 +151,13 @@ export class GatewayClient {
     });
 
     ws.addEventListener("close", () => {
+      // Stale close events from a previous connection must not overwrite
+      // the state of a new one.  close() nulls this.ws synchronously, and
+      // a subsequent connect() assigns a fresh WebSocket — when the old
+      // close arrives later (macrotask) we must ignore it, otherwise it
+      // would set state=closed and reject pending requests on the *new*
+      // connection (e.g. a session.resume that is about to load history).
+      if (this.ws !== ws) return;
       this.setState("closed");
       this.rejectAllPending(new Error("WebSocket closed"));
     });
@@ -162,6 +169,9 @@ export class GatewayClient {
         resolve();
       };
       const onError = () => {
+        // Guard against stale error events from a superseded connection,
+        // same reasoning as the close listener above.
+        if (this.ws !== ws) return;
         ws.removeEventListener("open", onOpen);
         this.setState("error");
         reject(new Error("WebSocket connection failed"));
@@ -174,6 +184,8 @@ export class GatewayClient {
   close() {
     this.ws?.close();
     this.ws = null;
+    this.rejectAllPending(new Error("connection closed"));
+    this.setState("idle");
   }
 
   private dispatch(msg: Record<string, unknown>) {

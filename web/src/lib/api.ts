@@ -1146,6 +1146,7 @@ export interface CompileSwarmResponse {
   workflow_id: string;
   root_task_id: string;
   node_count: number;
+  project_id?: string;
 }
 
 // ── Chat Room types ──
@@ -1177,6 +1178,7 @@ export interface CreateRoomResponse {
   workflow_id: string;
   root_task_id: string;
   node_count: number;
+  project_id?: string;
 }
 
 export interface RoomMessagesResponse {

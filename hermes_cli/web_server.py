@@ -3062,6 +3062,7 @@ async def compile_swarm_workflow(project_id: str, workflow_id: str, request: Req
             "workflow_id": run.workflow_id,
             "root_task_id": run.root_task_id,
             "node_count": len(run.node_mappings),
+            "project_id": project_id,
         }
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -4478,6 +4479,7 @@ async def create_room(request: Request):
             "workflow_id": run.workflow_id,
             "root_task_id": run.root_task_id,
             "node_count": len(run.node_mappings),
+            "project_id": project_id,
         }
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))

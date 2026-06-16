@@ -11,6 +11,8 @@ export interface ChatTab {
   id: string;
   title: string;
   sessionId: string | null;
+  projectId: string | null;
+  projectName: string | null;
   type: "terminal" | "native";
   createdAt: number;
 }

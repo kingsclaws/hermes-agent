@@ -45,7 +45,9 @@ export function ChatTabBar() {
             addTab({
               title: "New Chat",
               sessionId: null,
-              type: "terminal",
+              projectId: null,
+              projectName: null,
+              type: "native",
             })
           }
           className={cn(
