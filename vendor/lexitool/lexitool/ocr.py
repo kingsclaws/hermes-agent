@@ -323,6 +323,13 @@ def parse_pdf(
     if not os.path.exists(file_path):
         return {"ok": False, "error": f"File not found: {file_path}"}
 
+    file_path = file_path.rstrip("/")
+    if os.path.isdir(file_path):
+        return {"ok": False, "error": f"Path is a directory, not a file: {file_path}"}
+
+    if os.path.basename(file_path) == "":
+        return {"ok": False, "error": f"Cannot determine filename from path: {file_path}"}
+
     token = _get_token()
     api_used = "agent"
 
