@@ -390,6 +390,15 @@ export function NativeChatSurface({
             session_id: resumeTarget,
             project_context: { ...swarmHint, ...(projectContext ?? {}) },
             swarm: swarmHint,
+          }).catch((e: Error) => {
+            // Stale session from localStorage — fall back to creating a fresh one.
+            if (/not found/i.test(e.message)) {
+              return gw.request<{ session_id: string }>("session.create", {
+                project_context: { ...swarmHint, ...(projectContext ?? {}) },
+                swarm: swarmHint,
+              });
+            }
+            throw e;
           });
         }
         return gw.request<{ session_id: string }>("session.create", {

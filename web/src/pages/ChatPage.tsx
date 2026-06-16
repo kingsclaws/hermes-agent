@@ -196,6 +196,14 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
 
   // --- Chat tab state ---
   const { tabs, activeTabId, addTab, updateTab } = useChatTabs();
+  // Only mount surfaces for tabs that have been visited (lazy, then persistent).
+  const [mountedTabs, setMountedTabs] = useState<Set<string>>(() => new Set());
+  // Bootstrap active tab + track new activations.
+  useEffect(() => {
+    if (activeTabId && !mountedTabs.has(activeTabId)) {
+      setMountedTabs((prev) => new Set(prev).add(activeTabId));
+    }
+  }, [activeTabId]);
 
   useEffect(() => {
     if (!resumeParam) return;
@@ -295,51 +303,44 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
     [searchParams, setSearchParams],
   );
 
-  // Auto-resume the most recent session when the chat page becomes active
-  // without an explicit resume target.  The guard lets it fire each time the
-  // user navigates to /chat from another tab (ChatPage is mounted persistently
-  // outside <Routes>, so the first mount may not be /chat at all).
+  // Auto-resume: on initial load without an active session, assign the most
+  // recent session to the active tab directly (not via URL param).
   useEffect(() => {
-    if (!isActive || didAutoResume.current || resumeParam || sessions.length === 0 || selectorBusy) return;
+    if (!isActive || !activeTabId || didAutoResume.current || sessions.length === 0 || selectorBusy) return;
+    const active = tabs.find((t) => t.id === activeTabId);
+    if (active?.sessionId) return; // tab already has a session
     didAutoResume.current = true;
     const withMessages = sessions.filter((s) => s.message_count > 0);
     const pick = withMessages[0] ?? sessions[0];
     if (pick) {
+      updateTab(activeTabId, { sessionId: pick.id });
       updateChatSearch({ resume: pick.id });
     }
-  }, [isActive, resumeParam, sessions, selectorBusy, updateChatSearch]);
+  }, [isActive, activeTabId, sessions, selectorBusy, updateTab, updateChatSearch]);
 
-  // When a project is selected on the chat page, bind it to a session.
-  // Only fires when the chat tab is active to avoid polluting URLs on other pages.
+  // When a project is selected, bind it to the active tab.
+  // The NativeChatSurface will create/resume the session via gateway.
   const creatingSessionRef = useRef(false);
   useEffect(() => {
-    if (!isActive || !selectedProjectId || resumeParam || selectorBusy) return;
+    if (!isActive || !activeTabId || !selectedProjectId || selectorBusy) return;
+    const active = tabs.find((t) => t.id === activeTabId);
+    if (!active) return;
+    // Only act if the active tab has no project or a different project.
+    if (active.projectId === selectedProjectId && active.sessionId) return;
     if (creatingSessionRef.current) return;
 
-    // Prefer sessions that already have messages (same heuristic as
-    // auto-resume), otherwise fall back to the newest session for this project.
+    // Prefer existing sessions for this project.
     if (sessions.length > 0) {
       const withMessages = sessions.filter((s) => s.message_count > 0);
-      updateChatSearch({ resume: (withMessages[0] ?? sessions[0]).id });
+      const pick = withMessages[0] ?? sessions[0];
+      updateTab(activeTabId, { projectId: selectedProjectId, sessionId: pick.id });
+      updateChatSearch({ project: selectedProjectId, resume: pick.id });
       return;
     }
 
-    // No sessions — create one bound to this project.
-    let cancelled = false;
-    creatingSessionRef.current = true;
-    api.createProjectSession(selectedProjectId)
-      .then((created) => {
-        if (cancelled || !created?.session_id) return;
-        updateChatSearch({ resume: created.session_id });
-      })
-      .catch(() => {
-        // Best-effort: the user can still chat with just the project context.
-      })
-      .finally(() => {
-        if (!cancelled) creatingSessionRef.current = false;
-      });
-    return () => { cancelled = true; };
-  }, [isActive, selectedProjectId, sessions, resumeParam, selectorBusy, updateChatSearch]);
+    // No sessions — let the NativeChatSurface create one via gateway.
+    updateTab(activeTabId, { projectId: selectedProjectId, sessionId: null });
+  }, [isActive, activeTabId, selectedProjectId, sessions, selectorBusy, updateTab, updateChatSearch]);
 
   // Reset per-visit guards when the user leaves the chat page so auto-resume
   // and project-binding can fire again the next time they return to /chat.
@@ -368,7 +369,9 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
     }
   }, [isActive, tabs.length, addTab]);
 
-  // Tab → URL: when active tab changes, sync URL to match tab state.
+  // Tab → URL: when active tab changes, sync URL for bookmarkability only.
+  // We write the tab's session/project, but do NOT read URL changes back —
+  // each tab owns its own session independently.
   useEffect(() => {
     if (!isActive) return;
     const active = tabs.find((t) => t.id === activeTabId);
@@ -382,25 +385,6 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
     }
   }, [activeTabId, isActive]);
 
-  // URL → Tab: when URL session/project changes externally (auto-resume,
-  // project-binding), record it on the active tab.
-  useEffect(() => {
-    if (!isActive || !activeTabId) return;
-    const active = tabs.find((t) => t.id === activeTabId);
-    if (!active) return;
-
-    if (
-      active.sessionId === resumeParam &&
-      active.projectId === (selectedProjectId || null)
-    )
-      return;
-
-    updateTab(activeTabId, {
-      sessionId: resumeParam,
-      projectId: selectedProjectId || null,
-    });
-  }, [resumeParam, selectedProjectId]);
-
   const handleSelectProject = useCallback(
     (projectId: string) => {
       setSelectedProjectId(projectId);
@@ -408,12 +392,15 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
         if (projectId) localStorage.setItem(CHAT_PROJECT_KEY, projectId);
         else localStorage.removeItem(CHAT_PROJECT_KEY);
       } catch {
-        // Ignore storage failures; URL state remains canonical.
+        // Ignore storage failures.
       }
-      // Clear resume so the binding effect above picks the right session.
+      // Update the active tab's project so its surface picks it up.
+      if (activeTabId) {
+        updateTab(activeTabId, { projectId: projectId || null, sessionId: null });
+      }
       updateChatSearch({ project: projectId || null, resume: null });
     },
-    [updateChatSearch],
+    [activeTabId, updateChatSearch, updateTab],
   );
 
   const selectedProject = useMemo<NativeProjectContext>(() => {
@@ -1203,40 +1190,50 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
             </span>
           </div>
 
-          {tabs.map((tab) => (
-            <div
-              key={tab.id}
-              className="flex min-h-0 min-w-0 flex-1"
-              style={{ display: tab.id === activeTabId ? undefined : "none" }}
-            >
-              <NativeChatSurface
-                projectContext={
-                  tab.projectId
-                    ? (() => {
-                        const p = projects.find((pr) => pr.id === tab.projectId);
-                        return p
-                          ? {
-                              id: p.id,
-                              name: p.name,
-                              client: p.client,
-                              goal: p.goal,
-                              directory: p.directory,
-                              cwd: p.cwd,
-                              status: p.status,
-                            }
-                          : { id: tab.projectId, name: tab.projectId };
-                      })()
-                    : null
-                }
-                resumeTarget={tab.sessionId}
-                onSessionCreated={(sid) => {
-                  if (tab.sessionId !== sid) {
-                    updateTab(tab.id, { sessionId: sid });
-                  }
-                }}
-              />
-            </div>
-          ))}
+          {tabs.map((tab) => {
+            const mounted = mountedTabs.has(tab.id);
+            return (
+              <div
+                key={tab.id}
+                className="flex min-h-0 min-w-0 flex-1"
+                style={{ display: tab.id === activeTabId ? undefined : "none" }}
+              >
+                {mounted && (
+                  <NativeChatSurface
+                    projectContext={
+                      tab.projectId
+                        ? (() => {
+                            const p = projects.find((pr) => pr.id === tab.projectId);
+                            return p
+                              ? {
+                                  id: p.id,
+                                  name: p.name,
+                                  client: p.client,
+                                  goal: p.goal,
+                                  directory: p.directory,
+                                  cwd: p.cwd,
+                                  status: p.status,
+                                }
+                              : { id: tab.projectId, name: tab.projectId };
+                          })()
+                        : null
+                    }
+                    resumeTarget={tab.sessionId}
+                    onSessionCreated={(sid) => {
+                      if (tab.sessionId !== sid) {
+                        updateTab(tab.id, { sessionId: sid });
+                      }
+                    }}
+                  />
+                )}
+                {!mounted && (
+                  <div className="flex h-full w-full items-center justify-center text-xs text-muted-foreground">
+                    Click the tab to connect…
+                  </div>
+                )}
+              </div>
+            );
+          })}
         </div>
       ) : (
         <ResizablePanelGroup orientation="horizontal" className="flex-1">
