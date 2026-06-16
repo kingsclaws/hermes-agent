@@ -6866,7 +6866,7 @@ async def chatroom_ws(ws: WebSocket, room_id: str) -> None:
     connected clients. Bot workers connect back to this WS and respond
     to @mentions via Hermes CLIsubprocesses.
     """
-    if not await _ws_auth_ok(ws):
+    if not _ws_auth_ok(ws):
         return
 
     # Validate room_id
@@ -7047,7 +7047,13 @@ async def _chatroom_ensure_bots(room_id: str) -> None:
         room = _CHATROOMS.get(room_id)
         if room is None:
             return
-        # Only spawn bots once
+        # Purge dead processes before checking
+        dead: list[str] = []
+        for bid, proc in room.bot_procs.items():
+            if proc.returncode is not None:
+                dead.append(bid)
+        for bid in dead:
+            del room.bot_procs[bid]
         if room.bot_procs:
             return
 

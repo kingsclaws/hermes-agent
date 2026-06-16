@@ -131,16 +131,17 @@ async def run() -> None:
                     except json.JSONDecodeError:
                         continue
 
-                    msg_type = data.get("type", "")
+                    msg_type = data.get("type") or data.get("kind") or ""
 
                     if msg_type == "shutdown":
                         print("[chatroom_bot] Received shutdown", flush=True)
                         _shutting_down = True
                         return
 
-                    if msg_type == "message":
-                        username = data.get("username", "")
-                        content = data.get("content", "")
+                    # Server formats messages with kind=user|bot; also accept raw type=message
+                    if msg_type in ("message", "user", "bot"):
+                        username = data.get("sender") or data.get("username", "")
+                        content = data.get("text") or data.get("content", "")
 
                         # Store in context
                         _recent_context.append((username, content))
@@ -184,11 +185,19 @@ async def run() -> None:
                         print(f"[chatroom_bot] Replied ({len(reply)} chars)", flush=True)
 
                     elif msg_type == "history":
-                        # Load history into context
+                        # Load history into context (raw format: type=history + messages)
                         msgs = data.get("messages", [])
                         for m in msgs[-MAX_CONTEXT:]:
-                            who = m.get("username", "?")
-                            what = m.get("content", "")
+                            who = m.get("username") or m.get("sender", "?")
+                            what = m.get("content") or m.get("text", "")
+                            _recent_context.append((who, what))
+
+                    # Handle _replay envelope (server sends on join)
+                    replay = data.get("_replay")
+                    if replay and isinstance(replay, list):
+                        for m in replay[-MAX_CONTEXT:]:
+                            who = m.get("username") or m.get("sender", "?")
+                            what = m.get("content") or m.get("text", "")
                             _recent_context.append((who, what))
 
         except Exception as e:
