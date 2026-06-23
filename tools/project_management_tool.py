@@ -271,6 +271,22 @@ def project_init_handler(args: dict, **kwargs) -> str:
         except Exception:
             pass
 
+        # Auto-bind current session to the newly created project
+        bind_msg = ""
+        try:
+            session_id = os.environ.get("HERMES_SESSION_ID")
+            if session_id:
+                from hermes_state import SessionDB
+                db = SessionDB()
+                try:
+                    db.set_session_project(session_id, project_id,
+                                           project_cwd=str(project_dir))
+                    bind_msg = " Current session bound to project."
+                finally:
+                    db.close()
+        except Exception:
+            pass
+
         return json.dumps(
             {
                 "success": True,

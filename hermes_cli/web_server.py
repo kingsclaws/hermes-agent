@@ -122,6 +122,7 @@ _PUBLIC_API_PATHS: frozenset = frozenset({
     "/api/model/info",
     "/api/dashboard/themes",
     "/api/dashboard/plugins",
+    "/api/kanban/broadcast",  # loopback-only kanban event relay from gateway notifier
 })
 
 
@@ -2741,6 +2742,15 @@ def _list_projects() -> list[dict]:
     return projects
 
 
+def _session_title_matches(title: str | None, tokens: set[str]) -> bool:
+    """Check if session title contains any of the project name tokens."""
+    if not title or not tokens:
+        return False
+    title_lower = title.lower()
+    return any(tok in title_lower for tok in tokens if len(tok) >= 2)
+
+
+
 def _resolve_project(project_id: str) -> dict | None:
     for project in _list_projects():
         if project_id in _project_identity_candidates(project):
@@ -2832,11 +2842,25 @@ async def get_project_detail(project_id: str):
             all_sessions = db.list_sessions_rich(limit=500, offset=0)
             cwd = str(project.get("cwd") or project.get("directory") or "")
             mgmt_dir = str(project.get("management_dir") or "")
+            project_name = str(project.get("name") or "")
+            # Tokenise project name for heuristic title matching (e.g. "五冶邯郸纾困项目" → ["五冶","邯郸","纾困","项目"])
+            name_tokens: set[str] = set()
+            for chunk in project_name.replace("（", "(").replace("）", ")").split():
+                name_tokens.add(chunk.lower())
+            # Also split on common delimiters for CJK-only names
+            if len(name_tokens) <= 1 and project_name:
+                import re
+                # Split CJK names into bigrams for partial matching
+                cjk_chars = re.findall(r'[一-鿿]{2,}', project_name)
+                name_tokens.update(t.lower() for t in cjk_chars)
+
             linked = [
                 s for s in all_sessions
                 if s.get("project_id") == project.get("id")
-                or (cwd and s.get("cwd", "").startswith(cwd))
-                or (mgmt_dir and s.get("cwd", "").startswith(mgmt_dir))
+                or (cwd and (s.get("project_cwd") or "").startswith(cwd))
+                or (mgmt_dir and (s.get("project_cwd") or "").startswith(mgmt_dir))
+                # Heuristic: session title contains project name tokens
+                or (name_tokens and _session_title_matches(s.get("title"), name_tokens))
             ]
             project["sessions"] = linked
             project["session_count"] = len(linked)
@@ -3032,6 +3056,84 @@ async def list_all_swarm_runs():
     except Exception as e:
         _log.exception("GET /api/kanban/swarm/runs/all failed")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ---------------------------------------------------------------------------
+# Kanban event broadcast endpoint — gateway notifier → dashboard bridge.
+# The gateway's kanban notifier POSTs here to fan out task status events to
+# browser subscribers on the originating session's /api/events channel.
+# ---------------------------------------------------------------------------
+
+KANBAN_EVENT_TYPES = frozenset({
+    "kanban.task.created",
+    "kanban.task.claimed",
+    "kanban.task.started",
+    "kanban.task.progress",
+    "kanban.task.handoff",
+    "kanban.task.completed",
+    "kanban.task.approved",
+    "kanban.task.rejected",
+    "kanban.task.blocked",
+    "kanban.task.crashed",
+    "kanban.task.timed_out",
+    "kanban.batch.completed",
+})
+
+
+@app.post("/api/kanban/broadcast")
+async def kanban_broadcast(request: Request):
+    """Gateway kanban notifier calls this to broadcast kanban events.
+
+    Body::
+        {
+            "channel": "<session_channel>",
+            "event_type": "kanban.task.completed",
+            "payload": { "task_id": "...", "title": "...", ... }
+        }
+
+    Security: only accepts from localhost (127.0.0.1 or ::1).
+    """
+    # --- Security: loopback only -----------------------------------------
+    client_host = request.client.host if request.client else None
+    if client_host not in ("127.0.0.1", "::1"):
+        _log.warning("kanban broadcast rejected from non-localhost: %s", client_host)
+        raise HTTPException(status_code=403, detail="loopback only")
+
+    # --- Parse body ------------------------------------------------------
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="invalid JSON body")
+
+    channel = body.get("channel")
+    event_type = body.get("event_type")
+    payload = body.get("payload")
+
+    if not channel or not isinstance(channel, str):
+        raise HTTPException(status_code=400, detail="missing or invalid 'channel'")
+    if not event_type or event_type not in KANBAN_EVENT_TYPES:
+        raise HTTPException(status_code=400, detail="missing or unknown 'event_type'")
+    if not payload or not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="missing or invalid 'payload'")
+
+    # --- Broadcast to all subscribers on the channel ---------------------
+    formatted = json.dumps({
+        "method": "event",
+        "params": {"type": event_type, "payload": payload},
+    })
+
+    await _broadcast_event(channel, formatted)
+
+    # --- Count how many subscribers received it --------------------------
+    async with _event_lock:
+        subs = list(_event_channels.get(channel, ()))
+    subscriber_count = len(subs)
+
+    _log.debug(
+        "kanban broadcast: %s on channel %s → %d subscriber(s)",
+        event_type, channel, subscriber_count,
+    )
+    return {"ok": True, "subscribers": subscriber_count}
 
 
 @app.post("/api/projects/{project_id}/workflows/{workflow_id}/compile")

@@ -106,6 +106,9 @@ _HERMES_CORE_TOOLS = [
     "kanban_complete", "kanban_block", "kanban_heartbeat",
     "kanban_comment", "kanban_create", "kanban_link",
     "kanban_unblock",
+    # Kanban Swarm legal coordination — Board → Task → Gate three-layer model.
+    # Coordinator creates tasks, Workers claim/handoff/approve. Always available.
+    "kanban_swarm",
     # Computer use (macOS, gated on cua-driver being installed via check_fn)
     "computer_use",
     # Project management (always available for legal project lifecycle)
@@ -360,7 +363,8 @@ TOOLSETS = {
         "tools": [
             "swarm_board_create", "swarm_board_info",
             "swarm_task_create", "swarm_task_assign",
-            "swarm_task_wait", "swarm_workflow_compile",
+            "swarm_task_wait", "swarm_task_poll",
+            "swarm_task_collect", "swarm_workflow_compile",
             "swarm_board_status",
             "swarm_task_claim", "swarm_task_read",
             "swarm_task_handoff", "swarm_task_approve",

@@ -380,8 +380,11 @@ KANBAN_TASK_ASSIGN_SCHEMA = {
 KANBAN_TASK_WAIT_SCHEMA = {
     "name": "swarm_task_wait",
     "description": (
-        "等待任务完成（阻塞式轮询）。Coordinator 创建任务后调用此工具等待结果。"
+        "[DEPRECATED] 等待任务完成（阻塞式轮询）。Coordinator 创建任务后调用此工具等待结果。"
         "超时后返回当前状态但不报错。"
+        "\n\n"
+        "建议使用 swarm_task_poll（非阻塞状态查询）+ swarm_task_collect（收集产出）代替。"
+        "poll + collect 模式避免阻塞，让 Coordinator 有更多并发能力。"
     ),
     "parameters": {
         "type": "object",
@@ -450,6 +453,64 @@ KANBAN_BOARD_STATUS_SCHEMA = {
             },
         },
         "required": [],
+    },
+}
+
+KANBAN_TASK_POLL_SCHEMA = {
+    "name": "swarm_task_poll",
+    "description": (
+        "非阻塞查询多个任务的状态。立即返回每个任务的当前状态、"
+        "assignee、完成时间等。不会等待——Coordinator 用它了解进度，"
+        "然后决定是否需要等待或收集结果。"
+        "\n\n"
+        "相比 swarm_task_wait（阻塞式轮询），此工具为非阻塞立即返回，"
+        "适合批量检查多个任务的状态。建议新 workflow 使用 poll + collect 替代 wait。"
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "task_ids": {
+                "type": "string",
+                "description": "逗号分隔的任务 ID 列表，如 'tsk_abc,tsk_def'",
+            },
+            "project_path": {
+                "type": "string",
+                "description": "项目路径。省略则使用当前项目。",
+            },
+        },
+        "required": ["task_ids"],
+    },
+}
+
+KANBAN_TASK_COLLECT_SCHEMA = {
+    "name": "swarm_task_collect",
+    "description": (
+        "收集已完成任务的 Worker 产出。从任务的 event log、blackboard 评论、"
+        "和 handoff_history 中提取 Worker 的工作成果。"
+        "\n\n"
+        "只对终态任务有效（done/approved/rejected）。"
+        "进行中的任务返回其当前 event 摘要。"
+        "\n\n"
+        "Coordinator 使用此工具在任务完成后收集 Worker 的具体产出（修改了哪些文件、"
+        "做出了哪些决策、需要注意的事项）。"
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "task_id": {
+                "type": "string",
+                "description": "要收集的任务 ID。",
+            },
+            "include_events": {
+                "type": "boolean",
+                "description": "是否包含完整 event log（默认 false，仅摘要）。",
+            },
+            "project_path": {
+                "type": "string",
+                "description": "项目路径。省略则使用当前项目。",
+            },
+        },
+        "required": ["task_id"],
     },
 }
 
@@ -818,6 +879,229 @@ def kanban_board_status_handler(args: dict, **kwargs) -> str:
     return json.dumps({"success": True, **board_data}, ensure_ascii=False)
 
 
+# ── Gate inference helper ──────────────────────────────────────────────────────
+
+def _infer_current_gate(task_row: sqlite3.Row, spec: dict) -> str:
+    """Infer the current delivery gate from task state.
+
+    Uses handoff_history count and task status to determine the current phase:
+    - 0 handoffs → "plan"
+    - 1 handoff  → "draft"
+    - 2 handoffs → "review"
+    - 3+ handoffs → "finalize"
+    """
+    history = json.loads(task_row["handoff_history_json"])
+    handoff_count = sum(1 for h in history if h.get("action") == "handoff")
+    approved_count = sum(1 for h in history if h.get("action") == "approved")
+
+    gates_order = ["plan", "draft", "review", "finalize"]
+    gate_index = min(handoff_count, len(gates_order) - 1)
+    return gates_order[gate_index]
+
+
+# ── Poll & Collect handlers ────────────────────────────────────────────────────
+
+def kanban_task_poll_handler(args: dict, **kwargs) -> str:
+    task_ids_raw = args.get("task_ids", "").strip()
+    if not task_ids_raw:
+        return json.dumps({"success": False, "error": "task_ids 为必填项。"})
+
+    task_ids = [tid.strip() for tid in task_ids_raw.split(",") if tid.strip()]
+    if not task_ids:
+        return json.dumps({"success": False, "error": "task_ids 为空或格式不正确。"})
+
+    project_path = _resolve_project_path(args, kwargs.get("parent_agent"))
+    if not project_path:
+        return json.dumps({"success": False, "error": "无法确定项目路径。"})
+
+    conn, board_id = _connect(project_path)
+    tasks = []
+    summary = {"total": 0, "todo": 0, "in_progress": 0, "in_review": 0, "done": 0, "blocked": 0}
+
+    for tid in task_ids:
+        row = conn.execute(
+            "SELECT * FROM tasks WHERE id = ? AND board_id = ?", (tid, board_id)
+        ).fetchone()
+        if not row:
+            tasks.append({"task_id": tid, "error": "not found"})
+            continue
+
+        status = row["status"]
+        summary["total"] += 1
+        if status in summary:
+            summary[status] = summary.get(status, 0) + 1
+        # Handle done/approved/rejected as "done"
+        if status in ("done", "approved"):
+            summary["done"] = summary.get("done", 0) + 1
+
+        # Count gate progress from handoff history
+        gates = json.loads(row["gates_json"])
+        history = json.loads(row["handoff_history_json"])
+        approved_in_history = sum(1 for h in history if h.get("action") == "approved")
+        gate_progress = f"{approved_in_history}/{len(gates)}" if gates else "N/A"
+
+        tasks.append({
+            "task_id": tid,
+            "title": row["title"],
+            "status": status,
+            "assignee": row["assignee"],
+            "completed_at": row["completed_at"],
+            "gate_progress": gate_progress,
+        })
+
+    # Recalculate summary correctly
+    status_counts = {"todo": 0, "in_progress": 0, "in_review": 0, "done": 0, "approved": 0, "rejected": 0, "blocked": 0}
+    for t in tasks:
+        status = t.get("status", "")
+        if status in status_counts:
+            status_counts[status] += 1
+        elif status == "done":
+            status_counts["done"] += 1
+        elif status == "approved":
+            status_counts["approved"] += 1
+        elif status == "rejected":
+            status_counts["rejected"] += 1
+
+    conn.close()
+
+    return json.dumps({
+        "success": True,
+        "tasks": tasks,
+        "summary": {
+            "total": len(tasks),
+            "todo": status_counts["todo"],
+            "in_progress": status_counts["in_progress"],
+            "in_review": status_counts["in_review"],
+            "done": status_counts["done"] + status_counts["approved"],
+            "rejected": status_counts["rejected"],
+        },
+    }, ensure_ascii=False)
+
+
+def kanban_task_collect_handler(args: dict, **kwargs) -> str:
+    task_id = args.get("task_id", "").strip()
+    if not task_id:
+        return json.dumps({"success": False, "error": "task_id 为必填项。"})
+
+    include_events = bool(args.get("include_events", False))
+    project_path = _resolve_project_path(args, kwargs.get("parent_agent"))
+    if not project_path:
+        return json.dumps({"success": False, "error": "无法确定项目路径。"})
+
+    conn, board_id = _connect(project_path)
+    row = conn.execute(
+        "SELECT * FROM tasks WHERE id = ? AND board_id = ?", (task_id, board_id)
+    ).fetchone()
+    if not row:
+        conn.close()
+        return json.dumps({"success": False, "error": f"任务未找到: {task_id}"})
+
+    status = row["status"]
+    is_terminal = status in ("done", "approved", "rejected")
+
+    # Read events
+    events = [
+        dict(e) for e in conn.execute(
+            "SELECT id, kind, actor, payload, created_at FROM task_events WHERE task_id = ? ORDER BY created_at",
+            (task_id,),
+        ).fetchall()
+    ]
+
+    # Read handoff history
+    history = json.loads(row["handoff_history_json"])
+
+    # Read comments (if comment system is linked — check DB schema)
+    comments = []
+    try:
+        comment_rows = conn.execute(
+            "SELECT id, author, body, created_at FROM task_comments WHERE task_id = ? ORDER BY created_at",
+            (task_id,),
+        ).fetchall()
+        comments = [dict(c) for c in comment_rows]
+    except Exception:
+        pass
+
+    # Extract blackboard comments
+    blackboard_entries = []
+    for c in comments:
+        body = c.get("body", "")
+        if isinstance(body, str) and "[swarm:blackboard]" in body:
+            blackboard_entries.append({
+                "author": c.get("author"),
+                "content": body.replace("[swarm:blackboard]", "").strip(),
+                "at": c.get("created_at"),
+            })
+
+    # Synthesize summary
+    worker = row["assignee"] or "unknown"
+    event_summary = [
+        {
+            "kind": e["kind"],
+            "at": e["created_at"],
+            "note": (json.loads(e.get("payload", "{}")) if isinstance(e.get("payload"), str) else e.get("payload", {})),
+        }
+        for e in events
+        if e["kind"] in ("claimed", "handoff", "revised", "approved", "rejected", "completed")
+    ]
+
+    handoff_notes = [
+        {"action": h.get("action"), "note": h.get("note") or h.get("reason"), "timestamp": h.get("timestamp")}
+        for h in history
+        if h.get("note") or h.get("reason")
+    ]
+
+    # Extract files_touched from event payloads and handoff notes
+    files_touched = []
+    for e in events:
+        payload = e.get("payload", {})
+        if isinstance(payload, str):
+            try:
+                payload = json.loads(payload)
+            except Exception:
+                payload = {}
+        for key in ("files", "modified_files", "document_path", "output_path"):
+            val = payload.get(key)
+            if val:
+                if isinstance(val, list):
+                    files_touched.extend(val)
+                elif isinstance(val, str):
+                    files_touched.append(val)
+
+    summary_text = ""
+    if is_terminal:
+        summary_text = f"Task completed with status '{status}'."
+        if handoff_notes:
+            last_note = handoff_notes[-1].get("note", "")
+            summary_text += f" Last note: {last_note[:200]}"
+    else:
+        summary_text = f"Task is in progress (status: {status}). Not yet terminal."
+
+    conn.close()
+
+    result = {
+        "success": True,
+        "task_id": task_id,
+        "status": status,
+        "worker": worker,
+        "summary": summary_text,
+        "events_summary": event_summary,
+        "output": {
+            "blackboard": blackboard_entries,
+            "files_touched": list(set(files_touched)),
+            "handoff_notes": handoff_notes,
+        },
+    }
+
+    if not is_terminal:
+        result["warning"] = "task not yet terminal — output may be incomplete"
+        result["current_status"] = status
+
+    if include_events:
+        result["events"] = events
+
+    return json.dumps(result, ensure_ascii=False)
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # WORKER TOOLS
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1094,6 +1378,52 @@ def kanban_task_handoff_handler(args: dict, **kwargs) -> str:
         conn.close()
         return json.dumps({"success": False, "error": f"任务状态为 '{row['status']}'，无法移交。"})
 
+    # ── DELIVERY_SPEC gate check (hard gate) ──
+    # Validate exit criteria for the current delivery phase before allowing handoff.
+    # This makes delivery validation non-bypassable — like Claude Code's plan/todo system.
+    project_path = _resolve_project_path(args, kwargs.get("parent_agent"))
+    if project_path:
+        try:
+            from hermes_cli.delivery_spec import load_delivery_spec, validate_gate_exit
+
+            spec = load_delivery_spec(project_path)
+            current_gate_name = _infer_current_gate(row, spec)
+            exit_errors = validate_gate_exit(project_path, current_gate_name)
+
+            if exit_errors:
+                conn.close()
+                return json.dumps({
+                    "success": False,
+                    "error": "交付规范检查未通过，禁止移交。",
+                    "gate": current_gate_name,
+                    "failed_checks": exit_errors,
+                    "fix_hint": "请修复以上问题后重新调用 swarm_task_handoff。",
+                }, ensure_ascii=False)
+
+            # Also check output_required from workflow and handoff note completeness
+            from hermes_cli.project_commands import _validate_handoff_envelope
+
+            handoff_envelope = {
+                "status": "completed",
+                "evidence": {"note": note, "handoff_count": len(json.loads(row["handoff_history_json"])) + 1},
+            }
+            envelope_errors = _validate_handoff_envelope(handoff_envelope)
+            if envelope_errors:
+                conn.close()
+                return json.dumps({
+                    "success": False,
+                    "error": "移交 notes 不完整。",
+                    "missing_outputs": envelope_errors,
+                    "fix_hint": "请补充完整的 handoff note 后再调用。",
+                }, ensure_ascii=False)
+
+        except ImportError:
+            # If delivery_spec not available, fall through (soft gate — no block)
+            pass
+        except Exception:
+            # Unexpected errors should not block delivery (preserve existing behavior)
+            pass
+
     now = _now()
     gates = json.loads(row["gates_json"])
     history = json.loads(row["handoff_history_json"])
@@ -1161,6 +1491,71 @@ def kanban_task_approve_handler(args: dict, **kwargs) -> str:
     if row["status"] != "in_review":
         conn.close()
         return json.dumps({"success": False, "error": f"任务状态为 '{row['status']}'，无法批准。只有 in_review 状态的任务可以批准。"})
+
+    # ── DELIVERY_SPEC legal_scorecard gate (hard gate) ──
+    # Before approving, validate quality via legal_scorecard.
+    # Score threshold is read from DELIVERY_SPEC (default 80%).
+    # This makes approval non-bypassable — like Claude Code's verification step.
+    project_path = _resolve_project_path(args, kwargs.get("parent_agent"))
+    if project_path:
+        try:
+            from hermes_cli.delivery_spec import load_delivery_spec
+            from hermes_cli.project_commands import legal_scorecard
+
+            spec = load_delivery_spec(project_path)
+            current_gate_name = _infer_current_gate(row, spec)
+            gate_def = spec.get("gates", {}).get(current_gate_name, {})
+            exit_criteria = gate_def.get("exit", [])
+
+            # Determine min score from gate exit criteria
+            min_score = 80  # default
+            scorecard_required = False
+            for criterion in exit_criteria:
+                if criterion.startswith("legal_scorecard_min_"):
+                    scorecard_required = True
+                    try:
+                        min_score = int(criterion.split("_")[-1])
+                    except ValueError:
+                        pass
+
+            # Run scorecard if required by gate or if spec exists (belt and suspenders)
+            if scorecard_required or spec.get("version", 0) > 0:
+                score = legal_scorecard(project_path, strict=True)
+                checks = score.get("checks", [])
+                failures_list = score.get("failures", [])
+                total = len(checks)
+                passed_count = sum(1 for c in checks if c.get("passed"))
+                score_pct = int((passed_count / total) * 100) if total > 0 else 0
+
+                if score_pct < min_score:
+                    conn.close()
+                    return json.dumps({
+                        "success": False,
+                        "error": f"legal_scorecard 得分 {score_pct}% < {min_score}%，禁止批准。",
+                        "scorecard_summary": {
+                            "score_pct": score_pct,
+                            "min_required": min_score,
+                            "checks": checks,
+                            "failures": failures_list,
+                        },
+                        "fix_hint": "请先修复 scorecard 中的 failures 后再调用 approve。",
+                    }, ensure_ascii=False)
+
+                if failures_list and score.get("status") == "failed":
+                    conn.close()
+                    return json.dumps({
+                        "success": False,
+                        "error": f"存在 {len(failures_list)} 个硬性失败项，禁止批准。",
+                        "failures": failures_list,
+                        "fix_hint": "请先修复以上失败项后再调用 approve。",
+                    }, ensure_ascii=False)
+
+        except ImportError:
+            # If delivery_spec or project_commands not importable, fall through
+            pass
+        except Exception:
+            # Unexpected errors should not block (preserve existing behavior)
+            pass
 
     now = _now()
     history = json.loads(row["handoff_history_json"])
@@ -1390,7 +1785,7 @@ registry.register(
     schema=KANBAN_TASK_WAIT_SCHEMA,
     handler=lambda args, **kw: kanban_task_wait_handler(args, **kw),
     check_fn=_check_kanban,
-    description="等待任务完成（阻塞轮询）",
+    description="[DEPRECATED] 等待任务完成（阻塞轮询）",
     emoji="⏳",
 )
 
@@ -1412,6 +1807,27 @@ registry.register(
     check_fn=_check_kanban,
     description="获取 Board 完整状态概览",
     emoji="📊",
+)
+
+# New Coordinator tools — Plan A: Tool Layer Hardening
+registry.register(
+    name="swarm_task_poll",
+    toolset="kanban_swarm",
+    schema=KANBAN_TASK_POLL_SCHEMA,
+    handler=lambda args, **kw: kanban_task_poll_handler(args, **kw),
+    check_fn=_check_kanban,
+    description="非阻塞查询多个任务状态",
+    emoji="📡",
+)
+
+registry.register(
+    name="swarm_task_collect",
+    toolset="kanban_swarm",
+    schema=KANBAN_TASK_COLLECT_SCHEMA,
+    handler=lambda args, **kw: kanban_task_collect_handler(args, **kw),
+    check_fn=_check_kanban,
+    description="收集已完成任务的 Worker 产出",
+    emoji="📦",
 )
 
 # Worker tools

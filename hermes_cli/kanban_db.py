@@ -6021,6 +6021,10 @@ def _default_spawn(
     # what the tool reads — set it explicitly here so comments are
     # attributed correctly regardless of how the child loads config.
     env["HERMES_PROFILE"] = profile_arg
+    # Pass parent session ID so the worker can correlate events back
+    # to the originating chat session (WebUI/CLI).
+    if task.session_id:
+        env["HERMES_KANBAN_PARENT_SESSION"] = task.session_id
 
     cmd = [
         *_resolve_hermes_argv(),
@@ -6490,6 +6494,29 @@ def add_notify_sub(
                 """,
                 (notifier_profile, task_id, platform, chat_id, thread_id or ""),
             )
+
+
+def subscribe_session(session_id: str, task_id: str, board: str = None) -> bool:
+    """Subscribe a chat session to task notifications.
+
+    Uses platform='session' to distinguish from messaging platform subscriptions.
+    Idempotent — safe to call multiple times for the same session+task pair.
+    """
+    conn = connect(board=board)
+    try:
+        now = int(time.time())
+        conn.execute(
+            """INSERT OR IGNORE INTO kanban_notify_subs
+               (task_id, platform, chat_id, thread_id, created_at)
+               VALUES (?, 'session', ?, NULL, ?)""",
+            (task_id, session_id, now),
+        )
+        conn.commit()
+        return True
+    except Exception:
+        return False
+    finally:
+        conn.close()
 
 
 def list_notify_subs(

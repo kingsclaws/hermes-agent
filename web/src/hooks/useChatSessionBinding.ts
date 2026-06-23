@@ -174,7 +174,22 @@ export function useChatSessionBinding({
       return;
     }
 
-    updateTab(activeTabId, { projectId: selectedProjectId, sessionId: null });
+    // No sessions for this project yet — create one pre-bound via the API
+    // so the gateway session gets project_id set from the start.
+    creatingSessionRef.current = true;
+    api
+      .createProjectSession(selectedProjectId)
+      .then((res) => {
+        creatingSessionRef.current = false;
+        if (res?.session_id) {
+          findOrCreateTab(res.session_id, selectedProjectId);
+          updateChatSearch({ project: selectedProjectId, resume: res.session_id });
+        }
+      })
+      .catch(() => {
+        creatingSessionRef.current = false;
+        updateTab(activeTabId, { projectId: selectedProjectId, sessionId: null });
+      });
   }, [isActive, activeTabId, selectedProjectId, sessions, selectorBusy, findOrCreateTab, updateTab, updateChatSearch]);
 
   // Reset per-visit guards when leaving chat.

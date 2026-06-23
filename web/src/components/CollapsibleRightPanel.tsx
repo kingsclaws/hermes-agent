@@ -47,6 +47,17 @@ interface RpcEnvelope {
 
 const TOOL_LIMIT = 20;
 
+interface KanbanEvent {
+  kind: "kanban";
+  eventType: string;
+  taskId: string;
+  title: string;
+  status: string;
+  worker?: string;
+  summary?: string;
+  timestamp: number;
+}
+
 const STATE_LABEL: Record<ConnectionState, string> = {
   idle: "idle",
   connecting: "connecting",
@@ -102,6 +113,7 @@ export function CollapsibleRightPanel({
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [info, setInfo] = useState<SessionInfo>({});
   const [tools, setTools] = useState<ToolEntry[]>([]);
+  const [kanbanEvents, setKanbanEvents] = useState<KanbanEvent[]>([]);
   const [modelOpen, setModelOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -218,6 +230,23 @@ export function CollapsibleRightPanel({
                   }
                 : t,
             ),
+          );
+        } else if (typeof type === "string" && type.startsWith("kanban.")) {
+          const p = payload as Record<string, unknown> | undefined;
+          setKanbanEvents((prev) =>
+            [
+              ...prev,
+              {
+                kind: "kanban" as const,
+                eventType: type,
+                taskId: (p?.task_id as string) ?? "",
+                title: (p?.title as string) ?? "",
+                status: (p?.status as string) ?? "",
+                worker: (p?.worker as string) ?? undefined,
+                summary: (p?.summary as string) ?? undefined,
+                timestamp: Date.now(),
+              },
+            ].slice(-50),
           );
         }
       });
@@ -356,6 +385,48 @@ export function CollapsibleRightPanel({
                     Swarm progress will appear here when a kanban workflow is running.
                   </p>
                 </div>
+              </div>
+            )}
+            {kanbanEvents.length > 0 && (
+              <div className="mt-3 space-y-1 px-3">
+                <div className="text-display text-xs tracking-wider text-text-tertiary mb-2">
+                  live events
+                </div>
+                {kanbanEvents
+                  .slice(-10)
+                  .reverse()
+                  .map((ev) => (
+                    <div
+                      key={`${ev.taskId}-${ev.timestamp}`}
+                      className="rounded border border-current/10 px-2 py-1.5 text-xs"
+                    >
+                      <div className="flex items-center gap-1.5">
+                        <span
+                          className={cn(
+                            "h-1.5 w-1.5 rounded-full shrink-0",
+                            ev.status === "done" ||
+                              ev.eventType === "kanban.task.completed"
+                              ? "bg-green-500"
+                              : ev.status === "in_progress"
+                                ? "bg-blue-500 animate-pulse"
+                                : ev.eventType.includes("blocked") ||
+                                    ev.eventType.includes("crashed")
+                                  ? "bg-red-500"
+                                  : "bg-muted-foreground",
+                          )}
+                        />
+                        <span className="font-medium truncate">{ev.title}</span>
+                        <span className="text-muted-foreground shrink-0 ml-auto">
+                          {ev.worker}
+                        </span>
+                      </div>
+                      {ev.summary && (
+                        <div className="mt-0.5 text-muted-foreground truncate">
+                          {ev.summary}
+                        </div>
+                      )}
+                    </div>
+                  ))}
               </div>
             )}
           </div>

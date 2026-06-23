@@ -282,6 +282,18 @@ class KanbanMixin:
                                 "kanban notifier: delivered %s event for %s to %s/%s on board %s",
                                 kind, sub["task_id"], platform_str, sub["chat_id"], board_slug,
                             )
+                            # Also deliver to the originating chat session
+                            # (WebUI/CLI) if the task records a session_id.
+                            _task_row = task.__dict__ if task and hasattr(task, '__dict__') else {}
+                            session_id_val = _task_row.get("session_id") or (task.session_id if task and hasattr(task, 'session_id') else None)
+                            if session_id_val:
+                                try:
+                                    await self._deliver_to_chat_session(ev, _task_row, session_id_val)
+                                except Exception as _se:
+                                    logger.debug(
+                                        "kanban notifier: session delivery for %s failed: %s",
+                                        sub["task_id"], _se,
+                                    )
                             # After delivering the text notification, surface
                             # any artifact paths the worker referenced in
                             # ``kanban_complete(summary=..., artifacts=[...])``
@@ -531,6 +543,71 @@ class KanbanMixin:
                     path, exc,
                 )
 
+    async def _deliver_to_chat_session(self, event: Any, task_row: dict, session_id: str) -> None:
+        """Deliver a kanban event to the originating chat session.
+
+        Routes through the dashboard's ``POST /api/kanban/broadcast`` so the
+        WebUI right-panel subscribers attached to that session's channel see
+        live task status updates.
+        """
+        if not session_id:
+            return
+
+        title = task_row.get("title", "Unknown")
+        worker = task_row.get("assignee", "worker")
+        # event may be an Event namedtuple/dataclass or a plain dict
+        if hasattr(event, "kind"):
+            kind = event.kind
+            ev_payload = getattr(event, "payload", None) or {}
+        elif isinstance(event, dict):
+            kind = event.get("kind", "unknown")
+            ev_payload = event.get("payload", {}) or {}
+        else:
+            kind = "unknown"
+            ev_payload = {}
+
+        # Try to broadcast to dashboard /api/kanban/broadcast for WebUI
+        try:
+            await self._broadcast_to_dashboard(session_id, kind, ev_payload, task_row)
+        except Exception:
+            logger.debug("kanban notifier: dashboard broadcast failed for %s", session_id)
+
+    async def _broadcast_to_dashboard(
+        self, session_id: str, kind: str, ev_payload: dict, task_row: dict,
+    ) -> None:
+        """POST to dashboard's ``/api/kanban/broadcast`` endpoint."""
+        import aiohttp
+
+        dashboard_port = os.environ.get("HERMES_DASHBOARD_PORT", "8000")
+        url = f"http://127.0.0.1:{dashboard_port}/api/kanban/broadcast"
+
+        summary = ""
+        if isinstance(ev_payload, dict):
+            summary = str(ev_payload.get("summary", "") or "")
+
+        payload = {
+            "channel": session_id,
+            "event_type": f"kanban.task.{kind}",
+            "payload": {
+                "task_id": task_row.get("id", ""),
+                "title": task_row.get("title", ""),
+                "status": task_row.get("status", ""),
+                "worker": task_row.get("assignee", ""),
+                "summary": summary,
+                "board": task_row.get("board_id", ""),
+            },
+        }
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    url, json=payload, timeout=aiohttp.ClientTimeout(total=5),
+                ) as resp:
+                    if resp.status != 200:
+                        logger.debug("kanban broadcast returned %d", resp.status)
+        except Exception as e:
+            logger.debug("kanban broadcast failed: %s", e)
+
     async def _kanban_dispatcher_watcher(self) -> None:
         """Embedded kanban dispatcher — one tick every `dispatch_interval_seconds`.
 
@@ -655,6 +732,7 @@ class KanbanMixin:
         HEALTH_WINDOW = 6
         bad_ticks = 0
         last_warn_at = 0
+        tick_counter = 0
         # Avoid hot-looping corrupt-looking board DBs, but do not suppress
         # same-fingerprint retries forever: transient WAL/open races can
         # surface as "database disk image is malformed" for one tick.
@@ -973,6 +1051,21 @@ class KanbanMixin:
                             bad_ticks,
                         )
                         last_warn_at = now
+                # Dispatcher heartbeat: summarize boards scanned and tasks
+                # spawned every 10 ticks so operators can confirm the loop
+                # is alive without spamming logs on idle gateways.
+                tick_counter += 1
+                if tick_counter % 10 == 0:
+                    boards_count = len(results) if results is not None else 0
+                    spawned_total = sum(
+                        len(res.spawned)
+                        for _, res in (results or [])
+                        if res is not None and getattr(res, "spawned", None)
+                    )
+                    logger.info(
+                        "kanban dispatcher heartbeat: tick=%d boards=%d spawned=%d",
+                        tick_counter, boards_count, spawned_total,
+                    )
             except asyncio.CancelledError:
                 logger.debug("kanban dispatcher: cancelled")
                 raise

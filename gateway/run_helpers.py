@@ -1695,4 +1695,6 @@ __all__ = [
     "_should_clear_resume_pending_after_turn",
     "_preserve_queued_followup_history_offset",
     "logger",
+    "is_truthy_value",
+    "get_hermes_home",
 ]

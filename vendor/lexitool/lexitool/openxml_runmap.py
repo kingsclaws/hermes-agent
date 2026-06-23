@@ -72,6 +72,10 @@ def render_paragraph(para: etree._Element, *, include_deleted: bool = False) -> 
         elif include_deleted and el.tag == f"{W}delText":
             text = el.text or ""
         elif el.tag == f"{W}tab":
+            # Exclude tab-stop definitions inside w:tabs (paragraph formatting)
+            parent = el.getparent()
+            if parent is not None and parent.tag == f"{W}tabs":
+                continue
             text = "\t"
         elif _is_line_break(el):
             text = "\n"

@@ -16,6 +16,7 @@ export interface ChatMessageListProps {
   running: boolean;
   assistantIdRef: React.MutableRefObject<string | null>;
   className?: string;
+  kanbanBatchSummary?: { total: number; done: number; failed: number } | null;
 }
 
 export function ChatMessageList({
@@ -27,6 +28,7 @@ export function ChatMessageList({
   running,
   assistantIdRef,
   className,
+  kanbanBatchSummary,
 }: ChatMessageListProps) {
   const scrollRef = useRef<HTMLDivElement | null>(null);
 
@@ -99,6 +101,30 @@ export function ChatMessageList({
           )}
         </div>
       ))}
+
+      {/* Kanban batch completion card */}
+      {kanbanBatchSummary && kanbanBatchSummary.total > 0 && (
+        <div className="mt-2 pl-10">
+          <div
+            className={cn(
+              "rounded border px-3 py-2 text-xs",
+              kanbanBatchSummary.failed > 0
+                ? "border-destructive/30 bg-destructive/[0.04]"
+                : "border-green-500/30 bg-green-500/[0.04]",
+            )}
+          >
+            <span className="font-medium">Kanban Tasks: </span>
+            <span>
+              {kanbanBatchSummary.done}/{kanbanBatchSummary.total} done
+            </span>
+            {kanbanBatchSummary.failed > 0 && (
+              <span className="text-destructive ml-2">
+                {kanbanBatchSummary.failed} failed
+              </span>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
