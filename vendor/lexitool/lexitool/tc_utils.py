@@ -562,6 +562,12 @@ def _para_full_text(para_el) -> str:
         if tag == qn("w:t"):
             parts.append(child.text or "")
         elif tag == qn("w:tab"):
+            # Exclude tab-stop definitions inside w:tabs (paragraph formatting).
+            # These are not inline tab characters and would cause position
+            # mismatches with _get_all_runs_with_pos.
+            parent = child.getparent()
+            if parent is not None and parent.tag == qn("w:tabs"):
+                continue
             parts.append("\t")
     return _normalize_quotes("".join(parts))
 

@@ -777,6 +777,7 @@ def _handle_edit(args: dict, **kwargs) -> str:
             from lexitool.header_footer_ops import replace_header_footer_text
 
             old_text = args.get("old_text", "")
+            old_text = _strip_format_markers(old_text)
             new_text = args.get("new_text", "")
             if not old_text:
                 return tool_error("'old_text' is required for replace_header_footer")
@@ -809,6 +810,7 @@ def _handle_edit(args: dict, **kwargs) -> str:
             elif op == "replace_table_cell":
                 table_index = args.get("table_index", 0)
                 old_text = args.get("old_text", "")
+                old_text = _strip_format_markers(old_text)
                 new_text = args.get("new_text", "")
                 if not old_text:
                     return tool_error("'old_text' is required for replace_table_cell")
@@ -979,6 +981,7 @@ def _handle_edit(args: dict, **kwargs) -> str:
     if op == "replace_all":
         targets = args.get("targets", [])
         old_text = args.get("old_text", "")
+        old_text = _strip_format_markers(old_text)
         new_text = args.get("new_text", "")
         if not targets:
             return tool_error("'targets' is required for replace_all (list of paragraph numbers)")
@@ -997,7 +1000,26 @@ def _handle_edit(args: dict, **kwargs) -> str:
         try:
             from lexitool.edit_ops import replace_text_all
             from lexitool.scan import scan_text
-            para_indices = [int(t) - 1 for t in targets]  # convert 1-indexed to 0-indexed
+            # Resolve body_paras indices to all_paras indices for _find_para.
+            doc_xml_r, _ = _read_docx(path)
+            root_r = etree.fromstring(doc_xml_r)
+            body_r = root_r.find(f"{W}body")
+            body_paras_r = [el for el in body_r if el.tag == f"{W}p"]
+            all_paras_r = [el for el in root_r.iter() if el.tag == f"{W}p"]
+            para_indices = []
+            for t in targets:
+                body_idx = int(t) - 1
+                if body_idx < 0 or body_idx >= len(body_paras_r):
+                    continue
+                body_el = body_paras_r[body_idx]
+                found = False
+                for j, el in enumerate(all_paras_r):
+                    if el is body_el:
+                        para_indices.append(j)
+                        found = True
+                        break
+                if not found:
+                    para_indices.append(body_idx)  # fallback
             result = replace_text_all(
                 path, para_indices, old_text, new_text,
                 tc=tc, author=author, font_size=font_size,
@@ -1035,6 +1057,7 @@ def _handle_edit(args: dict, **kwargs) -> str:
     if op == "find_replace":
         from lexitool.edit_ops import find_and_replace_all
         find = args.get("find", args.get("old_text", ""))
+        find = _strip_format_markers(find)
         if not find:
             return tool_error("'find' (or 'old_text') is required for find_replace")
         replace_text = args.get("replace", args.get("new_text", ""))
@@ -1111,7 +1134,7 @@ def _handle_edit(args: dict, **kwargs) -> str:
             requested_old_text = args.get("old_text")
             if not isinstance(requested_old_text, str) or not requested_old_text.strip():
                 return tool_error("'old_text' is required for replace operation")
-            old_text = requested_old_text
+            old_text = _strip_format_markers(requested_old_text)
 
             # Parse format markers from new_text so that [b], [i], [u]
             # are converted to actual OOXML formatting instead of being
@@ -1244,14 +1267,24 @@ def _next_tc_id_from_body(body) -> int:
 
 
 def _get_para_text(para_el) -> str:
+    """Get paragraph plain text matching _para_full_text semantics.
+
+    Only collects w:t (not w:delText) so that fallback text position
+    calculations remain consistent with tc_replace_first_in_para's
+    internal _para_full_text.  Filters w:tab inside w:tabs (paragraph
+    formatting) and normalizes curly quotes to straight quotes.
+    """
     W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
     parts = []
     for el in para_el.iter():
-        if el.tag in (f"{W}t", f"{W}delText"):
+        if el.tag == f"{W}t":
             parts.append(el.text or "")
         elif el.tag == f"{W}tab":
+            parent = el.getparent()
+            if parent is not None and parent.tag == f"{W}tabs":
+                continue
             parts.append("\t")
-    return "".join(parts)
+    return "".join(parts).replace('“', '"').replace('”', '"').replace('‘', "'").replace('’', "'")
 
 
 def _direct_replace(para_el, old_text: str, new_text: str) -> dict:
@@ -1389,6 +1422,19 @@ def _has_format_markers(text: str) -> bool:
 def _normalize_match_text(text: str) -> str:
     """Normalize only for fallback matching; never changes document output."""
     return re.sub(r"\s+", "", text or "")
+
+
+# Regex to strip lexitool format markers from old_text so that text
+# copied from lex_scan output (which includes [u], [b], [ins], etc.)
+# can be used as search text in lex_edit replace operations.
+_FORMAT_TAG_RE = re.compile(
+    r'\[/?(?:b|i|u|s|ins|del|tab|num|spacing|indent|align|highlight|font|bookmark|ref|page-ref|note-ref|style-ref)(?::[^\]]*)?\]'
+)
+
+
+def _strip_format_markers(text: str) -> str:
+    """Strip lexitool format markers from text for plain-text matching."""
+    return _FORMAT_TAG_RE.sub('', text)
 
 
 def _locate_normalized_text(haystack: str, needle: str) -> tuple[int, int] | None:
