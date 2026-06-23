@@ -88,13 +88,17 @@ export interface Translations {
       config: string;
       cron: string;
       documentation: string;
+      kanban: string;
       keys: string;
+      launchpad: string;
       logs: string;
       models: string;
       profiles: string;
       plugins: string;
+      projects: string;
       sessions: string;
       skills: string;
+      swarmChat: string;
     };
     modelToolsSheetSubtitle: string;
     modelToolsSheetTitle: string;

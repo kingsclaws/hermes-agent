@@ -146,6 +146,22 @@ def _reset_allow_private_cache() -> None:
     _cached_allow_private = False
 
 
+_6TO4_NETWORK = ipaddress.ip_network("2002::/16")
+
+
+def _extract_6to4_embedded_ipv4(
+    ip: ipaddress.IPv6Address,
+) -> "ipaddress.IPv4Address | None":
+    """Extract the embedded IPv4 address from a 6to4 (2002::/16) address.
+
+    RFC 3056: bits 16-47 of the IPv6 address contain the IPv4 address.
+    """
+    if ip not in _6TO4_NETWORK:
+        return None
+    packed = ip.packed
+    return ipaddress.IPv4Address(packed[2:6])
+
+
 def _is_blocked_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
     """Return True if the IP should be blocked for SSRF protection."""
     # IPv4-mapped IPv6 addresses (``::ffff:x.x.x.x``) should be checked
@@ -156,6 +172,20 @@ def _is_blocked_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
                 embedded_ip.is_link_local or embedded_ip.is_reserved or
                 embedded_ip.is_multicast or embedded_ip.is_unspecified or
                 embedded_ip in _CGNAT_NETWORK)
+
+    # 6to4 addresses (2002::/16) encapsulate an IPv4 address in bits 16-47.
+    # A 6to4 address wrapping a private IPv4 (e.g. 2002:c0a8:0101::) can
+    # bypass standard is_private checks since Python classifies the outer
+    # IPv6 address as global.
+    if isinstance(ip, ipaddress.IPv6Address):
+        embedded_v4 = _extract_6to4_embedded_ipv4(ip)
+        if embedded_v4 is not None and (
+            embedded_v4.is_private or embedded_v4.is_loopback or
+            embedded_v4.is_link_local or embedded_v4.is_reserved or
+            embedded_v4.is_multicast or embedded_v4.is_unspecified or
+            embedded_v4 in _CGNAT_NETWORK
+        ):
+            return True
 
     # Standard IPv4/IPv6 address checking
     if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:

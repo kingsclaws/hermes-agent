@@ -165,6 +165,12 @@ VALID_HOOKS: Set[str] = {
     #   choice: "once" | "session" | "always" | "deny" | "timeout"
     "pre_approval_request",
     "post_approval_response",
+    # Kanban lifecycle hooks. Fired by kanban_db.py when a task transitions
+    # to claimed/completed/blocked. Plugins can use these for notifications,
+    # metrics, or triggering downstream workflows.
+    "kanban_task_claimed",
+    "kanban_task_completed",
+    "kanban_task_blocked",
 }
 
 ENTRY_POINTS_GROUP = "hermes_agent.plugins"

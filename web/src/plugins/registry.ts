@@ -30,6 +30,13 @@ import { Separator } from "@nous-research/ui/ui/components/separator";
 import { Tabs, TabsList, TabsTrigger } from "@nous-research/ui/ui/components/tabs";
 import { useI18n } from "@/i18n";
 import { registerSlot, PluginSlot } from "./slots";
+import {
+  registerLifecycle,
+  registerSettingsSchema,
+  getPluginSettings,
+  setPluginSettings,
+  updatePluginSetting,
+} from "./sdk";
 
 // ---------------------------------------------------------------------------
 // Plugin registry — plugins call register() to add their component.
@@ -94,6 +101,11 @@ declare global {
     __HERMES_PLUGINS__: {
       register: typeof registerPlugin;
       registerSlot: typeof registerSlot;
+      registerLifecycle: typeof registerLifecycle;
+      registerSettings: typeof registerSettingsSchema;
+      getSettings: typeof getPluginSettings;
+      setSettings: typeof setPluginSettings;
+      updateSetting: typeof updatePluginSetting;
     };
   }
 }
@@ -102,6 +114,11 @@ export function exposePluginSDK() {
   window.__HERMES_PLUGINS__ = {
     register: registerPlugin,
     registerSlot,
+    registerLifecycle,
+    registerSettings: registerSettingsSchema,
+    getSettings: getPluginSettings,
+    setSettings: setPluginSettings,
+    updateSetting: updatePluginSetting,
   };
 
   window.__HERMES_PLUGIN_SDK__ = {

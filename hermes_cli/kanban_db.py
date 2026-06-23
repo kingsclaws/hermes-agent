@@ -93,6 +93,15 @@ from toolsets import get_toolset_names
 _log = logging.getLogger(__name__)
 
 
+def _fire_kanban_hook(hook_name: str, **kwargs: Any) -> None:
+    """Fire a kanban lifecycle hook without blocking or raising."""
+    try:
+        from hermes_cli.plugins import invoke_hook
+        invoke_hook(hook_name, **kwargs)
+    except Exception:
+        _log.debug("kanban hook %s dispatch failed", hook_name, exc_info=True)
+
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -2676,7 +2685,9 @@ def claim_task(
             {"lock": lock, "expires": expires, "run_id": run_id},
             run_id=run_id,
         )
-        return get_task(conn, task_id)
+        task = get_task(conn, task_id)
+        _fire_kanban_hook("kanban_task_claimed", task_id=task_id, claimer=lock)
+        return task
 
 
 def claim_review_task(
@@ -3309,12 +3320,8 @@ def complete_task(
     recompute_ready(conn)
     # Clean up the scratch workspace and any stale tmux session for the worker.
     _cleanup_workspace(conn, task_id)
+    _fire_kanban_hook("kanban_task_completed", task_id=task_id, result=result, summary=summary)
     return True
-
-
-# ---------------------------------------------------------------------------
-# Workspace / tmux cleanup
-# ---------------------------------------------------------------------------
 
 def _is_managed_scratch_path(p: Path) -> bool:
     """Return True iff *p* is a strict descendant of a kanban-managed scratch root.
@@ -3667,6 +3674,7 @@ def block_task(
                 summary=reason,
             )
         _append_event(conn, task_id, "blocked", {"reason": reason}, run_id=run_id)
+        _fire_kanban_hook("kanban_task_blocked", task_id=task_id, reason=reason)
         return True
 
 

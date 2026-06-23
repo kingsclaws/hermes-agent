@@ -5,6 +5,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { useNavigate } from "react-router-dom";
 import {
   ChevronDown,
   Pencil,
@@ -16,7 +17,6 @@ import {
 import spinners from "unicode-animations";
 import { H2 } from "@nous-research/ui/ui/components/typography/h2";
 import { api } from "@/lib/api";
-import type { ProfileInfo } from "@/lib/api";
 import { useAsync } from "@/hooks/useAsync";
 import { DeleteConfirmDialog } from "@/components/DeleteConfirmDialog";
 import { useToast } from "@nous-research/ui/hooks/use-toast";
@@ -74,6 +74,7 @@ export default function ProfilesPage() {
   const { toast, showToast } = useToast();
   const { t } = useI18n();
   const { setEnd } = usePageHeader();
+  const navigate = useNavigate();
 
   // Create modal
   const [createModalOpen, setCreateModalOpen] = useState(false);
@@ -396,7 +397,15 @@ export default function ProfilesPage() {
                         className="max-w-xs"
                       />
                     ) : (
-                      <span className="font-medium text-sm truncate">
+                      <span
+                        className="font-medium text-sm truncate cursor-pointer hover:text-primary transition-colors"
+                        onClick={() => navigate(`/profiles/${encodeURIComponent(p.name)}`)}
+                        role="link"
+                        tabIndex={0}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") navigate(`/profiles/${encodeURIComponent(p.name)}`);
+                        }}
+                      >
                         {p.name}
                       </span>
                     )}

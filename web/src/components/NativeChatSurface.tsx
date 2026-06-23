@@ -13,6 +13,7 @@ import { cn } from "@/lib/utils";
 import { Bot, GitBranch, LoaderCircle, Send, Square } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { SubagentBubble, type SubagentProps } from "@/components/SubagentBubble";
+import { ReasoningEffortPicker, type ReasoningEffort } from "@/components/ReasoningEffortPicker";
 import { getSwarmProfile, SWARM_PROFILES } from "@/lib/swarmProfiles";
 
 type ChatMessage = {
@@ -114,10 +115,12 @@ export function NativeChatSurface({
   projectContext,
   resumeTarget,
   onSessionCreated,
+  onSwarmLaunched,
 }: {
   projectContext?: NativeProjectContext;
   resumeTarget?: string | null;
   onSessionCreated?: (sessionId: string) => void;
+  onSwarmLaunched?: () => void;
 }) {
   const gw = useMemo(() => new GatewayClient(), []);
   const [conn, setConn] = useState<ConnectionState>("idle");
@@ -127,6 +130,7 @@ export function NativeChatSurface({
   const [subagents, setSubagents] = useState<SubagentLine[]>([]);
   const [thinkingBlocks, setThinkingBlocks] = useState<ThinkingBlockData[]>([]);
   const [input, setInput] = useState("");
+  const [reasoningEffort, setReasoningEffort] = useState<ReasoningEffort>("auto");
 
   const toSubagentProps = useCallback(
     (agent: SubagentLine): SubagentProps => ({
@@ -156,6 +160,9 @@ export function NativeChatSurface({
   const queuedRef = useRef<string | null>(null);
   const [hasQueued, setHasQueued] = useState(false);
   const submitRef = useRef<(text: string) => Promise<void>>(async () => {});
+  const toolNamesRef = useRef<Map<string, string>>(new Map());
+  const onSwarmLaunchedRef = useRef(onSwarmLaunched);
+  onSwarmLaunchedRef.current = onSwarmLaunched;
 
   useEffect(() => {
     let cancelled = false;
@@ -240,6 +247,8 @@ export function NativeChatSurface({
       context?: string;
     }>("tool.start", (ev) => {
       const id = ev.payload?.tool_id ?? `tool-${Date.now()}`;
+      const name = ev.payload?.name ?? "tool";
+      toolNamesRef.current.set(id, name);
       const tool: ToolEntry = {
         kind: "tool",
         id,
@@ -274,6 +283,14 @@ export function NativeChatSurface({
             : tool,
         ),
       );
+      const toolName = toolNamesRef.current.get(id);
+      if (
+        !ev.payload?.error &&
+        toolName &&
+        (toolName === "legal_orchestrate" || toolName === "compile_swarm_workflow")
+      ) {
+        onSwarmLaunchedRef.current?.();
+      }
     });
 
     const updateSubagent = (
@@ -566,6 +583,7 @@ export function NativeChatSurface({
           session_id: sessionId,
           text: trimmed,
           project_context: projectContext,
+          ...(reasoningEffort !== "auto" && { reasoning_effort: reasoningEffort }),
         });
       } catch (e) {
         setRunning(false);
@@ -864,40 +882,49 @@ export function NativeChatSurface({
 
       {/* Composer */}
       <form
-        className="flex shrink-0 gap-2 border-t border-current/10 p-3"
+        className="flex shrink-0 flex-col gap-1 border-t border-current/10 p-3"
         onSubmit={(ev) => {
           ev.preventDefault();
           void submit(input);
         }}
       >
-        <textarea
-          value={input}
-          onChange={(ev) => setInput(ev.target.value)}
-          onKeyDown={(ev) => {
-            if (ev.key === "Enter" && !ev.shiftKey) {
-              ev.preventDefault();
-              void submit(input);
-            }
-          }}
-          disabled={!sessionId || conn !== "open"}
-          rows={2}
-          placeholder="输入法律工作指令。Shift+Enter 换行。Cmd+K 命令面板。"
-          className="min-h-12 flex-1 resize-none rounded border border-current/15 bg-black/10 px-3 py-2 text-sm outline-none focus:border-primary/60"
-        />
-        <Button
-          type={running ? "button" : "submit"}
-          onClick={running ? interrupt : undefined}
-          disabled={!sessionId || stopping || (!running && !input.trim())}
-          title={running ? "Stop current turn" : "Send"}
-          aria-label={running ? "Stop current turn" : "Send"}
-          className="self-end px-3"
-        >
-          {running ? (
-            <Square className="h-4 w-4" />
-          ) : (
-            <Send className="h-4 w-4" />
-          )}
-        </Button>
+        <div className="flex gap-2">
+          <textarea
+            value={input}
+            onChange={(ev) => setInput(ev.target.value)}
+            onKeyDown={(ev) => {
+              if (ev.key === "Enter" && !ev.shiftKey) {
+                ev.preventDefault();
+                void submit(input);
+              }
+            }}
+            disabled={!sessionId || conn !== "open"}
+            rows={2}
+            placeholder="输入法律工作指令。Shift+Enter 换行。Cmd+K 命令面板。"
+            className="min-h-12 flex-1 resize-none rounded border border-current/15 bg-black/10 px-3 py-2 text-sm outline-none focus:border-primary/60"
+          />
+          <Button
+            type={running ? "button" : "submit"}
+            onClick={running ? interrupt : undefined}
+            disabled={!sessionId || stopping || (!running && !input.trim())}
+            title={running ? "Stop current turn" : "Send"}
+            aria-label={running ? "Stop current turn" : "Send"}
+            className="self-end px-3"
+          >
+            {running ? (
+              <Square className="h-4 w-4" />
+            ) : (
+              <Send className="h-4 w-4" />
+            )}
+          </Button>
+        </div>
+        <div className="flex items-center gap-2">
+          <ReasoningEffortPicker
+            value={reasoningEffort}
+            onChange={setReasoningEffort}
+            disabled={!sessionId || conn !== "open"}
+          />
+        </div>
       </form>
 
       {/* Overlays */}

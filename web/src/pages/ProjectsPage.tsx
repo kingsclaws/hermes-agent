@@ -13,7 +13,7 @@ import {
   FolderOpen,
 } from "lucide-react";
 import { useNavigate } from "react-router-dom";
-import { api, type ProjectInfo } from "@/lib/api";
+import { api } from "@/lib/api";
 import { timeAgo } from "@/lib/utils";
 import { Toast } from "@nous-research/ui/ui/components/toast";
 import { Button } from "@nous-research/ui/ui/components/button";

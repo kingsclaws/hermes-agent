@@ -69,7 +69,15 @@ def _get_project_mem_dir(project_dir: Optional[str]) -> Optional[Path]:
     """Return the project-scoped memories directory, or None if no project."""
     if not project_dir:
         return None
-    p = Path(project_dir) / ".hermes-project" / "memories"
+    project = Path(project_dir).resolve()
+    p = project / ".hermes-project" / "memories"
+    # Ensure the memories dir actually lives within the project directory
+    # to prevent path traversal via a crafted project_dir value.
+    try:
+        p.resolve().relative_to(project)
+    except ValueError:
+        logger.warning("Project memory path escapes project directory: %s", p)
+        return None
     return p if p.is_dir() else None
 
 ENTRY_DELIMITER = "\n§\n"
@@ -700,6 +708,7 @@ def memory_tool(
     scope: str = "global",
     content: str = None,
     old_text: str = None,
+    operations: list = None,
     store: Optional[MemoryStore] = None,
 ) -> str:
     """
@@ -713,6 +722,9 @@ def memory_tool(
     """
     if store is None:
         return tool_error("Memory is not available. It may be disabled in config or this environment.", success=False)
+
+    if action == "batch":
+        return _handle_batch(operations or [], store)
 
     if target not in {"memory", "user"}:
         return tool_error(f"Invalid target '{target}'. Use 'memory' or 'user'.", success=False)
@@ -741,9 +753,69 @@ def memory_tool(
         result = store.remove(target, old_text, scope=scope)
 
     else:
-        return tool_error(f"Unknown action '{action}'. Use: add, replace, remove", success=False)
+        return tool_error(f"Unknown action '{action}'. Use: add, replace, remove, batch", success=False)
 
     return json.dumps(result, ensure_ascii=False)
+
+
+def _handle_batch(operations: list, store: "MemoryStore") -> str:
+    """Execute multiple memory operations atomically."""
+    if not operations:
+        return tool_error("operations array is required for 'batch' action.", success=False)
+    if len(operations) > 20:
+        return tool_error("Batch limited to 20 operations.", success=False)
+
+    results = []
+    for i, op in enumerate(operations):
+        if not isinstance(op, dict):
+            results.append({"index": i, "success": False, "error": "Operation must be an object"})
+            break
+        act = op.get("action", "")
+        tgt = op.get("target", "memory")
+        scp = op.get("scope", "global")
+        cnt = op.get("content")
+        old = op.get("old_text")
+
+        if tgt not in {"memory", "user"}:
+            results.append({"index": i, "success": False, "error": f"Invalid target '{tgt}'"})
+            break
+        if scp not in {"global", "project"}:
+            results.append({"index": i, "success": False, "error": f"Invalid scope '{scp}'"})
+            break
+        if scp == "project" and not store._project_mem_dir:
+            results.append({"index": i, "success": False, "error": "Project scope not available"})
+            break
+
+        try:
+            if act == "add":
+                if not cnt:
+                    results.append({"index": i, "success": False, "error": "content required"})
+                    break
+                r = store.add(tgt, cnt, scope=scp)
+            elif act == "replace":
+                if not old or not cnt:
+                    results.append({"index": i, "success": False, "error": "old_text and content required"})
+                    break
+                r = store.replace(tgt, old, cnt, scope=scp)
+            elif act == "remove":
+                if not old:
+                    results.append({"index": i, "success": False, "error": "old_text required"})
+                    break
+                r = store.remove(tgt, old, scope=scp)
+            else:
+                results.append({"index": i, "success": False, "error": f"Unknown action '{act}'"})
+                break
+            results.append({"index": i, "success": r.get("success", False), "result": r})
+        except Exception as e:
+            results.append({"index": i, "success": False, "error": str(e)})
+            break
+
+    return json.dumps({
+        "batch": True,
+        "completed": len(results),
+        "total": len(operations),
+        "results": results,
+    }, ensure_ascii=False)
 
 
 def check_memory_requirements() -> bool:
@@ -787,7 +859,10 @@ MEMORY_SCHEMA = {
         "- Tool/CLI quirks, environment facts, coding patterns → scope=global\n"
         "- Legal review SOPs, contract clause standards tied to one client → scope=project\n\n"
         "ACTIONS: add (new entry), replace (update existing -- old_text identifies it), "
-        "remove (delete -- old_text identifies it).\n\n"
+        "remove (delete -- old_text identifies it), batch (multiple ops in one call).\n\n"
+        "BATCH: Use action='batch' with an 'operations' array. Each element has: "
+        "{action, target, scope, content, old_text}. Operations execute in order; "
+        "if one fails, remaining operations are skipped.\n\n"
         "SKIP: trivial/obvious info, things easily re-discovered, raw data dumps, and temporary task state."
     ),
     "parameters": {
@@ -795,7 +870,7 @@ MEMORY_SCHEMA = {
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["add", "replace", "remove"],
+                "enum": ["add", "replace", "remove", "batch"],
                 "description": "The action to perform."
             },
             "target": {
@@ -816,6 +891,21 @@ MEMORY_SCHEMA = {
                 "type": "string",
                 "description": "Short unique substring identifying the entry to replace or remove."
             },
+            "operations": {
+                "type": "array",
+                "description": "For batch action: array of operations. Each has {action, target, scope, content, old_text}.",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "action": {"type": "string", "enum": ["add", "replace", "remove"]},
+                        "target": {"type": "string", "enum": ["memory", "user"]},
+                        "scope": {"type": "string", "enum": ["global", "project"]},
+                        "content": {"type": "string"},
+                        "old_text": {"type": "string"},
+                    },
+                    "required": ["action", "target"],
+                },
+            },
         },
         "required": ["action", "target"],
     },
@@ -835,6 +925,7 @@ registry.register(
         scope=args.get("scope", "global"),
         content=args.get("content"),
         old_text=args.get("old_text"),
+        operations=args.get("operations"),
         store=kw.get("store")),
     check_fn=check_memory_requirements,
     emoji="🧠",

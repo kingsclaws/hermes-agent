@@ -78,6 +78,18 @@ function getInitialLocale(): Locale {
   } catch {
     // SSR or privacy mode
   }
+
+  const browserLangs =
+    typeof navigator !== "undefined"
+      ? navigator.languages ?? [navigator.language]
+      : [];
+  for (const tag of browserLangs) {
+    const lower = tag.toLowerCase().replace("_", "-");
+    if (isLocale(lower)) return lower;
+    const base = lower.split("-")[0];
+    if (isLocale(base)) return base;
+  }
+
   return "en";
 }
 

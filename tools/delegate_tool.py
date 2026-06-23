@@ -227,6 +227,39 @@ def _get_subagent_db(agent) -> Optional[Any]:
     return db if db is not None else None
 
 
+# ---------------------------------------------------------------------------
+# Background task store
+# ---------------------------------------------------------------------------
+_background_tasks_lock = threading.Lock()
+_background_tasks: Dict[str, Dict[str, Any]] = {}
+
+
+def _store_background_task(task_id: str, record: Dict[str, Any]) -> None:
+    with _background_tasks_lock:
+        _background_tasks[task_id] = record
+
+
+def get_background_tasks(
+    task_id: Optional[str] = None,
+    clear_completed: bool = False,
+) -> List[Dict[str, Any]]:
+    with _background_tasks_lock:
+        if task_id:
+            rec = _background_tasks.get(task_id)
+            results = [dict(rec)] if rec else []
+        else:
+            results = [dict(v) for v in _background_tasks.values()]
+        if clear_completed:
+            to_remove = [
+                r["task_id"]
+                for r in results
+                if r.get("status") not in ("running", "pending")
+            ]
+            for tid in to_remove:
+                _background_tasks.pop(tid, None)
+    return results
+
+
 def _record_subagent_run(parent_agent, child) -> None:
     """Persist the initial queued run row for a child subagent."""
     db = _get_subagent_db(parent_agent)
@@ -2167,6 +2200,7 @@ def delegate_task(
     acp_args: Optional[List[str]] = None,
     role: Optional[str] = None,
     profile: Optional[str] = None,
+    background: bool = False,
     parent_agent=None,
 ) -> str:
     """
@@ -2175,6 +2209,10 @@ def delegate_task(
     Supports two modes:
       - Single: provide goal (+ optional context, toolsets, role, profile)
       - Batch:  provide tasks array [{goal, context, toolsets, role, profile}, ...]
+
+    When background=True, children are dispatched in daemon threads and the
+    parent returns immediately with task IDs.  Use check_background_tasks
+    to poll for results.
 
     The 'role' parameter controls whether a child can further delegate:
     'leaf' (default) cannot; 'orchestrator' retains the delegation
@@ -2336,6 +2374,58 @@ def delegate_task(
     finally:
         # Authoritative restore: reset global to parent's tool names after all children built
         _model_tools._last_resolved_tool_names = _parent_tool_names
+
+    # --- Background mode: dispatch in daemon threads, return immediately ---
+    if background:
+        import uuid as _uuid
+
+        bg_dispatched = []
+        for i, t, child in children:
+            bg_id = f"bg-{_uuid.uuid4().hex[:8]}"
+            wall_start = time.time()
+            _store_background_task(bg_id, {
+                "task_id": bg_id,
+                "task_index": i,
+                "goal": t["goal"],
+                "status": "running",
+                "started_at": wall_start,
+            })
+
+            def _bg_worker(
+                idx=i, goal=t["goal"], ch=child, tid=bg_id, ws=wall_start,
+            ):
+                try:
+                    result = _run_single_child(idx, goal, ch, parent_agent)
+                    _store_background_task(tid, {
+                        **result,
+                        "task_id": tid,
+                        "goal": goal,
+                        "completed_at": time.time(),
+                    })
+                except Exception as exc:
+                    logger.warning("Background subagent %s failed: %s", tid, exc)
+                    _store_background_task(tid, {
+                        "task_id": tid,
+                        "task_index": idx,
+                        "goal": goal,
+                        "status": "error",
+                        "error": str(exc),
+                        "started_at": ws,
+                        "completed_at": time.time(),
+                    })
+
+            thread = threading.Thread(target=_bg_worker, daemon=True, name=f"bg-subagent-{bg_id}")
+            thread.start()
+            bg_dispatched.append({"task_id": bg_id, "goal": t["goal"][:120]})
+
+        return json.dumps({
+            "status": "dispatched",
+            "background_tasks": bg_dispatched,
+            "message": (
+                f"{len(bg_dispatched)} task(s) dispatched in background. "
+                "Use check_background_tasks to poll for results."
+            ),
+        }, ensure_ascii=False)
 
     if n_tasks == 1:
         # Single task -- run directly (no thread pool overhead)
@@ -3035,6 +3125,16 @@ DELEGATE_TASK_SCHEMA = {
                     "Leave empty unless acp_command is explicitly provided."
                 ),
             },
+            "background": {
+                "type": "boolean",
+                "description": (
+                    "When true, dispatch subagents in background daemon threads "
+                    "and return immediately with task IDs. The parent continues "
+                    "without blocking. Use check_background_tasks to poll for "
+                    "results. Default: false (synchronous, parent blocks until "
+                    "all children complete)."
+                ),
+            },
         },
         "required": [],
     },
@@ -3058,9 +3158,66 @@ registry.register(
         acp_args=args.get("acp_args"),
         role=args.get("role"),
         profile=args.get("profile"),
+        background=bool(args.get("background", False)),
         parent_agent=kw.get("parent_agent"),
     ),
     check_fn=check_delegate_requirements,
     emoji="🔀",
     dynamic_schema_overrides=_build_dynamic_schema_overrides,
+)
+
+
+# --- check_background_tasks tool ---
+
+CHECK_BACKGROUND_TASKS_SCHEMA = {
+    "name": "check_background_tasks",
+    "description": (
+        "Check the status and results of background subagent tasks dispatched "
+        "via delegate_task(background=true). Returns a list of tasks with their "
+        "current status (running/completed/error) and results when available."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "task_id": {
+                "type": "string",
+                "description": (
+                    "Specific background task ID to check (e.g. 'bg-a1b2c3d4'). "
+                    "If omitted, returns all background tasks."
+                ),
+            },
+            "clear_completed": {
+                "type": "boolean",
+                "description": (
+                    "When true, remove completed/errored tasks from the store "
+                    "after returning them. Default: false."
+                ),
+            },
+        },
+        "required": [],
+    },
+}
+
+
+def _handle_check_background_tasks(args: dict, **kwargs) -> str:
+    task_id = args.get("task_id")
+    clear = bool(args.get("clear_completed", False))
+    tasks = get_background_tasks(task_id=task_id, clear_completed=clear)
+    if task_id and not tasks:
+        return json.dumps({"error": f"No background task found with id '{task_id}'"})
+    safe_tasks = []
+    for t in tasks:
+        safe = {k: v for k, v in t.items() if not k.startswith("_")}
+        safe.pop("tool_trace", None)
+        safe_tasks.append(safe)
+    return json.dumps({"background_tasks": safe_tasks}, ensure_ascii=False)
+
+
+registry.register(
+    name="check_background_tasks",
+    toolset="delegation",
+    schema=CHECK_BACKGROUND_TASKS_SCHEMA,
+    handler=_handle_check_background_tasks,
+    check_fn=check_delegate_requirements,
+    emoji="📋",
 )

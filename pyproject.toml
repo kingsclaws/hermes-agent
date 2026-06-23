@@ -64,6 +64,14 @@ dependencies = [
   # (which is a silent killer on Windows — see CONTRIBUTING.md) and
   # `os.killpg` (which doesn't exist on Windows).
   "psutil==7.2.2",
+  # Security-critical transitives — floor pins to prevent the lockfile
+  # from silently resolving a version with known CVEs. These arrive as
+  # transitive deps of requests, PyJWT[crypto], etc. The >= constraint
+  # is the exception to the exact-pin policy: their actual version is
+  # dictated by the requesting package, but we enforce a security floor.
+  "cryptography>=44.0.0",
+  "certifi>=2024.7.4",
+  "urllib3>=1.26.19",
 ]
 
 [project.optional-dependencies]

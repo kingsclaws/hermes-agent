@@ -14,6 +14,9 @@ import {
   Terminal,
   Send,
   Play,
+  Plus,
+  Trash2,
+  X,
   FileCheck,
   Eye,
   ClipboardCheck,
@@ -22,7 +25,6 @@ import {
 } from "lucide-react";
 import { api } from "@/lib/api";
 import type {
-  ProjectInfo,
   ProjectDetail,
   SessionInfo,
   WorkflowDefinition,
@@ -36,9 +38,11 @@ import { Spinner } from "@nous-research/ui/ui/components/spinner";
 import { Card, CardContent } from "@nous-research/ui/ui/components/card";
 import { ListItem } from "@nous-research/ui/ui/components/list-item";
 import { useToast } from "@nous-research/ui/hooks/use-toast";
+import { useConfirmDelete } from "@nous-research/ui/hooks/use-confirm-delete";
 import { usePageHeader } from "@/contexts/usePageHeader";
 import { PluginSlot } from "@/plugins";
 import { useAsync } from "@/hooks/useAsync";
+import { DeleteConfirmDialog } from "@/components/DeleteConfirmDialog";
 
 // ---------------------------------------------------------------------------
 // Quick action pill
@@ -58,17 +62,62 @@ const QUICK_ACTIONS: QuickAction[] = [
 ];
 
 // ---------------------------------------------------------------------------
+// Create project form
+// ---------------------------------------------------------------------------
+
+interface CreateForm {
+  project_name: string;
+  client_name: string;
+  goal: string;
+  dir_path: string;
+  language: string;
+}
+
+const EMPTY_FORM: CreateForm = {
+  project_name: "",
+  client_name: "",
+  goal: "",
+  dir_path: "/data/projects",
+  language: "ch",
+};
+
+// ---------------------------------------------------------------------------
 // Component
 // ---------------------------------------------------------------------------
 
 export default function LaunchPad() {
   const {
     data: projectsRaw, loading, error,
-    refetch: loadProjects,
+    refetch: loadProjects, setData: setProjects,
   } = useAsync(() => api.fetchProjects().then(d => d.projects ?? []));
   const projects = projectsRaw ?? [];
   const [search, setSearch] = useState("");
   const [selectedId, setSelectedId] = useState<string | null>(null);
+
+  // Create project
+  const [showCreate, setShowCreate] = useState(false);
+  const [createForm, setCreateForm] = useState<CreateForm>(EMPTY_FORM);
+  const [creating, setCreating] = useState(false);
+
+  const { showToast } = useToast();
+
+  // Delete project
+  const projectDelete = useConfirmDelete({
+    onDelete: useCallback(
+      async (id: string) => {
+        try {
+          await api.deleteProject(id);
+          setProjects((prev) => (prev ?? []).filter((p) => p.id !== id));
+          if (selectedId === id) setSelectedId(null);
+          showToast("Project deleted", "success");
+        } catch (e: any) {
+          showToast(e?.message ?? "Delete failed", "error");
+          throw new Error("delete failed");
+        }
+      },
+      [selectedId, showToast],
+    ),
+  });
 
   // Context panel state
   const [projectDetail, setProjectDetail] = useState<ProjectDetail | null>(null);
@@ -82,7 +131,6 @@ export default function LaunchPad() {
   const [compiling, setCompiling] = useState<string | null>(null);
 
   const navigate = useNavigate();
-  const { showToast } = useToast();
   const { setAfterTitle, setEnd } = usePageHeader();
 
 
@@ -108,6 +156,10 @@ export default function LaunchPad() {
             className="w-56 pl-8"
           />
         </div>
+        <Button size="sm" onClick={() => setShowCreate(true)}>
+          <Plus className="h-3.5 w-3.5 mr-1" />
+          New
+        </Button>
       </div>,
     );
     return () => {
@@ -152,6 +204,28 @@ export default function LaunchPad() {
     : projects;
 
   // ── Handlers ───────────────────────────────────────────────────────
+
+  const handleCreate = useCallback(async () => {
+    if (!createForm.project_name.trim() || !createForm.dir_path.trim()) return;
+    setCreating(true);
+    try {
+      await api.createProject({
+        project_name: createForm.project_name.trim(),
+        client_name: createForm.client_name.trim(),
+        goal: createForm.goal.trim(),
+        dir_path: createForm.dir_path.trim(),
+        language: createForm.language,
+      });
+      setShowCreate(false);
+      setCreateForm(EMPTY_FORM);
+      showToast("Project created", "success");
+      await loadProjects();
+    } catch (e: any) {
+      showToast(e?.message ?? "Create failed", "error");
+    } finally {
+      setCreating(false);
+    }
+  }, [createForm, showToast, loadProjects]);
 
   const handleSend = useCallback(async () => {
     if (!selectedId || submitting) return;
@@ -256,6 +330,16 @@ export default function LaunchPad() {
   return (
     <div className="flex flex-col gap-6 h-full">
       <PluginSlot name="launchpad:top" />
+      <PluginSlot name="projects:top" />
+
+      <DeleteConfirmDialog
+        open={projectDelete.isOpen}
+        onCancel={projectDelete.cancel}
+        onConfirm={projectDelete.confirm}
+        title="Delete Project"
+        description="This will permanently delete the project and all its contents. This action cannot be undone."
+        loading={projectDelete.isDeleting}
+      />
 
       {/* ── Zone 1: Project card grid ─────────────────────────── */}
       <section>
@@ -278,7 +362,7 @@ export default function LaunchPad() {
               <Card
                 key={p.id}
                 className={cn(
-                  "cursor-pointer transition-all duration-100 hover:border-primary/40",
+                  "group cursor-pointer transition-all duration-100 hover:border-primary/40",
                   p.id === selectedId ? "border-primary ring-1 ring-primary/30" : "border-border",
                 )}
                 onClick={() => setSelectedId(p.id)}
@@ -296,12 +380,25 @@ export default function LaunchPad() {
                         </p>
                       )}
                     </div>
-                    <ChevronRight
-                      className={cn(
-                        "w-4 h-4 shrink-0 mt-0.5 transition-transform",
-                        p.id === selectedId ? "text-primary rotate-90" : "text-secondary",
-                      )}
-                    />
+                    <div className="flex items-center gap-1 shrink-0">
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          projectDelete.requestDelete(p.id);
+                        }}
+                        className="p-1 rounded opacity-0 group-hover:opacity-60 hover:!opacity-100 hover:text-destructive transition-opacity"
+                        aria-label={`Delete ${p.name || p.id}`}
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                      <ChevronRight
+                        className={cn(
+                          "w-4 h-4 shrink-0 transition-transform",
+                          p.id === selectedId ? "text-primary rotate-90" : "text-secondary",
+                        )}
+                      />
+                    </div>
                   </div>
                   <div className="flex items-center gap-3 mt-2 text-xs text-secondary">
                     {p.doc_count != null && p.doc_count > 0 && (
@@ -515,6 +612,102 @@ export default function LaunchPad() {
       </section>
 
       <PluginSlot name="launchpad:bottom" />
+
+      {/* Create Project Dialog */}
+      {showCreate && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center">
+          <div
+            className="absolute inset-0 bg-black/50"
+            onClick={() => setShowCreate(false)}
+          />
+          <div className="relative bg-card border border-border rounded-lg shadow-xl w-full max-w-lg mx-4 p-6">
+            <div className="flex items-center justify-between mb-4">
+              <h2 className="text-lg font-semibold">Create New Project</h2>
+              <Button ghost size="sm" onClick={() => setShowCreate(false)}>
+                <X className="h-4 w-4" />
+              </Button>
+            </div>
+
+            <div className="flex flex-col gap-3">
+              <div>
+                <label className="text-xs font-medium text-text-secondary mb-1 block">
+                  Project Name *
+                </label>
+                <Input
+                  placeholder="e.g. case-2024-001"
+                  value={createForm.project_name}
+                  onChange={(e) =>
+                    setCreateForm({ ...createForm, project_name: e.target.value })
+                  }
+                />
+              </div>
+              <div>
+                <label className="text-xs font-medium text-text-secondary mb-1 block">
+                  Client
+                </label>
+                <Input
+                  placeholder="e.g. ABC Corp"
+                  value={createForm.client_name}
+                  onChange={(e) =>
+                    setCreateForm({ ...createForm, client_name: e.target.value })
+                  }
+                />
+              </div>
+              <div>
+                <label className="text-xs font-medium text-text-secondary mb-1 block">
+                  Goal
+                </label>
+                <Input
+                  placeholder="e.g. Draft defence statement"
+                  value={createForm.goal}
+                  onChange={(e) =>
+                    setCreateForm({ ...createForm, goal: e.target.value })
+                  }
+                />
+              </div>
+              <div>
+                <label className="text-xs font-medium text-text-secondary mb-1 block">
+                  Source Directory *
+                </label>
+                <Input
+                  placeholder="/data/projects/source-docs"
+                  value={createForm.dir_path}
+                  onChange={(e) =>
+                    setCreateForm({ ...createForm, dir_path: e.target.value })
+                  }
+                />
+              </div>
+              <div>
+                <label className="text-xs font-medium text-text-secondary mb-1 block">
+                  Language
+                </label>
+                <select
+                  className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm"
+                  value={createForm.language}
+                  onChange={(e) =>
+                    setCreateForm({ ...createForm, language: e.target.value })
+                  }
+                >
+                  <option value="ch">Chinese (中文)</option>
+                  <option value="en">English</option>
+                </select>
+              </div>
+            </div>
+
+            <div className="flex justify-end gap-2 mt-6">
+              <Button ghost onClick={() => setShowCreate(false)}>
+                Cancel
+              </Button>
+              <Button
+                onClick={handleCreate}
+                disabled={creating || !createForm.project_name.trim() || !createForm.dir_path.trim()}
+              >
+                {creating ? "Creating..." : "Create Project"}
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

@@ -38,7 +38,6 @@ import {
   PanelLeftClose,
   PanelLeftOpen,
   Puzzle,
-  Rocket,
   RotateCw,
   Settings,
   Shield,
@@ -68,12 +67,12 @@ import ConfigPage from "@/pages/ConfigPage";
 import DocsPage from "@/pages/DocsPage";
 import EnvPage from "@/pages/EnvPage";
 import SessionsPage from "@/pages/SessionsPage";
-import ProjectsPage from "@/pages/ProjectsPage";
 import LogsPage from "@/pages/LogsPage";
 import AnalyticsPage from "@/pages/AnalyticsPage";
 import ModelsPage from "@/pages/ModelsPage";
 import CronPage from "@/pages/CronPage";
 import ProfilesPage from "@/pages/ProfilesPage";
+import ProfileBuilderPage from "@/pages/ProfileBuilderPage";
 import SkillsPage from "@/pages/SkillsPage";
 import PluginsPage from "@/pages/PluginsPage";
 import ChatPage from "@/pages/ChatPage";
@@ -101,7 +100,11 @@ function RootRedirect() {
   if (isDashboardEmbeddedChatEnabled()) {
     return <Navigate to="/chat" replace />;
   }
-  return <Navigate to="/launch" replace />;
+  return <Navigate to="/projects" replace />;
+}
+
+function LaunchRedirect() {
+  return <Navigate to="/projects" replace />;
 }
 
 function UnknownRouteFallback({ pluginsLoading }: { pluginsLoading: boolean }) {
@@ -109,7 +112,7 @@ function UnknownRouteFallback({ pluginsLoading }: { pluginsLoading: boolean }) {
     // Render nothing during the plugin-load window — a spinner here would just flash.
     return null;
   }
-  return <Navigate to="/launch" replace />;
+  return <Navigate to="/projects" replace />;
 }
 
 const CHAT_NAV_ITEM: NavItem = {
@@ -130,11 +133,11 @@ const CHAT_NAV_ITEM: NavItem = {
  */
 const BUILTIN_ROUTES_CORE: Record<string, ComponentType> = {
   "/": RootRedirect,
-  "/launch": LaunchPad,
+  "/launch": LaunchRedirect,
   "/swarm-board": SwarmBoardPage,
   "/kanban": SwarmBoardPage,
   "/swarm-chat": LegalSwarmChat,
-  "/projects": ProjectsPage,
+  "/projects": LaunchPad,
   "/projects/:projectId": ProjectDashboardPage,
   "/projects/:projectId/files": ProjectFilesPage,
   "/sessions": SessionsPage,
@@ -145,6 +148,7 @@ const BUILTIN_ROUTES_CORE: Record<string, ComponentType> = {
   "/skills": SkillsPage,
   "/plugins": PluginsPage,
   "/profiles": ProfilesPage,
+  "/profiles/:name": ProfileBuilderPage,
   "/config": ConfigPage,
   "/env": EnvPage,
   "/docs": DocsPage,
@@ -160,16 +164,10 @@ function ChatRouteSink() {
 
 const BUILTIN_NAV_REST: NavItem[] = [
   {
-    path: "/launch",
-    labelKey: "launchpad",
-    label: "LaunchPad",
-    icon: Rocket,
-  },
-  {
     path: "/swarm-chat",
     labelKey: "swarmChat",
     label: "Swarm Chat",
-    icon: MessageSquare,
+    icon: Users,
   },
   {
     path: "/kanban",
@@ -219,16 +217,10 @@ const BUILTIN_NAV_REST: NavItem[] = [
 const LEX_WORKSPACE_NAV: NavItem[] = [
   CHAT_NAV_ITEM,
   {
-    path: "/launch",
-    labelKey: "launchpad",
-    label: "LaunchPad",
-    icon: Rocket,
-  },
-  {
     path: "/swarm-chat",
     labelKey: "swarmChat",
     label: "Swarm Chat",
-    icon: MessageSquare,
+    icon: Users,
   },
   {
     path: "/kanban",
@@ -489,12 +481,8 @@ export default function App() {
   );
 
   const builtinNav = useMemo(() => {
-    if (embeddedChat) {
-      return LEX_WORKSPACE_NAV;
-    }
-    const base = embeddedChat
-      ? [CHAT_NAV_ITEM, ...BUILTIN_NAV_REST]
-      : BUILTIN_NAV_REST;
+    if (embeddedChat) return LEX_WORKSPACE_NAV;
+    const base = BUILTIN_NAV_REST;
     return showTokenAnalytics
       ? base
       : base.filter((n) => n.path !== "/analytics");

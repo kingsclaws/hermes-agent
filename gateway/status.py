@@ -73,12 +73,31 @@ def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def terminate_pid(pid: int, *, force: bool = False) -> None:
+def terminate_pid(
+    pid: int,
+    *,
+    force: bool = False,
+    expected_start_time: Optional[int] = None,
+) -> None:
     """Terminate a PID with platform-appropriate force semantics.
 
     POSIX uses SIGTERM/SIGKILL. Windows uses taskkill /T /F for true force-kill
     because os.kill(..., SIGTERM) is not equivalent to a tree-killing hard stop.
+
+    When force=True on POSIX, sends SIGTERM first then escalates to SIGKILL
+    after a brief grace period if the process is still alive.
+
+    If *expected_start_time* is provided, the PID's kernel start time is
+    checked before sending any signal. A mismatch means the PID was recycled
+    by the OS and we must not signal the new occupant.
     """
+    if expected_start_time is not None:
+        actual = _get_process_start_time(pid)
+        if actual is not None and actual != expected_start_time:
+            raise ProcessLookupError(
+                f"PID {pid} was recycled (start_time {actual} != {expected_start_time})"
+            )
+
     if force and _IS_WINDOWS:
         try:
             result = subprocess.run(
@@ -96,8 +115,23 @@ def terminate_pid(pid: int, *, force: bool = False) -> None:
             raise OSError(details or f"taskkill failed for PID {pid}")
         return
 
-    sig = signal.SIGTERM if not force else getattr(signal, "SIGKILL", signal.SIGTERM)
-    os.kill(pid, sig)
+    if not force:
+        os.kill(pid, signal.SIGTERM)
+        return
+
+    # Graceful escalation: SIGTERM → wait → SIGKILL
+    os.kill(pid, signal.SIGTERM)
+    import time as _time
+    deadline = _time.monotonic() + 5.0
+    while _time.monotonic() < deadline:
+        if not _pid_exists(pid):
+            return
+        _time.sleep(0.25)
+    sig_kill = getattr(signal, "SIGKILL", signal.SIGTERM)
+    try:
+        os.kill(pid, sig_kill)
+    except ProcessLookupError:
+        pass
 
 
 def _scope_hash(identity: str) -> str:

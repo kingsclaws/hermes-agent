@@ -1,0 +1,37 @@
+# Delta build — updates source on top of existing lex-hermes image.
+# Used when Docker Hub / registry mirrors are unreachable.
+#
+# Build:
+#   docker build -f Dockerfile.delta -t lex-hermes .
+
+FROM localhost:6678/lex-hermes:latest
+
+ENV VIRTUAL_ENV=/opt/hermes/.venv
+ENV PATH="/opt/hermes/.venv/bin:/opt/hermes/bin:${PATH}"
+
+WORKDIR /opt/lex-hermes
+
+# ── Update lexitool vendor package ──
+COPY vendor/lexitool /opt/lexitool
+RUN uv pip install --no-cache /opt/lexitool
+
+# ── Update hermes-agent source ──
+COPY . /opt/lex-hermes
+RUN uv pip install --no-cache -e ".[web]"
+
+# ── Pre-compile bytecode ──
+RUN python3 -m compileall -q -f /opt/lex-hermes/ 2>/dev/null || true
+
+# ── Rebuild Web Dashboard ──
+RUN cd /opt/lex-hermes/web && \
+    npm install --prefer-offline --no-audit && \
+    npm run build && \
+    npm cache clean --force
+
+# ── Rebuild TUI ──
+RUN cd /opt/lex-hermes/ui-tui && \
+    npm install --prefer-offline --no-audit && \
+    npm run build && \
+    npm cache clean --force
+
+WORKDIR /workspace

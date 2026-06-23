@@ -1581,8 +1581,8 @@ def insert_paragraph_block(docx_path: str, after_para: int,
 		if pg.get("style") or pg.get("style_id"):
 			pg_format["style"] = pg.get("style") or pg.get("style_id")
 		# Bug 1: apply paragraph style explicitly before run-level formatting
-		if pg_format.get("style"):
-			_set_pstyle(pPr, pg_format["style"])
+		if pg_format.get("style") or pg_format.get("style_id"):
+			_set_pstyle(pPr, pg_format.get("style") or pg_format.get("style_id"))
 		if pg.get("font"):
 			pg_format["font"] = pg.get("font")
 		elif not inherit_format and font:
