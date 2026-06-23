@@ -144,6 +144,8 @@ for name, desc, is_coord in specs:
             'orchestrator_profile': 'lex-coordinator',
             'default_assignee': 'lex-drafter',
             'auto_promote_children': True,
+            'dispatch_in_gateway': True,
+            'dispatch_interval_seconds': 5,
         }
 
     with open(profile_dir / 'config.yaml', 'w', encoding='utf-8') as f:
@@ -156,6 +158,32 @@ print('[lex-hermes] Profile bootstrap complete')
 }
 
 bootstrap_profiles
+
+# ── Profile symlinks: SOPs reference hpswarm-* while profiles are lex-* ──
+# The kanban dispatcher spawns workers by profile name from the task assignee.
+# Legal swarm SOPs use hpswarm-* names; these symlinks make both resolve.
+create_profile_symlinks() {
+  echo "[lex-hermes] Creating profile symlinks (hpswarm-* → lex-*)..."
+  local prof_root="/root/.hermes/profiles"
+  local pairs=(
+    "hpswarm-drafter:lex-drafter"
+    "hpswarm-reviewer-content:lex-reviewer-content"
+    "hpswarm-reviewer-format:lex-reviewer-format"
+    "hpswarm-reviewer-translation:lex-reviewer-translation"
+    "hpswarm-reviewer-ts:lex-reviewer-ts"
+    "hpswarm-reviewer-xref:lex-reviewer-xref"
+  )
+  for pair in "${pairs[@]}"; do
+    local link="${prof_root}/${pair%%:*}"
+    local target="${pair##*:}"
+    if [ ! -e "$link" ] && [ -d "${prof_root}/${target}" ]; then
+      ln -s "$target" "$link"
+      echo "[lex-hermes]   ${pair%%:*} → $target"
+    fi
+  done
+  echo "[lex-hermes] Profile symlinks ready"
+}
+create_profile_symlinks
 
 echo "[lex-hermes] Starting gateway..."
 hermes gateway run &
