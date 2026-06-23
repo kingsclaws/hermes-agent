@@ -633,7 +633,7 @@ def kanban_task_create_handler(args: dict, **kwargs) -> str:
     now = _now()
     session_id = os.environ.get("HERMES_SESSION_ID", "")
 
-    initial_status = "in_progress" if assignee else "todo"
+    initial_status = "ready" if assignee else "todo"
 
     conn.execute(
         """INSERT INTO tasks

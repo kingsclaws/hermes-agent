@@ -1148,15 +1148,15 @@ def _handle_edit(args: dict, **kwargs) -> str:
                 tc_result = tc_replace_first_in_para(para_el, old_text, new_text_plain, tc_id, author)
                 used_nearby_fallback = False
                 if not tc_result.get("ok"):
+                    # Multi-stage fallback mirroring _resolve_replace_match:
+                    # exact → strip → tab-strip → whitespace-normalized (now
+                    # also normalizes full-width chars via _normalize_fullwidth).
                     para_text = _get_para_text(para_el)
-                    located = _locate_normalized_text(para_text, old_text)
-                    if located is not None:
-                        start, end = located
-                        actual_old = para_text[start:end]
-                        if actual_old and actual_old != old_text:
-                            tc_result = tc_replace_first_in_para(
-                                para_el, actual_old, new_text_plain, tc_id, author
-                            )
+                    match_text = _resolve_replace_match(para_text, old_text)
+                    if match_text is not None and match_text != old_text:
+                        tc_result = tc_replace_first_in_para(
+                            para_el, match_text, new_text_plain, tc_id, author
+                        )
                 # Fallback: search ALL paragraphs including table cells.
                 if not tc_result.get("ok") and _all_idx is not None:
                     tc_result = _search_and_tc_replace_nearby(
@@ -1284,7 +1284,8 @@ def _get_para_text(para_el) -> str:
             if parent is not None and parent.tag == f"{W}tabs":
                 continue
             parts.append("\t")
-    return "".join(parts).replace('“', '"').replace('”', '"').replace('‘', "'").replace('’', "'")
+    text = "".join(parts).replace('“', '"').replace('”', '"').replace('‘', "'").replace('’', "'")
+    return _normalize_fullwidth(text)
 
 
 def _direct_replace(para_el, old_text: str, new_text: str) -> dict:
@@ -1419,9 +1420,19 @@ def _has_format_markers(text: str) -> bool:
     return bool(re.search(r"\[/?(?:b|i|u)\]", text))
 
 
+# Fullwidth ASCII range U+FF01–U+FF5E → U+0021–U+007E, plus U+3000 → space.
+_FULLWIDTH_TABLE = {i: chr(i - 0xFF01 + 0x0021) for i in range(0xFF01, 0xFF5F)}
+_FULLWIDTH_TABLE[0x3000] = " "
+
+
+def _normalize_fullwidth(text: str) -> str:
+    """Normalize full-width ASCII / punctuation / digits to half-width."""
+    return text.translate(_FULLWIDTH_TABLE)
+
+
 def _normalize_match_text(text: str) -> str:
     """Normalize only for fallback matching; never changes document output."""
-    return re.sub(r"\s+", "", text or "")
+    return _normalize_fullwidth(re.sub(r"\s+", "", text or ""))
 
 
 # Regex to strip lexitool format markers from old_text so that text
@@ -1438,13 +1449,13 @@ def _strip_format_markers(text: str) -> str:
 
 
 def _locate_normalized_text(haystack: str, needle: str) -> tuple[int, int] | None:
-    """Locate needle in haystack while ignoring whitespace differences."""
+    """Locate needle in haystack while ignoring whitespace + fullwidth differences."""
     normalized_haystack = []
     index_map = []
     for idx, char in enumerate(haystack or ""):
         if char.isspace():
             continue
-        normalized_haystack.append(char)
+        normalized_haystack.append(_normalize_fullwidth(char))
         index_map.append(idx)
 
     normalized_needle = _normalize_match_text(needle)
@@ -1527,6 +1538,19 @@ def _search_and_replace_nearby(
     return {"ok": False, "reason": "text not found in nearby paragraphs"}
 
 
+def _tc_replace_with_fallback(para_el, old_text: str, new_text: str, tc_id: int, author: str) -> dict:
+    """Try TC replace with full multi-stage match resolution fallback."""
+    from lexitool.tc_utils import tc_replace_first_in_para
+
+    result = tc_replace_first_in_para(para_el, old_text, new_text, tc_id, author)
+    if not result.get("ok"):
+        para_text = _get_para_text(para_el)
+        match_text = _resolve_replace_match(para_text, old_text)
+        if match_text is not None and match_text != old_text:
+            result = tc_replace_first_in_para(para_el, match_text, new_text, tc_id, author)
+    return result
+
+
 def _search_and_tc_replace_nearby(
     all_paras: list, body_idx: int, old_text: str, new_text: str,
     tc_id: int, author: str,
@@ -1554,13 +1578,13 @@ def _search_and_tc_replace_nearby(
 
     # Search forward
     for i in range(search_start, min(search_start + 200, n)):
-        result = tc_replace_first_in_para(all_paras[i], old_text, new_text, tc_id, author)
+        result = _tc_replace_with_fallback(all_paras[i], old_text, new_text, tc_id, author)
         if result.get("ok"):
             return result
 
     # Search backward
     for i in range(search_start - 1, max(search_start - 50, -1), -1):
-        result = tc_replace_first_in_para(all_paras[i], old_text, new_text, tc_id, author)
+        result = _tc_replace_with_fallback(all_paras[i], old_text, new_text, tc_id, author)
         if result.get("ok"):
             return result
 

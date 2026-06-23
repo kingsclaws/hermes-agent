@@ -549,9 +549,21 @@ def tc_ins_mixed(
     return inserted
 
 
+# Fullwidth ASCII range U+FF01–U+FF5E → U+0021–U+007E, plus U+3000 → space.
+# Build once at import time so translate() is a fast single-pass lookup.
+_FULLWIDTH_TABLE = {i: chr(i - 0xFF01 + 0x0021) for i in range(0xFF01, 0xFF5F)}
+_FULLWIDTH_TABLE[0x3000] = " "
+
+
+def _normalize_fullwidth(text: str) -> str:
+    """Normalize full-width ASCII / punctuation / digits to half-width."""
+    return text.translate(_FULLWIDTH_TABLE)
+
+
 def _normalize_quotes(text: str) -> str:
-    """将 Word 自动弯引号标准化为直引号以匹配搜索。"""
-    return text.replace('“', '"').replace('”', '"').replace('‘', ''').replace('’', ''')
+    """Normalize Word smart-quotes + full-width chars for search matching."""
+    t = text.replace('“', '"').replace('”', '"').replace('‘', "'").replace('’', "'")
+    return _normalize_fullwidth(t)
 
 
 def _para_full_text(para_el) -> str:
