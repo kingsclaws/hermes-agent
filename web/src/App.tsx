@@ -27,7 +27,6 @@ import {
   Download,
   Eye,
   FileText,
-  FolderKanban,
   Globe,
   Heart,
   KanbanSquare,
@@ -58,6 +57,9 @@ import { Backdrop } from "@/components/Backdrop";
 import { SidebarFooter } from "@/components/SidebarFooter";
 import { SidebarStatusStrip, gatewayLine } from "@/components/SidebarStatusStrip";
 import { useBelowBreakpoint } from "@nous-research/ui/hooks/use-below-breakpoint";
+import ActivityBar from "@/components/ActivityBar";
+import type { NavItem } from "@/components/ActivityBar";
+import LeftPanelSlot from "@/components/LeftPanelSlot";
 import { useSidebarStatus } from "@/hooks/useSidebarStatus";
 import { AuthWidget } from "@/components/AuthWidget";
 import { PageHeaderProvider } from "@/contexts/PageHeaderProvider";
@@ -79,9 +81,7 @@ import ChatPage from "@/pages/ChatPage";
 import { ChatTabProvider } from "@/contexts/ChatTabContext";
 import ProjectFilesPage from "@/pages/ProjectFilesPage";
 import ProjectDashboardPage from "@/pages/ProjectDashboardPage";
-import LaunchPad from "@/pages/LaunchPad";
 import SwarmBoardPage from "@/pages/SwarmBoardPage";
-import LegalSwarmChat from "@/pages/LegalSwarmChat";
 import { LanguageSwitcher } from "@/components/LanguageSwitcher";
 import { ThemeSwitcher } from "@/components/ThemeSwitcher";
 import { useI18n } from "@/i18n";
@@ -97,22 +97,16 @@ import { useKeyboardShortcuts } from "@/contexts/KeyboardShortcutsContext";
 import { KeyboardShortcutsDialog } from "@/components/KeyboardShortcutsDialog";
 
 function RootRedirect() {
-  if (isDashboardEmbeddedChatEnabled()) {
-    return <Navigate to="/chat" replace />;
-  }
-  return <Navigate to="/projects" replace />;
+  return <Navigate to="/chat" replace />;
 }
 
 function LaunchRedirect() {
-  return <Navigate to="/projects" replace />;
+  return <Navigate to="/chat" replace />;
 }
 
 function UnknownRouteFallback({ pluginsLoading }: { pluginsLoading: boolean }) {
-  if (pluginsLoading) {
-    // Render nothing during the plugin-load window — a spinner here would just flash.
-    return null;
-  }
-  return <Navigate to="/projects" replace />;
+  if (pluginsLoading) return null;
+  return <Navigate to="/chat" replace />;
 }
 
 const CHAT_NAV_ITEM: NavItem = {
@@ -136,8 +130,6 @@ const BUILTIN_ROUTES_CORE: Record<string, ComponentType> = {
   "/launch": LaunchRedirect,
   "/swarm-board": SwarmBoardPage,
   "/kanban": SwarmBoardPage,
-  "/swarm-chat": LegalSwarmChat,
-  "/projects": LaunchPad,
   "/projects/:projectId": ProjectDashboardPage,
   "/projects/:projectId/files": ProjectFilesPage,
   "/sessions": SessionsPage,
@@ -164,22 +156,10 @@ function ChatRouteSink() {
 
 const BUILTIN_NAV_REST: NavItem[] = [
   {
-    path: "/swarm-chat",
-    labelKey: "swarmChat",
-    label: "Swarm Chat",
-    icon: Users,
-  },
-  {
     path: "/kanban",
     labelKey: "kanban",
     label: "Kanban",
     icon: KanbanSquare,
-  },
-  {
-    path: "/projects",
-    labelKey: "projects",
-    label: "Projects",
-    icon: FolderKanban,
   },
   {
     path: "/sessions",
@@ -217,22 +197,10 @@ const BUILTIN_NAV_REST: NavItem[] = [
 const LEX_WORKSPACE_NAV: NavItem[] = [
   CHAT_NAV_ITEM,
   {
-    path: "/swarm-chat",
-    labelKey: "swarmChat",
-    label: "Swarm Chat",
-    icon: Users,
-  },
-  {
     path: "/kanban",
     labelKey: "kanban",
     label: "Kanban",
     icon: KanbanSquare,
-  },
-  {
-    path: "/projects",
-    labelKey: "projects",
-    label: "Projects",
-    icon: FolderKanban,
   },
   {
     path: "/sessions",
@@ -588,7 +556,19 @@ export default function App() {
 
       <PluginSlot name="header-banner" />
 
-      <div className="flex min-h-0 min-w-0 flex-1 overflow-hidden pt-14 lg:pt-0">
+      <ChatTabProvider>
+        <div className="flex min-h-0 min-w-0 flex-1 overflow-hidden pt-14 lg:pt-0">
+          {/* Desktop: Activity Bar + Left Panel */}
+          <ActivityBar
+            navItems={sidebarNav.coreItems}
+            pluginItems={sidebarNav.pluginItems}
+            status={sidebarStatus}
+            leftPanelOpen={!collapsed}
+            onToggleLeftPanel={toggleCollapsed}
+          />
+          <LeftPanelSlot open={!collapsed} />
+
+          {/* Mobile: slide-out sidebar (hidden on desktop) */}
           <aside
             id="app-sidebar"
             aria-label={t.app.navigation}
@@ -599,9 +579,7 @@ export default function App() {
               "bg-background-base/95 backdrop-blur-sm",
               "transition-[transform] duration-200 ease-out",
               mobileOpen ? "translate-x-0" : "-translate-x-full",
-              "lg:relative lg:top-auto lg:translate-x-0 lg:shrink-0 lg:overflow-hidden",
-              "lg:transition-[width] lg:duration-[600ms] lg:ease-[cubic-bezier(0.33,1.35,0.62,1)]",
-              collapsed && "lg:w-14",
+              "lg:hidden",
             )}
             style={{
               background: "var(--component-sidebar-background)",
@@ -800,24 +778,23 @@ export default function App() {
                 </Routes>
 
                 {embeddedChat && !chatOverriddenByPlugin && (
-                  <ChatTabProvider>
-                    <div
-                      data-chat-active={isChatRoute ? "true" : "false"}
-                      className={cn(
-                        "min-h-0 min-w-0",
-                        isChatRoute ? "flex flex-1 flex-col" : "hidden",
-                      )}
-                      aria-hidden={!isChatRoute}
-                    >
-                      <ChatPage isActive={isChatRoute} />
-                    </div>
-                  </ChatTabProvider>
+                  <div
+                    data-chat-active={isChatRoute ? "true" : "false"}
+                    className={cn(
+                      "min-h-0 min-w-0",
+                      isChatRoute ? "flex flex-1 flex-col" : "hidden",
+                    )}
+                    aria-hidden={!isChatRoute}
+                  >
+                    <ChatPage isActive={isChatRoute} />
+                  </div>
                 )}
               </div>
               <PluginSlot name="post-main" />
             </div>
           </PageHeaderProvider>
       </div>
+      </ChatTabProvider>
 
       <PluginSlot name="overlay" />
       <KeyboardShortcutsDialog
@@ -1196,13 +1173,6 @@ interface GatewayDotProps {
   collapsed: boolean;
   status: StatusResponse | null;
   tooltipWarmRef: TooltipWarmRef;
-}
-
-interface NavItem {
-  icon: ComponentType<{ className?: string }>;
-  label: string;
-  labelKey?: string;
-  path: string;
 }
 
 interface SidebarIconWithTooltipProps {

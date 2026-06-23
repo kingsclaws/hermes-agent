@@ -3,26 +3,20 @@ const WORKSPACE_KEY = "hermes-workspace";
 
 const DEFAULTS: Record<string, number> = {
   sidebar: 15,
-  "chat-main": 65,
-  "chat-sidebar": 35,
   "chat-native-main": 70,
-  "chat-kanban": 30,
   "files-list": 60,
   "files-detail": 40,
-  "native-messages": 60,
-  "native-inspector": 40,
+  "project-tree": 20,
+  "right-panel": 30,
 };
 
 const LIMITS: Record<string, { min: number; max: number }> = {
   sidebar: { min: 14, max: 25 },
-  "chat-main": { min: 45, max: 80 },
-  "chat-sidebar": { min: 20, max: 45 },
   "chat-native-main": { min: 40, max: 80 },
-  "chat-kanban": { min: 20, max: 45 },
   "files-list": { min: 35, max: 75 },
   "files-detail": { min: 25, max: 65 },
-  "native-messages": { min: 45, max: 75 },
-  "native-inspector": { min: 25, max: 55 },
+  "project-tree": { min: 14, max: 35 },
+  "right-panel": { min: 20, max: 45 },
 };
 
 function clampPanelSize(id: string, value: number): number {

@@ -1,26 +1,29 @@
 import { Button } from "@nous-research/ui/ui/components/button";
 import { Card } from "@nous-research/ui/ui/components/card";
-import { ToolCall, type ToolEntry } from "@/components/ToolCall";
-import { ThinkingStream, type ThinkingBlockData } from "@/components/ThinkingBlock";
+import type { ToolEntry } from "@/components/ToolCall";
+import type { ThinkingBlockData } from "@/components/ThinkingBlock";
 import { ApprovalModal } from "@/components/ApprovalModal";
 import { ContextIndicator } from "@/components/ContextIndicator";
 import { CommandPalette } from "@/components/CommandPalette";
 import { NotificationFeed } from "@/components/NotificationFeed";
-import { Markdown } from "@/components/Markdown";
 import { GatewayClient, type ConnectionState } from "@/lib/gatewayClient";
 import { executeSlash, parseSlash } from "@/lib/slashExec";
 import { cn } from "@/lib/utils";
-import { Bot, GitBranch, LoaderCircle, Send, Square } from "lucide-react";
+import { LoaderCircle, Send, Square } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { SubagentBubble, type SubagentProps } from "@/components/SubagentBubble";
-import { ReasoningEffortPicker, type ReasoningEffort } from "@/components/ReasoningEffortPicker";
+import type { ReasoningEffort } from "@/components/ReasoningEffortPicker";
 import { getSwarmProfile, SWARM_PROFILES } from "@/lib/swarmProfiles";
+import { ChatMessageList } from "@/components/ChatMessageList";
 
 type ChatMessage = {
   id: string;
   role: "user" | "assistant" | "status";
   text: string;
+  timestamp: number;
+  senderName?: string;
 };
+
+export type { ChatMessage };
 
 type SubagentLine = {
   id: string;
@@ -37,6 +40,8 @@ type SubagentLine = {
   startedAt: number;
   completedAt?: number;
 };
+
+export type { SubagentLine };
 
 const WORKFLOW_PROMPT_EVENT = "lex-workflow-prompt";
 
@@ -93,18 +98,20 @@ function roleFromMessage(raw: unknown): ChatMessage["role"] | null {
 }
 
 function messagesFromResume(result: ResumeResult, fallback: string): ChatMessage[] {
+  const now = Date.now();
   return [
     {
-      id: `resume-${Date.now()}`,
+      id: `resume-${now}`,
       role: "status",
       text: `已恢复会话：${result.resumed ?? fallback}`,
+      timestamp: now,
     },
     ...(result.messages ?? [])
       .map((message, index) => {
         const role = roleFromMessage(message);
         const text = textFromMessage(message);
         return role && text
-          ? { id: `history-${index}`, role, text }
+          ? { id: `history-${index}`, role, text, timestamp: now }
           : null;
       })
       .filter((message): message is ChatMessage => message !== null),
@@ -116,11 +123,13 @@ export function NativeChatSurface({
   resumeTarget,
   onSessionCreated,
   onSwarmLaunched,
+  reasoningEffort,
 }: {
   projectContext?: NativeProjectContext;
   resumeTarget?: string | null;
   onSessionCreated?: (sessionId: string) => void;
   onSwarmLaunched?: () => void;
+  reasoningEffort: ReasoningEffort;
 }) {
   const gw = useMemo(() => new GatewayClient(), []);
   const [conn, setConn] = useState<ConnectionState>("idle");
@@ -128,33 +137,19 @@ export function NativeChatSurface({
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [tools, setTools] = useState<ToolEntry[]>([]);
   const [subagents, setSubagents] = useState<SubagentLine[]>([]);
+  const swarmState = useMemo<"idle" | "active" | "completed">(() => {
+    if (subagents.length === 0) return "idle";
+    if (subagents.some((a) => a.status === "running")) return "active";
+    return "completed";
+  }, [subagents]);
   const [thinkingBlocks, setThinkingBlocks] = useState<ThinkingBlockData[]>([]);
   const [input, setInput] = useState("");
-  const [reasoningEffort, setReasoningEffort] = useState<ReasoningEffort>("auto");
 
-  const toSubagentProps = useCallback(
-    (agent: SubagentLine): SubagentProps => ({
-      id: agent.id,
-      goal: agent.goal,
-      role: agent.role,
-      profile: agent.profile,
-      model: agent.model,
-      status: agent.status,
-      toolName: agent.toolName,
-      preview: agent.preview,
-      summary: agent.summary,
-      startedAt: agent.startedAt,
-      completedAt: agent.completedAt,
-    }),
-    [],
-  );
   const [running, setRunning] = useState(false);
   const [stopping, setStopping] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const projectContextRef = useRef(projectContext);
   projectContextRef.current = projectContext;
-  const scrollRef = useRef<HTMLDivElement | null>(null);
-  const scrollRefNarrow = useRef<HTMLDivElement | null>(null);
   const assistantIdRef = useRef<string | null>(null);
   const thinkingIdRef = useRef<string | null>(null);
   const queuedRef = useRef<string | null>(null);
@@ -171,7 +166,7 @@ export function NativeChatSurface({
       const id = `assistant-${Date.now()}`;
       assistantIdRef.current = id;
       thinkingIdRef.current = null; // Reset thinking state for new turn
-      setMessages((prev) => [...prev, { id, role: "assistant", text: "" }]);
+      setMessages((prev) => [...prev, { id, role: "assistant", text: "", timestamp: Date.now() }]);
       setThinkingBlocks([]);
       setRunning(true);
       setStopping(false);
@@ -477,13 +472,7 @@ export function NativeChatSurface({
     }
   }, [running]);
 
-  useEffect(() => {
-    const el = scrollRef.current ?? scrollRefNarrow.current;
-    el?.scrollTo({
-      top: el.scrollHeight,
-      behavior: "smooth",
-    });
-  }, [messages, tools, thinkingBlocks]);
+  // Auto-scroll is handled by ChatMessageList internally
 
   const submit = useCallback(
     async (text: string) => {
@@ -510,7 +499,7 @@ export function NativeChatSurface({
         setInput("");
         setMessages((prev) => [
           ...prev,
-          { id: `slash-${Date.now()}`, role: "user", text: trimmed },
+          { id: `slash-${Date.now()}`, role: "user", text: trimmed, timestamp: Date.now() },
         ]);
 
         if (name === "resume" && arg) {
@@ -535,6 +524,7 @@ export function NativeChatSurface({
                 text: `原生恢复失败，尝试 slash fallback：${
                   e instanceof Error ? e.message : String(e)
                 }`,
+                timestamp: Date.now(),
               },
             ]);
           }
@@ -550,6 +540,7 @@ export function NativeChatSurface({
               id: `queued-${Date.now()}`,
               role: "status",
               text: `已排队消息，当前轮次完成后自动提交：${arg.slice(0, 80)}${arg.length > 80 ? "…" : ""}`,
+              timestamp: Date.now(),
             },
           ]);
           return;
@@ -563,7 +554,7 @@ export function NativeChatSurface({
             sys: (body) =>
               setMessages((prev) => [
                 ...prev,
-                { id: `system-${Date.now()}`, role: "status", text: body },
+                { id: `system-${Date.now()}`, role: "status", text: body, timestamp: Date.now() },
               ]),
             send: (message) => submit(message),
           },
@@ -574,7 +565,7 @@ export function NativeChatSurface({
       setError(null);
       setMessages((prev) => [
         ...prev,
-        { id: `user-${Date.now()}`, role: "user", text: trimmed },
+        { id: `user-${Date.now()}`, role: "user", text: trimmed, timestamp: Date.now() },
       ]);
       setInput("");
       setRunning(true);
@@ -590,7 +581,7 @@ export function NativeChatSurface({
         setError(e instanceof Error ? e.message : String(e));
       }
     },
-    [gw, projectContext, running, sessionId],
+    [gw, projectContext, running, sessionId, reasoningEffort],
   );
   submitRef.current = submit;
 
@@ -609,6 +600,7 @@ export function NativeChatSurface({
           id: `interrupt-${Date.now()}`,
           role: "status",
           text: "已请求停止当前任务。",
+          timestamp: Date.now(),
         },
       ]);
     } catch (e) {
@@ -616,21 +608,6 @@ export function NativeChatSurface({
       setError(e instanceof Error ? e.message : String(e));
     }
   }, [gw, running, sessionId, stopping]);
-
-  const interruptSubagent = useCallback(
-    async (subagentId: string) => {
-      try {
-        await gw.request(
-          "subagent.interrupt",
-          { subagent_id: subagentId },
-          10_000,
-        );
-      } catch (e) {
-        setError(e instanceof Error ? e.message : String(e));
-      }
-    },
-    [gw],
-  );
 
   const handleCommandPalette = useCallback(
     (command: string) => {
@@ -688,164 +665,17 @@ export function NativeChatSurface({
         </span>
       </div>
 
-      {/* Main content area — resizable split on xl, vertical stack on narrow */}
-      <div className="min-h-0 flex-1 grid-cols-1 overflow-hidden xl:hidden">
-        <div
-          ref={scrollRefNarrow}
-          className="min-h-0 space-y-3 overflow-y-auto px-3 py-3"
-        >
-          {messages.length === 0 && (
-            <div className="rounded border border-dashed border-current/15 p-4 text-sm text-muted-foreground">
-              这里是原生 Web Chat，不是 TUI。右侧 workflow 操作会直接提交到这个会话；delegate 和工具执行在右侧检查器里显示。
-              <br />
-              <span className="text-xs text-muted-foreground/60 mt-1 block">
-                Cmd+K / Ctrl+K to open command palette
-              </span>
-            </div>
-          )}
-
-          {(() => {
-            const lastUserIdx = messages.reduce(
-              (acc, m, i) => (m.role === "user" ? i : acc),
-              -1,
-            );
-            return messages.map((message, idx) => (
-              <div key={message.id}>
-                {message.role === "assistant" &&
-                  thinkingBlocks.length > 0 &&
-                  message.id ===
-                    messages.filter((m) => m.role === "assistant").slice(-1)[0]
-                      ?.id && (
-                    <ThinkingStream blocks={thinkingBlocks} className="mb-2" />
-                  )}
-
-                <div
-                  className={cn(
-                    "max-w-[92%] rounded-lg border px-3 py-2 text-sm leading-6",
-                    message.role === "user"
-                      ? "ml-auto border-primary/30 bg-primary/10"
-                      : message.role === "status"
-                        ? "mx-auto border-current/10 bg-muted/10 text-xs text-muted-foreground"
-                        : "mr-auto border-current/10 bg-black/10",
-                  )}
-                >
-                  {message.role === "assistant" && message.text ? (
-                    <Markdown
-                      content={message.text}
-                      streaming={running &&
-                        message.id === assistantIdRef.current}
-                    />
-                  ) : message.text || message.role === "assistant" ? (
-                    message.text || "…"
-                  ) : null}
-                </div>
-
-                {idx === lastUserIdx && subagents.length > 0 && (
-                  <div className="mt-1 space-y-1">
-                    {subagents.map((agent) => (
-                      <SubagentBubble
-                        key={agent.id}
-                        agent={toSubagentProps(agent)}
-                      />
-                    ))}
-                  </div>
-                )}
-              </div>
-            ));
-          })()}
-        </div>
-      </div>
-
-      <div className="hidden min-h-0 flex-1 xl:flex">
-        <div
-          ref={scrollRef}
-          className="min-h-0 min-w-0 flex-1 space-y-3 overflow-y-auto px-3 py-3"
-        >
-          {messages.length === 0 && (
-            <div className="rounded border border-dashed border-current/15 p-4 text-sm text-muted-foreground">
-              这里是原生 Web Chat，不是 TUI。右侧 workflow 操作会直接提交到这个会话；delegate 和工具执行在右侧检查器里显示。
-              <br />
-              <span className="text-xs text-muted-foreground/60 mt-1 block">
-                Cmd+K / Ctrl+K to open command palette
-              </span>
-            </div>
-          )}
-
-          {(() => {
-            const lastUserIdx = messages.reduce(
-              (acc, m, i) => (m.role === "user" ? i : acc),
-              -1,
-            );
-            return messages.map((message, idx) => (
-              <div key={message.id}>
-                {message.role === "assistant" &&
-                  thinkingBlocks.length > 0 &&
-                  message.id ===
-                    messages.filter((m) => m.role === "assistant").slice(-1)[0]
-                      ?.id && (
-                    <ThinkingStream blocks={thinkingBlocks} className="mb-2" />
-                  )}
-
-                <div
-                  className={cn(
-                    "max-w-[92%] rounded-lg border px-3 py-2 text-sm leading-6",
-                    message.role === "user"
-                      ? "ml-auto border-primary/30 bg-primary/10"
-                      : message.role === "status"
-                        ? "mx-auto border-current/10 bg-muted/10 text-xs text-muted-foreground"
-                        : "mr-auto border-current/10 bg-black/10",
-                  )}
-                >
-                  {message.role === "assistant" && message.text ? (
-                    <Markdown
-                      content={message.text}
-                      streaming={running &&
-                        message.id === assistantIdRef.current}
-                    />
-                  ) : message.text || message.role === "assistant" ? (
-                    message.text || "…"
-                  ) : null}
-                </div>
-
-                {idx === lastUserIdx && subagents.length > 0 && (
-                  <div className="mt-1 space-y-1">
-                    {subagents.map((agent) => (
-                      <SubagentBubble
-                        key={agent.id}
-                        agent={toSubagentProps(agent)}
-                      />
-                    ))}
-                  </div>
-                )}
-              </div>
-            ));
-          })()}
-        </div>
-
-        <div className="min-h-0 w-80 shrink-0 border-l border-current/10">
-          <ExecutionInspector
-            running={running}
-            stopping={stopping}
-            tools={tools}
-            subagents={subagents}
-            onInterruptTurn={interrupt}
-            onInterruptSubagent={interruptSubagent}
-          />
-        </div>
-      </div>
-
-      {/* Compact inspector for narrow viewports */}
-      <div className="border-t border-current/10 px-3 py-2 xl:hidden">
-        <ExecutionInspector
-          compact
-          running={running}
-          stopping={stopping}
-          tools={tools}
-          subagents={subagents}
-          onInterruptTurn={interrupt}
-          onInterruptSubagent={interruptSubagent}
-        />
-      </div>
+      {/* Chat message list — bubble style */}
+      <ChatMessageList
+        messages={messages}
+        thinkingBlocks={thinkingBlocks}
+        tools={tools}
+        subagents={subagents}
+        swarmState={swarmState}
+        running={running}
+        assistantIdRef={assistantIdRef}
+        className="min-h-0 flex-1"
+      />
 
       {/* Error banner */}
       {error && (
@@ -918,13 +748,7 @@ export function NativeChatSurface({
             )}
           </Button>
         </div>
-        <div className="flex items-center gap-2">
-          <ReasoningEffortPicker
-            value={reasoningEffort}
-            onChange={setReasoningEffort}
-            disabled={!sessionId || conn !== "open"}
-          />
-        </div>
+        {/* reasoning effort moved to ChatTopBar */}
       </form>
 
       {/* Overlays */}
@@ -939,148 +763,4 @@ export function NativeChatSurface({
   );
 }
 
-function ExecutionInspector({
-  compact,
-  running,
-  stopping,
-  tools,
-  subagents,
-  onInterruptTurn,
-  onInterruptSubagent,
-}: {
-  compact?: boolean;
-  running: boolean;
-  stopping: boolean;
-  tools: ToolEntry[];
-  subagents: SubagentLine[];
-  onInterruptTurn: () => void;
-  onInterruptSubagent: (subagentId: string) => void;
-}) {
-  const runningTools = tools.filter(
-    (tool) => tool.status === "running",
-  ).length;
-  const runningSubagents = subagents.filter(
-    (agent) => agent.status === "running",
-  ).length;
-
-  return (
-    <aside
-      className={cn(
-        "min-h-0 border-current/10 bg-black/[0.08]",
-        compact
-          ? "max-h-64 overflow-y-auto rounded border p-2"
-          : "hidden overflow-y-auto border-l p-3 xl:block",
-      )}
-    >
-      <div className="mb-3 flex items-center justify-between gap-2">
-        <div>
-          <div className="flex items-center gap-1.5 text-xs font-medium uppercase tracking-wider">
-            <GitBranch className="h-3.5 w-3.5 text-primary" />
-            Execution
-          </div>
-          <div className="text-[0.65rem] text-muted-foreground">
-            {stopping ? "stopping" : running ? "turn running" : "idle"} · {runningSubagents} agents ·{" "}
-            {runningTools} tools
-          </div>
-        </div>
-        {running && (
-          <Button
-            type="button"
-            size="sm"
-            onClick={onInterruptTurn}
-            disabled={stopping}
-            className="h-7 shrink-0 px-2 text-[0.7rem]"
-          >
-            {stopping ? "stopping" : "stop turn"}
-          </Button>
-        )}
-      </div>
-
-      {subagents.length === 0 && tools.length === 0 ? (
-        <div className="rounded border border-dashed border-current/15 p-3 text-xs text-muted-foreground">
-          工具调用、delegate task、子 agent 状态会显示在这里，不再混在合同分析正文里。
-        </div>
-      ) : null}
-
-      {subagents.length > 0 && (
-        <section className="mb-4 space-y-2">
-          <div className="text-[0.65rem] uppercase tracking-wider text-muted-foreground">
-            delegated agents
-          </div>
-          {subagents
-            .slice()
-            .reverse()
-            .map((agent) => (
-              <SubagentCard
-                key={agent.id}
-                agent={agent}
-                onInterrupt={() => onInterruptSubagent(agent.id)}
-              />
-            ))}
-        </section>
-      )}
-
-      {tools.length > 0 && (
-        <section className="space-y-2">
-          <div className="text-[0.65rem] uppercase tracking-wider text-muted-foreground">
-            native tools
-          </div>
-          {tools
-            .slice()
-            .reverse()
-            .map((tool) => (
-              <ToolCall key={tool.id} tool={tool} />
-            ))}
-        </section>
-      )}
-    </aside>
-  );
-}
-
-function SubagentCard({
-  agent,
-  onInterrupt,
-}: {
-  agent: SubagentLine;
-  onInterrupt: () => void;
-}) {
-  return (
-    <div
-      className={cn(
-        "rounded-md border p-2 text-xs",
-        agent.status === "running"
-          ? "border-primary/40 bg-primary/[0.04]"
-          : agent.status === "error"
-            ? "border-destructive/50 bg-destructive/[0.04]"
-            : "border-current/10 bg-muted/10",
-      )}
-    >
-      <div className="flex items-start gap-2">
-        <Bot className="mt-0.5 h-3.5 w-3.5 shrink-0 text-primary" />
-        <div className="min-w-0 flex-1">
-          <div className="line-clamp-2 font-medium">{agent.goal}</div>
-          <div className="mt-1 flex flex-wrap gap-1 text-[0.65rem] text-muted-foreground">
-            {agent.role && <span>{agent.role}</span>}
-            {agent.model && <span>{agent.model}</span>}
-            {agent.toolName && <span>tool: {agent.toolName}</span>}
-          </div>
-        </div>
-        {agent.status === "running" && (
-          <Button
-            type="button"
-            size="sm"
-            className="h-6 px-2"
-            onClick={onInterrupt}
-          >
-            stop
-          </Button>
-        )}
-      </div>
-      {(agent.preview || agent.summary) && (
-        <div className="mt-2 max-h-24 overflow-y-auto whitespace-pre-wrap rounded bg-black/10 p-2 font-mono text-[0.7rem] text-muted-foreground">
-          {agent.summary ?? agent.preview}
-        </div>
-      )}
-    </div>
-  );
-}
+// ExecutionInspector + SubagentCard removed — tools and subagents now render inline via ChatMessageList.

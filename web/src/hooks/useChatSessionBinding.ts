@@ -20,6 +20,7 @@ export interface UseChatSessionBindingOptions {
   activeTabId: string | null;
   addTab: ChatTabContextValue["addTab"];
   updateTab: ChatTabContextValue["updateTab"];
+  findOrCreateTab: ChatTabContextValue["findOrCreateTab"];
 }
 
 export interface ChatSessionBinding {
@@ -42,6 +43,7 @@ export function useChatSessionBinding({
   activeTabId,
   addTab,
   updateTab,
+  findOrCreateTab,
 }: UseChatSessionBindingOptions): ChatSessionBinding {
   const [searchParams, setSearchParams] = useSearchParams();
   const resumeParam = searchParams.get("resume");
@@ -141,7 +143,7 @@ export function useChatSessionBinding({
     };
   }, [selectedProjectId]);
 
-  // Auto-resume: assign the most recent session to the active tab.
+  // Auto-resume: assign the most recent session using smart matching.
   useEffect(() => {
     if (!isActive || !activeTabId || didAutoResume.current || sessions.length === 0 || selectorBusy) return;
     if (selectedProjectId) return;
@@ -151,12 +153,12 @@ export function useChatSessionBinding({
     const withMessages = sessions.filter((s) => s.message_count > 0);
     const pick = withMessages[0] ?? sessions[0];
     if (pick) {
-      updateTab(activeTabId, { sessionId: pick.id });
+      findOrCreateTab(pick.id);
       updateChatSearch({ resume: pick.id });
     }
-  }, [isActive, activeTabId, sessions, selectorBusy, selectedProjectId, updateTab, updateChatSearch]);
+  }, [isActive, activeTabId, sessions, selectorBusy, selectedProjectId, findOrCreateTab, updateChatSearch]);
 
-  // Project-binding: when a project is selected, bind it to the active tab.
+  // Project-binding: when a project is selected, bind it using smart matching.
   useEffect(() => {
     if (!isActive || !activeTabId || !selectedProjectId || selectorBusy) return;
     const active = tabs.find((t) => t.id === activeTabId);
@@ -167,13 +169,13 @@ export function useChatSessionBinding({
     if (sessions.length > 0) {
       const withMessages = sessions.filter((s) => s.message_count > 0);
       const pick = withMessages[0] ?? sessions[0];
-      updateTab(activeTabId, { projectId: selectedProjectId, sessionId: pick.id });
+      findOrCreateTab(pick.id, selectedProjectId);
       updateChatSearch({ project: selectedProjectId, resume: pick.id });
       return;
     }
 
     updateTab(activeTabId, { projectId: selectedProjectId, sessionId: null });
-  }, [isActive, activeTabId, selectedProjectId, sessions, selectorBusy, updateTab, updateChatSearch]);
+  }, [isActive, activeTabId, selectedProjectId, sessions, selectorBusy, findOrCreateTab, updateTab, updateChatSearch]);
 
   // Reset per-visit guards when leaving chat.
   useEffect(() => {

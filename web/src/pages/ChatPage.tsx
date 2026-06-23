@@ -2,57 +2,42 @@
  * ChatPage — thin shell that composes:
  *   - `useChatSessionBinding` — session/project/URL binding (the effects that
  *     manage auto-resume, project selection, tab↔URL sync)
- *   - `TerminalChatHost` — xterm.js PTY terminal (WebGL, WebSocket, clipboard)
  *   - `NativeChatSurface` — structured web chat per tab
- *   - `ChatSidebar` — model/tool inspector (resizable panel or mobile sheet)
+ *   - `CollapsibleRightPanel` — tabbed info/kanban/tools panel (collapsed by default)
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
-import { History, KanbanSquare, PanelRight, X } from "lucide-react";
+import { PanelRight, X } from "lucide-react";
 import { Button } from "@nous-research/ui/ui/components/button";
 import { Typography } from "@nous-research/ui/ui/components/typography/index";
 import { cn } from "@/lib/utils";
 
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "@/components/ResizablePanel";
 import { loadPanelSize, savePanelSize } from "@/lib/layout-persistence";
-import { ChatSidebar } from "@/components/ChatSidebar";
-import { ChatTabBar } from "@/components/ChatTabBar";
-import { CompactKanbanPanel } from "@/components/CompactKanbanPanel";
+import { CollapsibleRightPanel } from "@/components/CollapsibleRightPanel";
+import { WelcomePanel } from "@/components/WelcomePanel";
+import { ChatTopBar } from "@/components/ChatTopBar";
 import { useChatTabs } from "@/contexts/ChatTabContext";
 import {
   dispatchWorkflowPrompt,
   NativeChatSurface,
 } from "@/components/NativeChatSurface";
-import {
-  TerminalChatHost,
-  TERMINAL_THEME,
-  type TerminalChatHostHandle,
-} from "@/components/TerminalChatHost";
 import { useChatSessionBinding } from "@/hooks/useChatSessionBinding";
-import { SessionSwitcherPanel } from "@/components/SessionSwitcherPanel";
 import { usePageHeader } from "@/contexts/usePageHeader";
 import { useI18n } from "@/i18n";
 import { PluginSlot } from "@/plugins";
 import { api } from "@/lib/api";
-import type { ProjectInfo } from "@/lib/api";
-
-function projectLabel(project: ProjectInfo): string {
-  const client = project.client?.trim();
-  return client ? `${project.name} · ${client}` : project.name;
-}
+import type { ReasoningEffort } from "@/components/ReasoningEffortPicker";
+import { useRightPanel } from "@/hooks/useRightPanel";
 
 export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
-  const { tabs, activeTabId, addTab, updateTab } = useChatTabs();
-  const binding = useChatSessionBinding({ isActive, tabs, activeTabId, addTab, updateTab });
+  const { tabs, activeTabId, addTab, updateTab, findOrCreateTab } = useChatTabs();
+  const binding = useChatSessionBinding({ isActive, tabs, activeTabId, addTab, updateTab, findOrCreateTab });
   const {
     projects, sessions, selectedProjectId,
-    selectorError, selectorBusy, resumeParam, channel,
-    creatingSessionRef, handleSelectProject,
+    resumeParam, channel,
   } = binding;
-
-  const [chatMode, setChatMode] = useState<"native" | "terminal">("native");
-  const terminalRef = useRef<TerminalChatHostHandle | null>(null);
 
   // Lazy-mount tabs: once visited, stay mounted for session persistence.
   const [mountedTabs, setMountedTabs] = useState<Set<string>>(() => new Set());
@@ -62,10 +47,15 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
     }
   }, [activeTabId]);
 
-  // ── Kanban panel (right side) ────────────────────────────────────
   const [activeSwarmRun, setActiveSwarmRun] = useState<{ board: string; runId: string } | null>(null);
-  const [kanbanDismissed, setKanbanDismissed] = useState(false);
-  const [sessionSwitcherOpen, setSessionSwitcherOpen] = useState(false);
+  const [reasoningEffort, setReasoningEffort] = useState<ReasoningEffort>("auto");
+  const {
+    expanded: rightPanelOpen,
+    activeTab: rightPanelTab,
+    toggle: toggleRightPanel,
+    expand: expandRightPanel,
+    changeTab: changeRightPanelTab,
+  } = useRightPanel();
 
   useEffect(() => {
     if (!selectedProjectId) {
@@ -80,11 +70,12 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
       );
       if (active) {
         setActiveSwarmRun({ board: active.board, runId: active.run_id });
-        setKanbanDismissed(false);
+        expandRightPanel();
+        changeRightPanelTab("kanban");
       }
     }).catch(() => {});
     return () => { cancelled = true; };
-  }, [selectedProjectId]);
+  }, [selectedProjectId, expandRightPanel, changeRightPanelTab]);
 
   const handleSwarmLaunched = useCallback(() => {
     if (!selectedProjectId) return;
@@ -95,20 +86,11 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
       );
       if (active) {
         setActiveSwarmRun({ board: active.board, runId: active.run_id });
-        setKanbanDismissed(false);
+        expandRightPanel();
+        changeRightPanelTab("kanban");
       }
     }).catch(() => {});
-  }, [selectedProjectId]);
-
-  const handleSessionSwitcherSelect = useCallback((sessionId: string) => {
-    addTab({
-      title: `Session ${sessionId.slice(0, 8)}`,
-      sessionId,
-      projectId: selectedProjectId || null,
-      projectName: null,
-      type: "native",
-    });
-  }, [addTab, selectedProjectId]);
+  }, [selectedProjectId, expandRightPanel, changeRightPanelTab]);
 
   // Stable project-context objects: only changes when `projects` refetches,
   // not on every render.  Prevents NativeChatSurface re-renders.
@@ -126,7 +108,6 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
       ? window.matchMedia("(max-width: 1023px)").matches
       : false,
   );
-  const showKanban = activeSwarmRun !== null && !kanbanDismissed && !narrow;
   const [mobilePanelOpenRaw, setMobilePanelOpenRaw] = useState(false);
   const mobilePanelOpen = isActive && mobilePanelOpenRaw;
   const closeMobilePanel = useCallback(() => setMobilePanelOpenRaw(false), []);
@@ -199,50 +180,9 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
   // ── Workflow prompt dispatch ───────────────────────────────────────
   const handleRunWorkflowPrompt = useCallback(
     (prompt: string) => {
-      if (chatMode === "native") {
-        dispatchWorkflowPrompt(prompt);
-        return;
-      }
-      const handle = terminalRef.current;
-      if (!handle || !handle.isConnected()) return;
-      handle.sendToTerminal(`\x1b[200~${prompt}\x1b[201~`);
-      setTimeout(() => {
-        if (terminalRef.current?.isConnected()) {
-          terminalRef.current.sendToTerminal("\r");
-        }
-      }, 80);
+      dispatchWorkflowPrompt(prompt);
     },
-    [chatMode],
-  );
-
-  // ── Mode toggle header ────────────────────────────────────────────
-  const modeToggle = (
-    <span className="inline-flex shrink-0 gap-1">
-      <button
-        type="button"
-        onClick={() => setChatMode("native")}
-        className={cn(
-          "rounded border px-2 py-0.5",
-          chatMode === "native"
-            ? "border-primary/50 bg-primary/10 text-primary"
-            : "border-current/15 opacity-60 hover:opacity-100",
-        )}
-      >
-        Native
-      </button>
-      <button
-        type="button"
-        onClick={() => setChatMode("terminal")}
-        className={cn(
-          "rounded border px-2 py-0.5",
-          chatMode === "terminal"
-            ? "border-primary/50 bg-primary/10 text-primary"
-            : "border-current/15 opacity-60 hover:opacity-100",
-        )}
-      >
-        Terminal
-      </button>
-    </span>
+    [],
   );
 
   // ── Mobile model/tools sheet portal ───────────────────────────────
@@ -313,9 +253,14 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
               "border-t border-current/10",
             )}
           >
-            <ChatSidebar
+            <CollapsibleRightPanel
               channel={channel}
+              activeSwarmRun={activeSwarmRun}
+              onSwarmClose={() => setActiveSwarmRun(null)}
               onRunWorkflowPrompt={handleRunWorkflowPrompt}
+              activeTab={rightPanelTab}
+              onTabChange={changeRightPanelTab}
+              onClose={closeMobilePanel}
             />
           </div>
         </div>
@@ -329,281 +274,121 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
       <PluginSlot name="chat:top" />
       {mobileModelToolsPortal}
 
-      <ChatTabBar />
+      <ChatTopBar
+        selectedProjectId={selectedProjectId}
+        projects={projects}
+        sessionTitle={(() => {
+          const s = resumeParam ? sessions.find((x) => x.id === resumeParam) : null;
+          return s ? (s.title || s.id.slice(0, 12)) : null;
+        })()}
+        reasoningEffort={reasoningEffort}
+        onReasoningEffortChange={setReasoningEffort}
+        effortDisabled={!resumeParam}
+        rightPanelOpen={rightPanelOpen}
+        onToggleRightPanel={toggleRightPanel}
+        narrow={narrow}
+      />
 
-      {/* Project selector bar */}
-      <div className="hermes-desktop-pane flex shrink-0 flex-col gap-2 rounded-lg px-3 py-2 sm:flex-row sm:items-center sm:justify-between">
-        <div className="flex min-w-0 flex-1 items-center gap-2">
-          <label className="flex min-w-0 flex-1 items-center gap-2 text-[0.65rem] uppercase tracking-[0.14em] text-text-tertiary">
-            <span className="shrink-0">Project</span>
-            <select
-              value={selectedProjectId}
-              onChange={(event) => handleSelectProject(event.target.value)}
-              className="min-w-0 flex-1 rounded border border-current/15 bg-background-base/80 px-2 py-1 text-xs normal-case tracking-normal text-text-primary outline-none hover:border-current/30 focus:border-primary/50"
-            >
-              <option value="">No project selected</option>
-              {projects.map((project) => (
-                <option key={project.id} value={project.id}>
-                  {projectLabel(project)}
-                </option>
-              ))}
-            </select>
-          </label>
-
-          {selectedProjectId && (
-            <span className="hidden shrink-0 items-center gap-2 text-[0.65rem] uppercase tracking-[0.14em] text-text-tertiary sm:flex">
-              <span className="text-text-tertiary/40">|</span>
-              {selectorBusy
-                ? "loading..."
-                : creatingSessionRef.current
-                  ? "creating session..."
-                  : (() => {
-                      const s = resumeParam ? sessions.find((x) => x.id === resumeParam) : null;
-                      if (s) {
-                        const label = s.title || s.id.slice(0, 12);
-                        return `session: ${label} · ${s.message_count}msgs`;
-                      }
-                      return resumeParam
-                        ? `session ${resumeParam.slice(0, 8)}`
-                        : "no session";
-                    })()}
-            </span>
-          )}
-        </div>
-
-        <div className="shrink-0 text-[0.65rem] uppercase tracking-[0.14em] text-text-tertiary">
-          {selectorError
-            ? `ERR:${selectorError.slice(0, 30)}`
-            : resumeParam
-              ? `bound ${resumeParam.slice(0, 12)}`
-              : sessions.length > 0
-                ? `${sessions.length}sess msgs=${sessions.filter((s) => s.message_count > 0).length}`
-                : selectorBusy
-                  ? "loading..."
-                  : "select a project"}
-        </div>
-      </div>
-
-      {/* Chat body: native tabs or terminal */}
-      {chatMode === "native" ? (
-        <div className="flex min-h-0 flex-1 gap-0 overflow-hidden">
-        <div
-          className={cn(
-            "hermes-desktop-pane",
-            "relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-lg",
-          )}
-          style={{ boxShadow: "0 8px 32px rgba(0, 0, 0, 0.25)" }}
-        >
-          <div
-            className={cn(
-              "hermes-desktop-pane-header",
-              "mb-2 flex shrink-0 items-center justify-between gap-2 rounded border",
-              "px-2 py-1 text-[0.65rem] tracking-wide",
-              "border-current/10 bg-background-base/70",
-            )}
-          >
-            <span className="truncate opacity-75">
-              Native Web Chat · structured legal workspace
-            </span>
-            <span className="inline-flex items-center gap-2">
-              {!narrow && (
-                <button
-                  type="button"
-                  onClick={() => setSessionSwitcherOpen((o) => !o)}
-                  className={cn(
-                    "rounded border px-2 py-0.5 inline-flex items-center gap-1",
-                    sessionSwitcherOpen
-                      ? "border-primary/50 bg-primary/10 text-primary"
-                      : "border-current/15 opacity-60 hover:opacity-100",
-                  )}
-                >
-                  <History className="h-3 w-3" />
-                  <span>Sessions</span>
-                </button>
-              )}
-              {activeSwarmRun && !narrow && (
-                <button
-                  type="button"
-                  onClick={() => setKanbanDismissed((d) => !d)}
-                  className={cn(
-                    "rounded border px-2 py-0.5 inline-flex items-center gap-1",
-                    showKanban
-                      ? "border-primary/50 bg-primary/10 text-primary"
-                      : "border-current/15 opacity-60 hover:opacity-100",
-                  )}
-                >
-                  <KanbanSquare className="h-3 w-3" />
-                  <span>Kanban</span>
-                </button>
-              )}
-              {modeToggle}
-            </span>
-          </div>
-
-          {showKanban ? (
-            <ResizablePanelGroup orientation="horizontal" className="min-h-0 flex-1">
-              <ResizablePanel
-                defaultSize={loadPanelSize("chat-native-main")}
-                minSize={40}
-                onResize={(panelSize) => {
-                  savePanelSize("chat-native-main", panelSize.asPercentage);
-                }}
-              >
-                <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-                  {tabs.map((tab) => {
-                    const mounted = mountedTabs.has(tab.id);
-                    return (
-                      <div
-                        key={tab.id}
-                        className="flex min-h-0 min-w-0 flex-1"
-                        style={{ display: tab.id === activeTabId ? undefined : "none" }}
-                      >
-                        {mounted && (
-                          <NativeChatSurface
-                            projectContext={
-                              tab.projectId
-                                ? projectContextCache[tab.projectId] ?? { id: tab.projectId, name: tab.projectId }
-                                : null
-                            }
-                            resumeTarget={tab.sessionId}
-                            onSessionCreated={(sid) => {
-                              if (tab.sessionId !== sid) {
-                                updateTab(tab.id, { sessionId: sid });
-                              }
-                            }}
-                            onSwarmLaunched={handleSwarmLaunched}
-                          />
-                        )}
-                        {!mounted && (
-                          <div className="flex h-full w-full items-center justify-center text-xs text-muted-foreground">
-                            Click the tab to connect…
-                          </div>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
-              </ResizablePanel>
-              <ResizableHandle className="mx-0" />
-              <ResizablePanel
-                defaultSize={loadPanelSize("chat-kanban")}
-                minSize={20}
-                maxSize={45}
-                onResize={(panelSize) => {
-                  savePanelSize("chat-kanban", panelSize.asPercentage);
-                }}
-              >
-                <CompactKanbanPanel
-                  board={activeSwarmRun!.board}
-                  runId={activeSwarmRun!.runId}
-                  onClose={() => setKanbanDismissed(true)}
-                />
-              </ResizablePanel>
-            </ResizablePanelGroup>
-          ) : (
-            tabs.map((tab) => {
-              const mounted = mountedTabs.has(tab.id);
-              return (
-                <div
-                  key={tab.id}
-                  className="flex min-h-0 min-w-0 flex-1"
-                  style={{ display: tab.id === activeTabId ? undefined : "none" }}
-                >
-                  {mounted && (
-                    <NativeChatSurface
-                      projectContext={
-                        tab.projectId
-                          ? projectContextCache[tab.projectId] ?? { id: tab.projectId, name: tab.projectId }
-                          : null
-                      }
-                      resumeTarget={tab.sessionId}
-                      onSessionCreated={(sid) => {
-                        if (tab.sessionId !== sid) {
-                          updateTab(tab.id, { sessionId: sid });
-                        }
-                      }}
-                      onSwarmLaunched={handleSwarmLaunched}
-                    />
-                  )}
-                  {!mounted && (
-                    <div className="flex h-full w-full items-center justify-center text-xs text-muted-foreground">
-                      Click the tab to connect…
-                    </div>
-                  )}
-                </div>
-              );
-            })
-          )}
-        </div>
-        {sessionSwitcherOpen && !narrow && (
-          <SessionSwitcherPanel
-            open={sessionSwitcherOpen}
-            onClose={() => setSessionSwitcherOpen(false)}
-            currentSessionId={resumeParam}
-            onSelectSession={handleSessionSwitcherSelect}
-          />
-        )}
-        </div>
-      ) : (
-        <ResizablePanelGroup orientation="horizontal" className="flex-1">
+      {/* Chat body */}
+      <div className="flex min-h-0 flex-1 gap-0 overflow-hidden">
+        <ResizablePanelGroup orientation="horizontal" className="min-h-0 flex-1">
           <ResizablePanel
-            defaultSize={loadPanelSize("chat-main")}
-            minSize={30}
+            defaultSize={loadPanelSize("chat-native-main")}
+            minSize={40}
             onResize={(panelSize) => {
-              savePanelSize("chat-main", panelSize.asPercentage);
+              savePanelSize("chat-native-main", panelSize.asPercentage);
             }}
           >
-            <div className="flex min-h-0 flex-1 flex-col">
+            <div
+              className={cn(
+                "hermes-desktop-pane",
+                "relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-lg",
+              )}
+              style={{ boxShadow: "0 8px 32px rgba(0, 0, 0, 0.25)" }}
+            >
               <div
                 className={cn(
                   "hermes-desktop-pane-header",
                   "mb-2 flex shrink-0 items-center justify-between gap-2 rounded border",
-                  "border-white/10 bg-white/[0.035]",
                   "px-2 py-1 text-[0.65rem] tracking-wide",
+                  "border-current/10 bg-background-base/70",
                 )}
-                style={{ color: TERMINAL_THEME.foreground }}
               >
                 <span className="truncate opacity-75">
-                  Terminal fallback · PTY/TUI compatibility mode
+                  Native Web Chat · structured legal workspace
                 </span>
-                {modeToggle}
               </div>
 
-              <TerminalChatHost
-                ref={terminalRef}
-                isActive={isActive && chatMode === "terminal"}
-                channel={channel}
-                resumeParam={resumeParam}
-              />
+              {(() => {
+                const activeTab = tabs.find((t) => t.id === activeTabId);
+                const showWelcome = !activeTab?.sessionId && !activeTab?.projectId;
+
+                if (showWelcome) {
+                  return <WelcomePanel key="welcome" />;
+                }
+
+                return tabs.map((tab) => {
+                  const mounted = mountedTabs.has(tab.id);
+                  return (
+                    <div
+                      key={tab.id}
+                      className="flex min-h-0 min-w-0 flex-1"
+                      style={{ display: tab.id === activeTabId ? undefined : "none" }}
+                    >
+                      {mounted && (
+                        <NativeChatSurface
+                          projectContext={
+                            tab.projectId
+                              ? projectContextCache[tab.projectId] ?? { id: tab.projectId, name: tab.projectId }
+                              : null
+                          }
+                          resumeTarget={tab.sessionId}
+                          onSessionCreated={(sid) => {
+                            if (tab.sessionId !== sid) {
+                              updateTab(tab.id, { sessionId: sid });
+                            }
+                          }}
+                          onSwarmLaunched={handleSwarmLaunched}
+                          reasoningEffort={reasoningEffort}
+                        />
+                      )}
+                      {!mounted && (
+                        <div className="flex h-full w-full items-center justify-center text-xs text-muted-foreground">
+                          Click the tab to connect…
+                        </div>
+                      )}
+                    </div>
+                  );
+                });
+              })()}
             </div>
           </ResizablePanel>
 
-          {!narrow && (
+          {rightPanelOpen && (
             <>
-              <ResizableHandle className="hidden lg:flex mx-0" />
+              <ResizableHandle className="mx-0" />
               <ResizablePanel
-                defaultSize={loadPanelSize("chat-sidebar")}
-                minSize={15}
-                maxSize={50}
+                defaultSize={loadPanelSize("right-panel")}
+                minSize={20}
+                maxSize={45}
+                onResize={(panelSize) => {
+                  savePanelSize("right-panel", panelSize.asPercentage);
+                }}
               >
-                <div
-                  id="chat-side-panel"
-                  role="complementary"
-                  aria-label={modelToolsLabel}
-                  className="flex min-h-0 shrink-0 flex-col overflow-hidden lg:h-full"
-                >
-                  <div className="min-h-0 flex-1 overflow-hidden">
-                    <ChatSidebar
-                      channel={channel}
-                      onRunWorkflowPrompt={handleRunWorkflowPrompt}
-                    />
-                  </div>
-                </div>
+                <CollapsibleRightPanel
+                  channel={channel}
+                  activeSwarmRun={activeSwarmRun}
+                  onSwarmClose={() => setActiveSwarmRun(null)}
+                  onRunWorkflowPrompt={handleRunWorkflowPrompt}
+                  activeTab={rightPanelTab}
+                  onTabChange={changeRightPanelTab}
+                  onClose={toggleRightPanel}
+                />
               </ResizablePanel>
             </>
           )}
         </ResizablePanelGroup>
-      )}
+      </div>
       <PluginSlot name="chat:bottom" />
     </div>
   );
