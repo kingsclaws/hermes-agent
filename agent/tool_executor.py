@@ -838,8 +838,11 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
                 agent._delegate_spinner = None
                 tool_duration = time.time() - tool_start_time
                 cute_msg = _get_cute_tool_message_impl('lex_proofread', function_args, tool_duration, result=_proofread_result)
-                if cute_msg:
-                    agent._print_fn(cute_msg, markup_links=False, no_emojis=True)
+                if cute_msg and agent._print_fn:
+                    try:
+                        agent._print_fn(cute_msg, markup_links=False, no_emojis=True)
+                    except TypeError:
+                        agent._print_fn(cute_msg)
         elif function_name == "delegate_task":
             tasks_arg = function_args.get("tasks")
             if tasks_arg and isinstance(tasks_arg, list):

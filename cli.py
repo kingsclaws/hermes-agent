@@ -1984,7 +1984,7 @@ def _replay_output_history() -> None:
         _OUTPUT_HISTORY_REPLAYING = False
 
 
-def _cprint(text: str):
+def _cprint(text: str, **kwargs):
     """Print ANSI-colored text through prompt_toolkit's native renderer.
 
     Raw ANSI escapes written via print() are swallowed by patch_stdout's
