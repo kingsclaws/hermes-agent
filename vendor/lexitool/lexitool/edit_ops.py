@@ -950,10 +950,65 @@ def _find_table(root: etree._Element, table_index: int) -> etree._Element | None
 	return None
 
 
+def _get_grid_span(cell: etree._Element) -> int:
+	"""Return the gridSpan value for a cell (default 1)."""
+	tcPr = cell.find(f"{W}tcPr")
+	if tcPr is None:
+		return 1
+	grid_span = tcPr.find(f"{W}gridSpan")
+	if grid_span is None:
+		return 1
+	try:
+		return int(grid_span.get(f"{W}val", "1"))
+	except (ValueError, TypeError):
+		return 1
+
+
+def _get_vmerge(cell: etree._Element) -> str | None:
+	"""Return the vMerge value for a cell: 'restart', 'continue', or None."""
+	tcPr = cell.find(f"{W}tcPr")
+	if tcPr is None:
+		return None
+	vmerge = tcPr.find(f"{W}vMerge")
+	if vmerge is None:
+		return None
+	return vmerge.get(f"{W}val", "continue") or "continue"
+
+
+def _row_logical_cells(row: etree._Element) -> list[tuple[etree._Element, int, int]]:
+	"""Return (cell_element, logical_start_col, grid_span) for each physical cell.
+
+	This resolves the logical column positions accounting for horizontal
+	merges (gridSpan).  A cell with gridSpan=3 occupies three logical
+	columns; the next physical cell starts at logical column 3.
+	"""
+	physical = [el for el in row if el.tag == f"{W}tc"]
+	logical = []
+	col = 0
+	for tc in physical:
+		span = _get_grid_span(tc)
+		logical.append((tc, col, span))
+		col += span
+	return logical
+
+
+def _physical_cell_at_logical(row: etree._Element, logical_col: int) -> etree._Element | None:
+	"""Return the physical w:tc covering *logical_col*, or None."""
+	for tc, start, span in _row_logical_cells(row):
+		if start <= logical_col < start + span:
+			return tc
+	return None
+
+
 def _find_cell_by_text(table: etree._Element, text: str) -> etree._Element | None:
-	"""Find the first w:tc in a table that contains the given text."""
+	"""Find the first w:tc in a table that contains the given text.
+
+	Skips vMerge=continue placeholder cells (logically covered from above).
+	"""
 	text_norm = _normalize_quotes(text)
 	for tc in table.iter(f"{W}tc"):
+		if _get_vmerge(tc) == "continue":
+			continue
 		cell_text = _get_cell_text(tc)
 		if text_norm in _normalize_quotes(cell_text):
 			return tc
@@ -1013,7 +1068,8 @@ def list_tables(docx_path: str, *, preview_rows: int = 3,
 		max_cols = 0
 		for row in rows[:preview_rows]:
 			cells = [tc for tc in row if tc.tag == f"{W}tc"]
-			max_cols = max(max_cols, len(cells))
+			_logical_n = sum(_get_grid_span(c) for c in cells)
+			max_cols = max(max_cols, _logical_n)
 			row_texts = []
 			for cell in cells:
 				text = _get_cell_text(cell).strip()
@@ -1022,7 +1078,8 @@ def list_tables(docx_path: str, *, preview_rows: int = 3,
 				row_texts.append(text)
 			row_previews.append(row_texts)
 		for row in rows[preview_rows:]:
-			max_cols = max(max_cols, len([tc for tc in row if tc.tag == f"{W}tc"]))
+			_logical_n = sum(_get_grid_span(c) for c in row if c.tag == f"{W}tc")
+			max_cols = max(max_cols, _logical_n)
 
 		flat_preview = " | ".join(
 			cell for row in row_previews for cell in row if cell
@@ -1073,12 +1130,15 @@ def set_table_cells_by_position(docx_path: str, table_index: int,
 		if row_idx < 0 or row_idx >= len(rows):
 			errors.append(f"Row {row_idx} out of range")
 			continue
-		row_cells = [tc_el for tc_el in rows[row_idx] if tc_el.tag == f"{W}tc"]
-		if col_idx < 0 or col_idx >= len(row_cells):
-			errors.append(f"Cell ({row_idx},{col_idx}) out of range")
+
+		# Use gridSpan-aware logical column → physical cell mapping
+		tc_el = _physical_cell_at_logical(rows[row_idx], col_idx)
+		if tc_el is None:
+			physical = [tc for tc in rows[row_idx] if tc.tag == f"{W}tc"]
+			_logical_cols = sum(_get_grid_span(c) for c in physical)
+			errors.append(f"Cell ({row_idx},{col_idx}) out of range (logical columns: {_logical_cols})")
 			continue
 
-		tc_el = row_cells[col_idx]
 		old_text = item.get("old_text")
 		current_text = _get_cell_text(tc_el)
 		if old_text is not None and _normalize_quotes(old_text) not in _normalize_quotes(current_text):
@@ -1316,6 +1376,15 @@ def insert_table_rows(docx_path: str, table_index: int, template_row_index: int,
 	for row_idx, cell_texts in enumerate(rows_data):
 		new_row = copy.deepcopy(template_row)
 		cells = new_row.findall(f"{W}tc")
+
+		# Strip vMerge from cloned cells so inserted rows don't
+		# accidentally continue a vertical merge from the template.
+		for tc in cells:
+			tcPr = tc.find(f"{W}tcPr")
+			if tcPr is not None:
+				vm = tcPr.find(f"{W}vMerge")
+				if vm is not None:
+					tcPr.remove(vm)
 
 		for ci in range(min(len(cell_texts), len(cells))):
 			_set_cell_text(cells[ci], cell_texts[ci])

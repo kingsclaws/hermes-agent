@@ -402,6 +402,13 @@ def adjust_rows(
         # 增行
         for _ in range(target_data_rows - current):
             new_tr = deepcopy(template_tr)
+            # Strip vMerge so appended rows don't continue a vertical merge
+            for tc_el in new_tr.findall(qn("w:tc")):
+                tcPr = tc_el.find(qn("w:tcPr"))
+                if tcPr is not None:
+                    vm = tcPr.find(qn("w:vMerge"))
+                    if vm is not None:
+                        tcPr.remove(vm)
             # 清空单元格文字（保留格式）
             for tc_el in new_tr.findall(qn("w:tc")):
                 for p_el in tc_el.findall(qn("w:p")):
