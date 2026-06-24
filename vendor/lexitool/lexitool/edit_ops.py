@@ -24,6 +24,7 @@ from pathlib import Path
 from lxml import etree
 
 from .openxml_runmap import editable_touched_spans, render_paragraph, replace_span, text_in_span
+from .tc_utils import _normalize_fullwidth
 
 W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 W = f"{{{W_NS}}}"
@@ -703,8 +704,19 @@ def trim_paragraph(docx_path: str, para: int, *,
 
 
 def _normalize_quotes(text: str) -> str:
-    """将弯引号（Word自动弯引号）标准化为直引号以匹配搜索。"""
-    return text.replace('\u201c', '\u0022').replace('\u201d', '\u0022').replace('\u2018', '\u0027').replace('\u2019', '\u0027')
+    """弯引号/破折号→ASCII、全角→半角，以匹配搜索。
+
+    所有映射均为 1:1 码点（长度/位置不变），_locate_replacement_span
+    用归一化索引回切原始 full_text 仍然成立；故 em-dash 映射为单个 '-'
+    而非 '--'，避免破坏该不变量。
+    """
+    t = (text
+         .replace('\u201c', '"').replace('\u201d', '"')
+         .replace('\u2018', "'").replace('\u2019', "'")
+         .replace('\u02bb', "'").replace('\u02bc', "'")
+         .replace('\u00ab', '"').replace('\u00bb', '"')
+         .replace('\u2013', '-').replace('\u2014', '-'))
+    return _normalize_fullwidth(t)
 
 
 def _locate_replacement_span(full_text: str, old: str) -> tuple[int, int, str] | None:
@@ -1715,15 +1727,6 @@ def insert_paragraph_block(docx_path: str, after_para: int,
 	                  path=output or docx_path)
 
 # ── Whole-document find/replace ──────────────────────────────────────────────
-
-
-def _normalize_quotes(text: str) -> str:
-    """Replace smart/curly quotes with straight quotes for flexible matching."""
-    return (text
-            .replace("ʻ", "'").replace("ʼ", "'")
-            .replace("“", '"').replace("”", '"')
-            .replace("«", '"').replace("»", '"')
-            .replace("–", "-").replace("—", "--"))
 
 
 def find_and_replace_all(

@@ -2888,6 +2888,13 @@ class GatewayRunner(
         # simply don't use kanban; this loop becomes a no-op.
         asyncio.create_task(self._kanban_dispatcher_watcher())
 
+        # Start background swarm-session wake watcher — when a swarm task
+        # reaches a terminal/reject state (and carries a session_id), inject a
+        # synthetic Coordinator turn so the dispatching session auto-collects
+        # and reports back. Gated by `kanban.dispatch_in_gateway` (coordinator
+        # gateway only) + `HERMES_SWARM_SESSION_WAKE` env; otherwise a no-op.
+        asyncio.create_task(self._swarm_session_wake_watcher())
+
         # Start background reconnection watcher for platforms that failed at startup
         if self._failed_platforms:
             logger.info(

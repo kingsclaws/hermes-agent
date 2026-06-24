@@ -109,6 +109,21 @@ specs = [
 
 import yaml
 
+# Profile (identity soul) → role SOP (full operating procedure) map.
+# Bootstrap appends the role SOP onto the identity soul so workers boot with
+# their complete procedure baked into SOUL.md. Soul = identity; role = procedure;
+# on conflict the role wins.
+NAME_TO_ROLE = {
+    'lex-coordinator': 'hpswarm-coordinator',
+    'lex-drafter': 'hpswarm-drafter',
+    'lex-reviewer-content': 'hpswarm-reviewer-content',
+    'lex-reviewer-format': 'hpswarm-reviewer-format',
+    'lex-reviewer-ts': 'hpswarm-reviewer-ts-consistency',
+    'lex-reviewer-xref': 'hpswarm-reviewer-cross-ref',
+    'lex-reviewer-translation': 'hpswarm-reviewer-translation',
+}
+ROLE_SEPARATOR = '\n\n---\n# Operating Procedure (authoritative — overrides identity on conflict)\n\n'
+
 for name, desc, is_coord in specs:
     try:
         profile_dir = prof_mod.create_profile(name, description=desc)
@@ -119,10 +134,26 @@ for name, desc, is_coord in specs:
         print(f'[lex-hermes] WARNING: Failed to create profile {name}: {e}', file=sys.stderr)
         continue
 
-    # Copy role-specific SOUL.md
+    # Copy role-specific SOUL.md (identity layer)
     soul_src = f'/opt/lex-hermes/profiles/{name}.soul.md'
+    soul_dst = profile_dir / 'SOUL.md'
     if os.path.isfile(soul_src):
-        shutil.copy2(soul_src, profile_dir / 'SOUL.md')
+        shutil.copy2(soul_src, soul_dst)
+
+    # Bake the role SOP (full procedure) onto the identity soul.
+    # copy2 above resets SOUL.md to identity-only first, so this append is idempotent
+    # across re-runs (no accumulation). On conflict, the appended procedure wins.
+    role_slug = NAME_TO_ROLE.get(name)
+    if role_slug:
+        role_src = f'/opt/lex-hermes/.hermes-project/roles/{role_slug}.md'
+        if os.path.isfile(role_src) and os.path.isfile(soul_dst):
+            with open(role_src, encoding='utf-8') as rf:
+                role_body = rf.read()
+            with open(soul_dst, 'a', encoding='utf-8') as sf:
+                sf.write(ROLE_SEPARATOR + role_body)
+            print(f'[lex-hermes] Baked role SOP into {name} SOUL.md ({role_slug}, {len(role_body)} chars)')
+        else:
+            print(f'[lex-hermes] WARNING: role SOP missing for {name} ({role_src}) — identity-only soul', file=sys.stderr)
 
     # Write config.yaml with native Lex-capable toolsets.
     toolsets = ['hermes-cli'] if is_coord else ['lexitool', 'file', 'browser', 'delegation', 'skills', 'terminal', 'todo', 'web']

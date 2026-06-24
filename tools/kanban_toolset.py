@@ -465,6 +465,10 @@ KANBAN_TASK_POLL_SCHEMA = {
         "\n\n"
         "相比 swarm_task_wait（阻塞式轮询），此工具为非阻塞立即返回，"
         "适合批量检查多个任务的状态。建议新 workflow 使用 poll + collect 替代 wait。"
+        "\n\n"
+        "每个任务还会返回 latest_progress —— Worker 通过 swarm_task_progress 发布的"
+        "最近一条进度（做了什么 / 当前状态）。据此可在 Drafter 仍在执行时看到实时进展，"
+        "无需等到 handoff。"
     ),
     "parameters": {
         "type": "object",
@@ -899,6 +903,58 @@ def _infer_current_gate(task_row: sqlite3.Row, spec: dict) -> str:
     return gates_order[gate_index]
 
 
+def _handoff_chain_digest(history: list) -> list[dict]:
+    """Condense handoff_history into a readable from→to→note chain.
+
+    Workers and the Coordinator use this instead of parsing the raw event log:
+    each entry is one move (handoff/approved/rejected/revised) with its full note,
+    so context flows visibly between Drafter and Reviewers across rounds.
+    """
+    chain = []
+    for i, h in enumerate(history):
+        if not isinstance(h, dict):
+            continue
+        entry = {
+            "seq": i + 1,
+            "action": h.get("action", ""),
+            "from": h.get("from", ""),
+            "timestamp": h.get("timestamp"),
+        }
+        if h.get("to"):
+            entry["to"] = h["to"]
+        # Keep the full note — it is the inter-agent context, not a summary.
+        if h.get("note"):
+            entry["note"] = h["note"]
+        chain.append(entry)
+    return chain
+
+
+def _latest_progress(conn: sqlite3.Connection, task_id: str) -> dict | None:
+    """Return the most recent worker progress update for a task, or None.
+
+    Progress is posted via swarm_task_progress as a `progress` task_event, so a
+    Coordinator polling a running Drafter sees what has actually been done so far.
+    """
+    row = conn.execute(
+        "SELECT actor, payload, created_at FROM task_events "
+        "WHERE task_id = ? AND kind = 'progress' ORDER BY created_at DESC LIMIT 1",
+        (task_id,),
+    ).fetchone()
+    if not row:
+        return None
+    try:
+        payload = json.loads(row["payload"] or "{}")
+    except (json.JSONDecodeError, TypeError):
+        payload = {}
+    return {
+        "by": row["actor"],
+        "at": row["created_at"],
+        "item": payload.get("item"),
+        "status": payload.get("status"),
+        "note": payload.get("note", ""),
+    }
+
+
 # ── Poll & Collect handlers ────────────────────────────────────────────────────
 
 def kanban_task_poll_handler(args: dict, **kwargs) -> str:
@@ -947,6 +1003,7 @@ def kanban_task_poll_handler(args: dict, **kwargs) -> str:
             "assignee": row["assignee"],
             "completed_at": row["completed_at"],
             "gate_progress": gate_progress,
+            "latest_progress": _latest_progress(conn, tid),
         })
 
     # Recalculate summary correctly
@@ -1130,6 +1187,9 @@ KANBAN_TASK_READ_SCHEMA = {
     "name": "swarm_task_read",
     "description": (
         "读取任务的完整详情，包括门禁链状态、handoff 历史、事件日志。"
+        "返回中的 handoff_chain 是一份按时序整理的移交链摘要（from→to→note），"
+        "Reviewer 据此快速获取上一环节的完整移交说明与历史上下文，"
+        "无需自行解析原始 events。"
     ),
     "parameters": {
         "type": "object",
@@ -1351,6 +1411,7 @@ def kanban_task_read_handler(args: dict, **kwargs) -> str:
     return json.dumps({
         "success": True,
         "task": task_dict,
+        "handoff_chain": _handoff_chain_digest(task_dict.get("handoff_history", [])),
         "events": events,
         "event_count": len(events),
     }, ensure_ascii=False)
@@ -1467,6 +1528,55 @@ def kanban_task_handoff_handler(args: dict, **kwargs) -> str:
         "success": True,
         "task": _task_to_dict(updated),
         "message": msg,
+    }, ensure_ascii=False)
+
+
+KANBAN_TASK_PROGRESS_SCHEMA = {
+    "name": "swarm_task_progress",
+    "description": (
+        "Worker 在执行长任务过程中发布阶段性进度。每完成一个子项（如一段修改、"
+        "一个审阅维度）就调用一次，让 Coordinator 通过 swarm_task_poll 实时看到"
+        "你做到哪里了。这不替代 handoff —— handoff 是完成后的最终交付，"
+        "progress 是执行过程中的中途汇报。"
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "task_id": {"type": "string", "description": "你正在执行的任务 ID。"},
+            "note": {"type": "string", "description": "本次进度说明：做了什么 / 当前状态 / 下一步。"},
+            "item": {"type": "string", "description": "可选：本次进度对应的子项标识（如 \"§5 利率条款\"）。"},
+            "status": {"type": "string", "description": "可选：子项状态，如 ok / failed / skipped。"},
+            "project_path": {"type": "string", "description": "项目根目录绝对路径。省略则用当前选中项目。"},
+        },
+        "required": ["task_id", "note"],
+    },
+}
+
+
+def kanban_task_progress_handler(args: dict, **kwargs) -> str:
+    task_id = args.get("task_id", "").strip()
+    note = args.get("note", "").strip()
+    if not task_id or not note:
+        return json.dumps({"success": False, "error": "task_id 和 note 为必填项。"})
+
+    parent_agent = kwargs.get("parent_agent")
+    try:
+        conn, row, board_id = _resolve_task_db(task_id, args, parent_agent)
+    except ValueError as e:
+        return json.dumps({"success": False, "error": str(e)})
+
+    actor = getattr(parent_agent, "name", "worker")
+    payload = {"note": note}
+    if args.get("item"):
+        payload["item"] = str(args["item"]).strip()
+    if args.get("status"):
+        payload["status"] = str(args["status"]).strip()
+    _log_event(conn, task_id, "progress", actor=actor, payload=payload)
+    conn.close()
+
+    return json.dumps({
+        "success": True,
+        "message": "进度已记录。Coordinator 可通过 swarm_task_poll 查看 latest_progress。",
     }, ensure_ascii=False)
 
 
@@ -1889,4 +1999,14 @@ registry.register(
     check_fn=_check_kanban,
     description="Worker 修改后重新提交",
     emoji="🔧",
+)
+
+registry.register(
+    name="swarm_task_progress",
+    toolset="kanban_swarm",
+    schema=KANBAN_TASK_PROGRESS_SCHEMA,
+    handler=lambda args, **kw: kanban_task_progress_handler(args, **kw),
+    check_fn=_check_kanban,
+    description="Worker 发布执行中的阶段性进度（供 poll 查看）",
+    emoji="📣",
 )

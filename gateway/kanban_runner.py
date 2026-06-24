@@ -16,7 +16,7 @@ from agent.i18n import t
 from hermes_cli.config import cfg_get
 
 from gateway.config import Platform
-from gateway.platforms.base import MessageEvent
+from gateway.platforms.base import MessageEvent, MessageType
 from gateway.session import SessionSource
 
 logger = logging.getLogger(__name__)
@@ -607,6 +607,235 @@ class KanbanMixin:
                         logger.debug("kanban broadcast returned %d", resp.status)
         except Exception as e:
             logger.debug("kanban broadcast failed: %s", e)
+
+    async def _swarm_session_wake_watcher(self, interval: float = 6.0) -> None:
+        """Wake the Coordinator session when a swarm task it dispatched finishes.
+
+        The ``swarm_task_*`` tools (tools/kanban_toolset.py) write to a
+        *self-contained* per-project DB at ``<project>/kanban/kanban.db`` — a
+        different substrate from ``hermes_cli.kanban_db`` that
+        ``_kanban_notifier_watcher`` polls, so that notifier never sees swarm
+        tasks. This watcher closes the gap: it polls the swarm-toolset DBs for
+        terminal/reject events on tasks that recorded a ``session_id`` (the
+        coordinator's ``HERMES_SESSION_ID``) and injects a synthetic agent turn
+        into that session so the Coordinator runs ``swarm_task_collect`` and
+        reports back — enabling non-blocking batch dispatch.
+
+        Wakes on: ``rejected`` (always), ``completed`` (no-gate done),
+        ``blocked`` (defensive), and ``approved`` *only when final* (all gates
+        passed). Intermediate gate approvals do NOT wake — the task is still
+        moving to the next reviewer.
+
+        Single-owner: runs only in the gateway that also hosts the kanban
+        dispatcher (the coordinator gateway, per ``kanban.dispatch_in_gateway``),
+        so a per-DB linear cursor is race-free. First sight of a DB seeds the
+        cursor at the current max event id, so a restart never replays stale
+        terminal events as a wake storm. No feedback loop: the injected turn
+        drives a read-only ``swarm_task_collect``, which emits no terminal events.
+        """
+        env_override = os.environ.get("HERMES_SWARM_SESSION_WAKE", "").strip().lower()
+        if env_override in {"0", "false", "no", "off"}:
+            logger.info("swarm session-wake: disabled via HERMES_SWARM_SESSION_WAKE env")
+            return
+        try:
+            from hermes_cli.config import load_config as _load_config
+            cfg = _load_config()
+            kanban_cfg = cfg.get("kanban", {}) if isinstance(cfg, dict) else {}
+        except Exception:
+            kanban_cfg = {}
+        # Only the dispatcher (coordinator) gateway wakes sessions: it owns the
+        # coordinator session + adapter, giving a single cursor owner.
+        if env_override not in {"1", "true", "yes", "on"} and not kanban_cfg.get("dispatch_in_gateway", False):
+            logger.info("swarm session-wake: not the dispatcher gateway; watcher idle")
+            return
+
+        roots: list[str] = []
+        for r in os.environ.get("LEX_PROJECTS_ROOT", "/workingfile/projects").split(":"):
+            r = r.strip()
+            if r:
+                roots.append(r)
+        roots.append("/workingfile")
+
+        WAKE_KINDS = ("rejected", "completed", "blocked", "approved")
+
+        await asyncio.sleep(8)  # let adapters + session store settle
+
+        while self._running:
+            try:
+                def _scan():
+                    import sqlite3 as _sql
+                    import json as _json
+                    found: list[dict] = []
+                    seen_paths: set[str] = set()
+                    db_paths: list[Path] = []
+                    for root in roots:
+                        rp = Path(root)
+                        try:
+                            db_paths.extend(rp.glob("*/kanban/kanban.db"))
+                            direct = rp / "kanban" / "kanban.db"
+                            if direct.exists():
+                                db_paths.append(direct)
+                        except Exception:
+                            continue
+                    for db in db_paths:
+                        try:
+                            rk = str(db.resolve())
+                        except Exception:
+                            rk = str(db)
+                        if rk in seen_paths:
+                            continue
+                        seen_paths.add(rk)
+                        try:
+                            conn = _sql.connect(rk, timeout=5)
+                            conn.row_factory = _sql.Row
+                        except Exception:
+                            continue
+                        try:
+                            conn.execute(
+                                "CREATE TABLE IF NOT EXISTS swarm_wake_cursor "
+                                "(id INTEGER PRIMARY KEY CHECK(id=1), last_event_id INTEGER NOT NULL DEFAULT 0)"
+                            )
+                            cur_row = conn.execute(
+                                "SELECT last_event_id FROM swarm_wake_cursor WHERE id=1"
+                            ).fetchone()
+                            high_row = conn.execute(
+                                "SELECT COALESCE(MAX(id),0) AS m FROM task_events"
+                            ).fetchone()
+                            new_high = int(high_row["m"]) if high_row else 0
+                            if cur_row is None:
+                                # First sight: seed at current high so we never
+                                # replay historical terminal events as a wake storm.
+                                conn.execute(
+                                    "INSERT INTO swarm_wake_cursor (id, last_event_id) VALUES (1, ?)",
+                                    (new_high,),
+                                )
+                                conn.commit()
+                                continue
+                            last_id = int(cur_row["last_event_id"])
+                            if new_high <= last_id:
+                                continue
+                            rows = conn.execute(
+                                "SELECT e.id AS eid, e.task_id AS task_id, e.kind AS kind, "
+                                "       e.payload AS payload, t.title AS title, t.status AS status, "
+                                "       t.session_id AS session_id, b.project_path AS project_path "
+                                "FROM task_events e "
+                                "JOIN tasks t ON t.id = e.task_id "
+                                "JOIN board b ON b.id = t.board_id "
+                                "WHERE e.id > ? AND e.id <= ? AND e.kind IN (?,?,?,?) "
+                                "      AND t.session_id IS NOT NULL AND t.session_id != '' "
+                                "ORDER BY e.id ASC",
+                                (last_id, new_high, *WAKE_KINDS),
+                            ).fetchall()
+                            for r in rows:
+                                kind = r["kind"]
+                                if kind == "approved":
+                                    try:
+                                        pl = _json.loads(r["payload"] or "{}")
+                                    except Exception:
+                                        pl = {}
+                                    if not pl.get("final"):
+                                        continue  # intermediate gate — keep waiting
+                                found.append({
+                                    "event_id": int(r["eid"]),
+                                    "task_id": r["task_id"],
+                                    "kind": kind,
+                                    "title": r["title"] or r["task_id"],
+                                    "status": r["status"],
+                                    "session_id": r["session_id"],
+                                    "project_path": r["project_path"] or "",
+                                })
+                            # Advance past everything examined (incl. intermediate
+                            # approvals + non-wake kinds) so the cursor never stalls.
+                            conn.execute(
+                                "UPDATE swarm_wake_cursor SET last_event_id=? WHERE id=1",
+                                (new_high,),
+                            )
+                            conn.commit()
+                        finally:
+                            conn.close()
+                    return found
+
+                wakes = await asyncio.to_thread(_scan)
+                for w in wakes:
+                    await self._inject_swarm_wake(w)
+            except Exception as exc:
+                logger.debug("swarm session-wake tick failed: %s", exc)
+            await asyncio.sleep(interval)
+
+    async def _inject_swarm_wake(self, wake: dict) -> None:
+        """Inject one synthetic Coordinator turn for a swarm terminal/reject event."""
+        session_id = wake.get("session_id") or ""
+        if not session_id:
+            return
+        store = getattr(self, "session_store", None)
+        if store is None:
+            return
+        source = None
+        try:
+            store._ensure_loaded()
+            with store._lock:  # noqa: SLF001 — snapshot under lock (mirrors run.py)
+                for entry in store._entries.values():  # noqa: SLF001
+                    if getattr(entry, "session_id", None) == session_id:
+                        source = entry.source
+                        break
+        except Exception as exc:
+            logger.debug("swarm session-wake: store lookup failed for %s: %s", session_id, exc)
+            return
+        if source is None:
+            logger.debug(
+                "swarm session-wake: session %s not hosted here; dropping wake for %s",
+                session_id, wake.get("task_id"),
+            )
+            return
+        adapter = self.adapters.get(source.platform)
+        if adapter is None:
+            logger.debug(
+                "swarm session-wake: no adapter for %s; dropping wake for %s",
+                source.platform, wake.get("task_id"),
+            )
+            return
+
+        kind = wake.get("kind")
+        tid = wake.get("task_id")
+        title = wake.get("title")
+        proj = wake.get("project_path") or ""
+        if kind == "rejected":
+            verb = "被审阅拒绝（rejected）"
+            action = (
+                f'请运行 swarm_task_collect(task_id="{tid}", project_path="{proj}") 查看拒绝理由与历史，'
+                "然后向用户说明被拒原因，并询问是否要重新分派 Drafter 修改。"
+            )
+        elif kind == "blocked":
+            verb = "被阻塞（blocked）"
+            action = (
+                f'请运行 swarm_task_collect(task_id="{tid}", project_path="{proj}") 查看阻塞原因，'
+                "向用户汇报并给出建议。"
+            )
+        else:  # completed / approved-final
+            verb = "已完成并通过全部门禁（done）"
+            action = (
+                f'请运行 swarm_task_collect(task_id="{tid}", project_path="{proj}") 收集 Worker 产物'
+                "（修订对照表 / 审阅报告 / handoff_chain），整合后向用户汇报本任务结果。"
+            )
+        synth_text = (
+            f"[swarm 自动通知] 你之前分派的任务 {tid}（{title}）{verb}。\n"
+            f"{action}\n"
+            "本次只处理这一个任务；其余正在进行的任务完成时会同样通知你。"
+        )
+        try:
+            synth_event = MessageEvent(
+                text=synth_text,
+                message_type=MessageType.TEXT,
+                source=source,
+                internal=True,
+            )
+            logger.info(
+                "swarm session-wake: injecting Coordinator turn for task %s (%s) into session %s",
+                tid, kind, session_id,
+            )
+            await adapter.handle_message(synth_event)
+        except Exception as exc:
+            logger.error("swarm session-wake: injection failed for task %s: %s", tid, exc)
 
     async def _kanban_dispatcher_watcher(self) -> None:
         """Embedded kanban dispatcher — one tick every `dispatch_interval_seconds`.
