@@ -21,6 +21,10 @@ CONTAINER="${1:-lex-hermes}"
 HOST_REPO="/opt/hermes-agent"
 CONTAINER_REPO="/opt/lex-hermes"
 PROFILES_DIR="$HOST_REPO/profiles"
+# When set, NULL the persisted system_prompt of every existing session so live
+# sessions rebuild from the new SOUL.md on their next turn (not just new ones).
+# Costs a one-time prefix-cache miss per session; conversation history is intact.
+REFRESH_SESSIONS="${REFRESH_EXISTING_SESSIONS:-0}"
 GATEWAY_SERVICES=(
     gateway-lex-coordinator
     gateway-lex-drafter
@@ -43,6 +47,22 @@ docker cp "$HOST_REPO/tools/kanban_toolset.py"     "$CONTAINER:$CONTAINER_REPO/t
 docker cp "$HOST_REPO/gateway/kanban_runner.py"    "$CONTAINER:$CONTAINER_REPO/gateway/kanban_runner.py"
 docker cp "$HOST_REPO/hermes_cli/kanban_db.py"     "$CONTAINER:$CONTAINER_REPO/hermes_cli/kanban_db.py"
 docker cp "$HOST_REPO/hermes_cli/web_server.py"    "$CONTAINER:$CONTAINER_REPO/hermes_cli/web_server.py"
+# gateway/run.py carries the F2 swarm-session-wake watcher registration.
+docker cp "$HOST_REPO/gateway/run.py"              "$CONTAINER:$CONTAINER_REPO/gateway/run.py"
+
+# lexitool is installed into the venv site-packages (NOT an editable/repo import),
+# so the tool fix must land at the ACTUAL import location. edit_ops.py now does
+# `from .tc_utils import _normalize_fullwidth`, so tc_utils.py MUST ship alongside
+# it or every lexitool tool breaks on import.
+echo "→ Syncing lexitool to site-packages..."
+LEXITOOL_DIR="$(docker exec "$CONTAINER" python3 -c 'import os,lexitool;print(os.path.dirname(lexitool.__file__))' 2>/dev/null || true)"
+if [ -n "$LEXITOOL_DIR" ]; then
+    docker cp "$HOST_REPO/vendor/lexitool/lexitool/tc_utils.py" "$CONTAINER:$LEXITOOL_DIR/tc_utils.py"
+    docker cp "$HOST_REPO/vendor/lexitool/lexitool/edit_ops.py" "$CONTAINER:$LEXITOOL_DIR/edit_ops.py"
+    echo "  ✓ tc_utils.py + edit_ops.py → $LEXITOOL_DIR"
+else
+    echo "  ⚠ could not resolve lexitool import dir in container — TOOL FIX NOT SYNCED"
+fi
 
 # ── Step 2: Update SOUL.md at ALL layers (identity soul + baked role SOP) ──
 echo "→ Updating SOUL.md files (identity + role SOP)..."
@@ -156,6 +176,45 @@ for svc in "${GATEWAY_SERVICES[@]}"; do
         FAILED=1
     fi
 done
+
+# ── Step 6: Refresh existing sessions' system prompts (opt-in) ───────
+# An existing session restores its PERSISTED system prompt verbatim each turn
+# (state.db sessions.system_prompt), so a new SOUL.md never reaches it. NULLing
+# that column makes _restore_or_build_system_prompt rebuild from the new soul on
+# the next turn. Backs up each state.db first. Enable with
+# REFRESH_EXISTING_SESSIONS=1.
+if [ "$REFRESH_SESSIONS" != "0" ]; then
+    echo "→ Refreshing existing sessions (NULL persisted system_prompt)..."
+    docker exec -i "$CONTAINER" python3 - <<'PYEOF'
+import sqlite3, glob, os, time
+ts = time.strftime("%Y%m%d-%H%M%S")
+paths = ["/root/.hermes/state.db"] + glob.glob("/root/.hermes/profiles/*/state.db")
+seen = set()
+total = 0
+for p in paths:
+    rp = os.path.realpath(p)
+    if rp in seen or not os.path.exists(rp):
+        continue
+    seen.add(rp)
+    try:
+        bak = f"{rp}.bak-{ts}"
+        if not os.path.exists(bak):
+            import shutil; shutil.copy2(rp, bak)
+        c = sqlite3.connect(rp, timeout=15)
+        n = c.execute(
+            "UPDATE sessions SET system_prompt = NULL "
+            "WHERE system_prompt IS NOT NULL AND system_prompt != ''"
+        ).rowcount
+        c.commit(); c.close()
+        total += n
+        print(f"  ✓ {rp}: cleared {n} (backup {os.path.basename(bak)})")
+    except Exception as e:
+        print(f"  ✗ {rp}: {e}")
+print(f"  → {total} session prompts cleared; they rebuild from new SOUL.md next turn")
+PYEOF
+else
+    echo "→ (skip) existing-session refresh — set REFRESH_EXISTING_SESSIONS=1 to enable"
+fi
 
 echo ""
 if [ $FAILED -eq 0 ]; then
