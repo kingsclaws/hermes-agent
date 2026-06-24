@@ -776,7 +776,12 @@ class KanbanMixin:
             with store._lock:  # noqa: SLF001 — snapshot under lock (mirrors run.py)
                 for entry in store._entries.values():  # noqa: SLF001
                     if getattr(entry, "session_id", None) == session_id:
-                        source = entry.source
+                        # Routing source lives on entry.origin (Optional[SessionSource]),
+                        # NOT entry.source — SessionEntry has no `source` attribute, so
+                        # the old read raised AttributeError that the except below
+                        # swallowed as "store lookup failed", dropping every wake.
+                        # Mirrors run.py:2341 (source = entry.origin).
+                        source = entry.origin
                         break
         except Exception as exc:
             logger.debug("swarm session-wake: store lookup failed for %s: %s", session_id, exc)
@@ -785,13 +790,6 @@ class KanbanMixin:
             logger.debug(
                 "swarm session-wake: session %s not hosted here; dropping wake for %s",
                 session_id, wake.get("task_id"),
-            )
-            return
-        adapter = self.adapters.get(source.platform)
-        if adapter is None:
-            logger.debug(
-                "swarm session-wake: no adapter for %s; dropping wake for %s",
-                source.platform, wake.get("task_id"),
             )
             return
 
@@ -830,10 +828,29 @@ class KanbanMixin:
                 internal=True,
             )
             logger.info(
-                "swarm session-wake: injecting Coordinator turn for task %s (%s) into session %s",
-                tid, kind, session_id,
+                "swarm session-wake: injecting Coordinator turn for task %s (%s) into session %s (platform=%s)",
+                tid, kind, session_id, source.platform,
             )
-            await adapter.handle_message(synth_event)
+            # Route through the unified gateway ingress, NOT adapter.handle_message:
+            # self.adapters only holds enabled messaging-platform adapters
+            # (telegram/feishu). A coordinator session is typically cli/tui/webui,
+            # served by the gateway socket/RPC server with no entry in self.adapters,
+            # so adapter.handle_message would never reach it. _handle_message is the
+            # path adapters themselves funnel into (adapter.set_message_handler) and
+            # the handoff dispatcher uses the same inline call for CLI sessions. For
+            # cli/tui/webui the reply streams back over the session's own socket;
+            # for a messaging-platform session we additionally push the reply via
+            # its adapter.
+            response_text = await self._handle_message(synth_event)
+            adapter = self.adapters.get(source.platform)
+            if response_text and adapter is not None and getattr(source, "chat_id", None):
+                try:
+                    await adapter.send(chat_id=str(source.chat_id), content=response_text)
+                except Exception as send_exc:
+                    logger.error(
+                        "swarm session-wake: adapter.send failed for task %s: %s",
+                        tid, send_exc,
+                    )
         except Exception as exc:
             logger.error("swarm session-wake: injection failed for task %s: %s", tid, exc)
 
