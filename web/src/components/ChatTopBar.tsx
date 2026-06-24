@@ -8,6 +8,7 @@ import type { ProjectInfo } from "@/lib/api";
 export interface ChatTopBarProps {
   selectedProjectId: string;
   projects: ProjectInfo[];
+  onSelectProject: (projectId: string) => void;
   sessionTitle: string | null;
   reasoningEffort: ReasoningEffort;
   onReasoningEffortChange: (e: ReasoningEffort) => void;
@@ -20,6 +21,7 @@ export interface ChatTopBarProps {
 export function ChatTopBar({
   selectedProjectId,
   projects,
+  onSelectProject,
   sessionTitle,
   reasoningEffort,
   onReasoningEffortChange,
@@ -91,22 +93,41 @@ export function ChatTopBar({
 
       {/* Controls */}
       <div className="flex items-center gap-2 shrink-0 pr-2">
-        {/* Breadcrumb */}
-        {selectedProject && (
+        {/* Project selector */}
+        <div className={cn("flex items-center gap-1 shrink-0", narrow && "hidden")}>
           <button
             type="button"
-            onClick={() => navigate(`/projects/${encodeURIComponent(selectedProject.id)}`)}
+            disabled={!selectedProject}
+            onClick={() =>
+              selectedProject &&
+              navigate(`/projects/${encodeURIComponent(selectedProject.id)}`)
+            }
             className={cn(
-              "flex items-center gap-1 text-[0.65rem] text-muted-foreground",
-              "hover:text-midground transition-colors shrink-0",
-              narrow && "hidden",
+              "flex items-center text-muted-foreground transition-colors",
+              "hover:text-midground disabled:opacity-40 disabled:hover:text-muted-foreground",
             )}
-            title={selectedProject.name}
+            title={selectedProject ? `Open ${selectedProject.name}` : "No project selected"}
           >
             <Folder className="h-3 w-3 shrink-0" />
-            <span className="truncate max-w-[120px]">{selectedProject.name}</span>
           </button>
-        )}
+          <select
+            value={selectedProjectId}
+            onChange={(e) => onSelectProject(e.target.value)}
+            className={cn(
+              "h-7 max-w-[160px] rounded border bg-background-base/60 px-1.5",
+              "text-[0.65rem] text-muted-foreground cursor-pointer",
+              "border-current/15 hover:border-primary/40 focus:border-primary/50 focus:outline-none",
+            )}
+            title="Switch project"
+          >
+            <option value="">(No project)</option>
+            {projects.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.name}
+              </option>
+            ))}
+          </select>
+        </div>
 
         {sessionTitle && !narrow && (
           <span className="text-[0.65rem] text-muted-foreground/50 shrink-0 hidden lg:inline">

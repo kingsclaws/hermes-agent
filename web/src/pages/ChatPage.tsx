@@ -36,7 +36,7 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
   const binding = useChatSessionBinding({ isActive, tabs, activeTabId, addTab, updateTab, findOrCreateTab });
   const {
     projects, sessions, selectedProjectId,
-    resumeParam, channel,
+    resumeParam, channel, handleSelectProject,
   } = binding;
 
   // Lazy-mount tabs: once visited, stay mounted for session persistence.
@@ -277,6 +277,7 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
       <ChatTopBar
         selectedProjectId={selectedProjectId}
         projects={projects}
+        onSelectProject={handleSelectProject}
         sessionTitle={(() => {
           const s = resumeParam ? sessions.find((x) => x.id === resumeParam) : null;
           return s ? (s.title || s.id.slice(0, 12)) : null;

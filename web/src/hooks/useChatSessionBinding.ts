@@ -65,6 +65,7 @@ export function useChatSessionBinding({
   const didAutoResume = useRef(false);
   const didInitTabs = useRef(false);
   const creatingSessionRef = useRef(false);
+  const lastBoundProjectId = useRef<string | null>(null);
 
   // Stable URL updater: reads searchParams via ref to avoid identity changes.
   const searchParamsRef = useRef(searchParams);
@@ -161,10 +162,23 @@ export function useChatSessionBinding({
   // Project-binding: when a project is selected, bind it using smart matching.
   useEffect(() => {
     if (!isActive || !activeTabId || !selectedProjectId || selectorBusy) return;
+    if (creatingSessionRef.current) return;
+    // Bind only when the selected project actually changed. This effect also
+    // re-fires whenever activeTabId changes (e.g. closing/switching tabs); without
+    // this guard it would re-create a just-closed tab and re-lock the last project.
+    if (selectedProjectId === lastBoundProjectId.current) return;
+
     const active = tabs.find((t) => t.id === activeTabId);
     if (!active) return;
-    if (active.projectId === selectedProjectId && active.sessionId) return;
-    if (creatingSessionRef.current) return;
+
+    // Active tab already bound to this project — record it so future tab-close
+    // events don't trigger a rebind.
+    if (active.projectId === selectedProjectId && active.sessionId) {
+      lastBoundProjectId.current = selectedProjectId;
+      return;
+    }
+
+    lastBoundProjectId.current = selectedProjectId;
 
     if (sessions.length > 0) {
       const withMessages = sessions.filter((s) => s.message_count > 0);
