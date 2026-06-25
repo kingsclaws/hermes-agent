@@ -38,8 +38,15 @@ from gateway.session import (
 
 logger = logging.getLogger(__name__)
 
-# Lazy access to gateway.run module-level names (circular-import-safe).
-import gateway.run as _gw
+# Lazy access to gateway.run_helpers module-level names (circular-import-safe).
+import gateway.run_helpers as _gw
+from gateway.run_helpers import (
+    _AGENT_PENDING_SENTINEL,
+    _INTERRUPT_REASON_RESET,
+    _INTERRUPT_REASON_STOP,
+    _home_target_env_var,
+    _home_thread_env_var,
+)
 
 
 class MessageHandlerMixin:
@@ -2839,5 +2846,3 @@ class MessageHandlerMixin:
         finally:
             # Restore session context variables to their pre-handler state
             self._clear_session_env(_session_env_tokens)
-
-

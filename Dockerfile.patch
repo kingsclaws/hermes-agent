@@ -29,6 +29,10 @@ COPY tools/legal_orchestration_tool.py /opt/hermes/tools/legal_orchestration_too
 COPY tools/legal_workflow_tool.py /opt/hermes/tools/legal_workflow_tool.py
 COPY toolsets.py /opt/hermes/toolsets.py
 COPY hermes_cli/tools_config.py /opt/hermes/hermes_cli/tools_config.py
+COPY gateway/agent_cache.py /opt/hermes/gateway/agent_cache.py
+COPY gateway/agent_execution.py /opt/hermes/gateway/agent_execution.py
+COPY gateway/message_handler.py /opt/hermes/gateway/message_handler.py
+COPY gateway/slash_commands.py /opt/hermes/gateway/slash_commands.py
 
 # Keep the editable /opt/lex-hermes checkout in sync for images that import
 # from that source path via site-packages .pth metadata.
@@ -36,6 +40,10 @@ COPY tools/legal_orchestration_tool.py /opt/lex-hermes/tools/legal_orchestration
 COPY tools/legal_workflow_tool.py /opt/lex-hermes/tools/legal_workflow_tool.py
 COPY toolsets.py /opt/lex-hermes/toolsets.py
 COPY hermes_cli/tools_config.py /opt/lex-hermes/hermes_cli/tools_config.py
+COPY gateway/agent_cache.py /opt/lex-hermes/gateway/agent_cache.py
+COPY gateway/agent_execution.py /opt/lex-hermes/gateway/agent_execution.py
+COPY gateway/message_handler.py /opt/lex-hermes/gateway/message_handler.py
+COPY gateway/slash_commands.py /opt/lex-hermes/gateway/slash_commands.py
 
 # ── Updated HPSwarm SOPs ──
 RUN mkdir -p /opt/hermes/.hermes-project/roles
@@ -59,4 +67,4 @@ RUN find /opt/lexitool/lexitool/__pycache__ -name '*.pyc' -delete 2>/dev/null; \
     find /opt/hermes/tools/__pycache__ -name '*.pyc' -delete 2>/dev/null; \
     find /opt/lex-hermes/tools/__pycache__ -name '*.pyc' -delete 2>/dev/null; \
     python3 -c "import lexitool.edit_ops, lexitool.markup, lexitool.ocr, lexitool.ocr_cli, lexitool.openxml_opc, lexitool.review_detailed; print('All modules import OK')"; \
-    cd /opt/lex-hermes && /opt/hermes/.venv/bin/python -m py_compile toolsets.py tools/legal_workflow_tool.py tools/legal_orchestration_tool.py hermes_cli/tools_config.py tests/test_legal_harness_toolsets.py
+    cd /opt/lex-hermes && /opt/hermes/.venv/bin/python -m py_compile toolsets.py tools/legal_workflow_tool.py tools/legal_orchestration_tool.py hermes_cli/tools_config.py gateway/agent_cache.py gateway/agent_execution.py gateway/message_handler.py gateway/slash_commands.py tests/test_legal_harness_toolsets.py

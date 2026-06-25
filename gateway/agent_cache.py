@@ -22,6 +22,7 @@ from gateway.session import SessionSource
 logger = logging.getLogger(__name__)
 
 import gateway.run as _gw
+from gateway.run_helpers import _AGENT_PENDING_SENTINEL
 
 
 class AgentCacheMixin:
@@ -569,6 +570,5 @@ class AgentCacheMixin:
     # ------------------------------------------------------------------
     # Proxy mode: forward messages to a remote Hermes API server
     # ------------------------------------------------------------------
-
 
 

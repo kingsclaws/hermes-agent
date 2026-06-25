@@ -8,6 +8,7 @@ to env vars nothing read on startup — the home channel appeared to set
 successfully but was lost on every new gateway session.
 """
 
+import gateway.message_handler as message_handler
 from gateway.run import _home_target_env_var, _home_thread_env_var
 
 
@@ -40,3 +41,8 @@ def test_home_thread_env_var_uses_home_target_name_plus_thread_id():
     assert _home_thread_env_var("discord") == "DISCORD_HOME_CHANNEL_THREAD_ID"
     assert _home_thread_env_var("matrix") == "MATRIX_HOME_ROOM_THREAD_ID"
     assert _home_thread_env_var("email") == "EMAIL_HOME_ADDRESS_THREAD_ID"
+
+
+def test_message_handler_binds_home_target_helpers():
+    assert message_handler._home_target_env_var("matrix") == "MATRIX_HOME_ROOM"
+    assert message_handler._home_thread_env_var("email") == "EMAIL_HOME_ADDRESS_THREAD_ID"

@@ -33,8 +33,12 @@ from gateway.session import SessionSource, SessionContext
 
 logger = logging.getLogger(__name__)
 
-# Lazy access to gateway.run module-level names (circular-import-safe).
-import gateway.run as _gw
+# Lazy access to gateway.run_helpers module-level names (circular-import-safe).
+import gateway.run_helpers as _gw
+from gateway.run_helpers import (
+    _INTERRUPT_REASON_TIMEOUT,
+    _reload_runtime_env_preserving_config_authority,
+)
 
 
 class AgentExecutionMixin:
@@ -2650,4 +2654,3 @@ class AgentExecutionMixin:
                 logger.debug("Post-delivery cleanup registration failed: %s", _rpe)
 
         return response
-

@@ -44,6 +44,12 @@ logger = logging.getLogger(__name__)
 # Safe circular import: methods only access these at call time,
 # by which point gateway.run is fully loaded.
 import gateway.run as _gw
+from gateway.run_helpers import (
+    _AGENT_PENDING_SENTINEL,
+    _INTERRUPT_REASON_STOP,
+    _home_target_env_var,
+    _home_thread_env_var,
+)
 
 class SlashCommandsMixin:
     """Slash command handlers extracted from GatewayRunner."""
@@ -4615,4 +4621,3 @@ class SlashCommandsMixin:
             return None
         # Text fallback — return the prompt message as the direct reply.
         return message
-
