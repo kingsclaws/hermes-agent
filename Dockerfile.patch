@@ -1,5 +1,10 @@
 # Patch build — overlay changed lexitool + tool files on latest image
-# Build: docker build --pull=never -t localhost:6678/lex-hermes:latest -f Dockerfile.patch .
+# Build: docker build --pull=false -t localhost:6678/lex-hermes:latest -f Dockerfile.patch .
+#
+# Keep this Dockerfile shallow. The base image is itself repeatedly patched in
+# local development, and one-layer-per-COPY eventually triggers Docker overlay's
+# "max depth exceeded". Copy the repo once, then perform all file overlays in a
+# single RUN layer.
 ARG BASE_IMAGE=localhost:6678/lex-hermes:latest
 FROM ${BASE_IMAGE}
 
@@ -7,75 +12,69 @@ ENV HERMES_AUTO_GATEWAY=1
 ENV HERMES_AUTO_GATEWAY_PROFILES=lex-master
 ENV HERMES_PROJECTS_DB_PATH=/root/.hermes/state.db
 
-# ── Changed lexitool vendored modules ──
-COPY vendor/lexitool/lexitool/edit_ops.py /opt/lexitool/lexitool/edit_ops.py
-COPY vendor/lexitool/lexitool/markup.py /opt/lexitool/lexitool/markup.py
-COPY vendor/lexitool/lexitool/ocr.py /opt/lexitool/lexitool/ocr.py
-COPY vendor/lexitool/lexitool/ocr_cli.py /opt/lexitool/lexitool/ocr_cli.py
-COPY vendor/lexitool/lexitool/openxml_opc.py /opt/lexitool/lexitool/openxml_opc.py
-COPY vendor/lexitool/lexitool/review_detailed.py /opt/lexitool/lexitool/review_detailed.py
-COPY vendor/lexitool/lexitool/tc_utils.py /opt/lexitool/lexitool/tc_utils.py
+COPY . /tmp/lex-hermes-patch
 
-# Also update the hermes vendored copy
-COPY vendor/lexitool/lexitool/edit_ops.py /opt/hermes/vendor/lexitool/lexitool/edit_ops.py
-COPY vendor/lexitool/lexitool/markup.py /opt/hermes/vendor/lexitool/lexitool/markup.py
-COPY vendor/lexitool/lexitool/ocr.py /opt/hermes/vendor/lexitool/lexitool/ocr.py
-COPY vendor/lexitool/lexitool/ocr_cli.py /opt/hermes/vendor/lexitool/lexitool/ocr_cli.py
-COPY vendor/lexitool/lexitool/openxml_opc.py /opt/hermes/vendor/lexitool/lexitool/openxml_opc.py
-COPY vendor/lexitool/lexitool/review_detailed.py /opt/hermes/vendor/lexitool/lexitool/review_detailed.py
-COPY vendor/lexitool/lexitool/tc_utils.py /opt/hermes/vendor/lexitool/lexitool/tc_utils.py
-
-# ── Changed tool registration ──
-COPY tools/kanban_toolset.py /opt/hermes/tools/kanban_toolset.py
-COPY tools/lexitool_tool.py /opt/hermes/tools/lexitool_tool.py
-COPY tools/project_management_tool.py /opt/hermes/tools/project_management_tool.py
-COPY tools/legal_orchestration_tool.py /opt/hermes/tools/legal_orchestration_tool.py
-COPY tools/legal_workflow_tool.py /opt/hermes/tools/legal_workflow_tool.py
-COPY toolsets.py /opt/hermes/toolsets.py
-COPY hermes_cli/tools_config.py /opt/hermes/hermes_cli/tools_config.py
-COPY hermes_cli/container_boot.py /opt/hermes/hermes_cli/container_boot.py
-COPY hermes_cli/project_commands.py /opt/hermes/hermes_cli/project_commands.py
-COPY gateway/agent_cache.py /opt/hermes/gateway/agent_cache.py
-COPY gateway/agent_execution.py /opt/hermes/gateway/agent_execution.py
-COPY gateway/message_handler.py /opt/hermes/gateway/message_handler.py
-COPY gateway/slash_commands.py /opt/hermes/gateway/slash_commands.py
-
-# Keep the editable /opt/lex-hermes checkout in sync for images that import
-# from that source path via site-packages .pth metadata.
-COPY tools/project_management_tool.py /opt/lex-hermes/tools/project_management_tool.py
-COPY tools/legal_orchestration_tool.py /opt/lex-hermes/tools/legal_orchestration_tool.py
-COPY tools/legal_workflow_tool.py /opt/lex-hermes/tools/legal_workflow_tool.py
-COPY toolsets.py /opt/lex-hermes/toolsets.py
-COPY hermes_cli/tools_config.py /opt/lex-hermes/hermes_cli/tools_config.py
-COPY hermes_cli/container_boot.py /opt/lex-hermes/hermes_cli/container_boot.py
-COPY hermes_cli/project_commands.py /opt/lex-hermes/hermes_cli/project_commands.py
-COPY gateway/agent_cache.py /opt/lex-hermes/gateway/agent_cache.py
-COPY gateway/agent_execution.py /opt/lex-hermes/gateway/agent_execution.py
-COPY gateway/message_handler.py /opt/lex-hermes/gateway/message_handler.py
-COPY gateway/slash_commands.py /opt/lex-hermes/gateway/slash_commands.py
-
-# ── Updated HPSwarm SOPs ──
-RUN mkdir -p /opt/hermes/.hermes-project/roles
-COPY .hermes-project/roles/hpswarm-coordinator.md /opt/hermes/.hermes-project/roles/hpswarm-coordinator.md
-COPY .hermes-project/roles/hpswarm-drafter.md /opt/hermes/.hermes-project/roles/hpswarm-drafter.md
-COPY .hermes-project/roles/hpswarm-reviewer-content.md /opt/hermes/.hermes-project/roles/hpswarm-reviewer-content.md
-COPY .hermes-project/roles/hpswarm-reviewer-format.md /opt/hermes/.hermes-project/roles/hpswarm-reviewer-format.md
-COPY .hermes-project/roles/hpswarm-coordinator.md /opt/lex-hermes/.hermes-project/roles/hpswarm-coordinator.md
-
-# ── Legal harness tests ──
-RUN mkdir -p /opt/hermes/tests /opt/lex-hermes/tests
-COPY tests/test_legal_harness_toolsets.py /opt/hermes/tests/test_legal_harness_toolsets.py
-COPY tests/test_legal_harness_toolsets.py /opt/lex-hermes/tests/test_legal_harness_toolsets.py
-
-# ── Updated session/project binding ──
-COPY hermes_state.py /opt/hermes/hermes_state.py
-
-# ── Clear bytecode cache so Python recompiles from updated sources ──
-RUN find /opt/lexitool/lexitool/__pycache__ -name '*.pyc' -delete 2>/dev/null; \
+RUN set -e; \
+    cd /tmp/lex-hermes-patch; \
+    \
+    cp vendor/lexitool/lexitool/edit_ops.py /opt/lexitool/lexitool/edit_ops.py; \
+    cp vendor/lexitool/lexitool/markup.py /opt/lexitool/lexitool/markup.py; \
+    cp vendor/lexitool/lexitool/ocr.py /opt/lexitool/lexitool/ocr.py; \
+    cp vendor/lexitool/lexitool/ocr_cli.py /opt/lexitool/lexitool/ocr_cli.py; \
+    cp vendor/lexitool/lexitool/openxml_opc.py /opt/lexitool/lexitool/openxml_opc.py; \
+    cp vendor/lexitool/lexitool/review_detailed.py /opt/lexitool/lexitool/review_detailed.py; \
+    cp vendor/lexitool/lexitool/tc_utils.py /opt/lexitool/lexitool/tc_utils.py; \
+    \
+    cp vendor/lexitool/lexitool/edit_ops.py /opt/hermes/vendor/lexitool/lexitool/edit_ops.py; \
+    cp vendor/lexitool/lexitool/markup.py /opt/hermes/vendor/lexitool/lexitool/markup.py; \
+    cp vendor/lexitool/lexitool/ocr.py /opt/hermes/vendor/lexitool/lexitool/ocr.py; \
+    cp vendor/lexitool/lexitool/ocr_cli.py /opt/hermes/vendor/lexitool/lexitool/ocr_cli.py; \
+    cp vendor/lexitool/lexitool/openxml_opc.py /opt/hermes/vendor/lexitool/lexitool/openxml_opc.py; \
+    cp vendor/lexitool/lexitool/review_detailed.py /opt/hermes/vendor/lexitool/lexitool/review_detailed.py; \
+    cp vendor/lexitool/lexitool/tc_utils.py /opt/hermes/vendor/lexitool/lexitool/tc_utils.py; \
+    \
+    cp tools/kanban_toolset.py /opt/hermes/tools/kanban_toolset.py; \
+    cp tools/lexitool_tool.py /opt/hermes/tools/lexitool_tool.py; \
+    cp tools/project_management_tool.py /opt/hermes/tools/project_management_tool.py; \
+    cp tools/legal_orchestration_tool.py /opt/hermes/tools/legal_orchestration_tool.py; \
+    cp tools/legal_workflow_tool.py /opt/hermes/tools/legal_workflow_tool.py; \
+    cp toolsets.py /opt/hermes/toolsets.py; \
+    cp hermes_cli/tools_config.py /opt/hermes/hermes_cli/tools_config.py; \
+    cp hermes_cli/container_boot.py /opt/hermes/hermes_cli/container_boot.py; \
+    cp hermes_cli/project_commands.py /opt/hermes/hermes_cli/project_commands.py; \
+    cp gateway/agent_cache.py /opt/hermes/gateway/agent_cache.py; \
+    cp gateway/agent_execution.py /opt/hermes/gateway/agent_execution.py; \
+    cp gateway/message_handler.py /opt/hermes/gateway/message_handler.py; \
+    cp gateway/slash_commands.py /opt/hermes/gateway/slash_commands.py; \
+    \
+    cp tools/project_management_tool.py /opt/lex-hermes/tools/project_management_tool.py; \
+    cp tools/legal_orchestration_tool.py /opt/lex-hermes/tools/legal_orchestration_tool.py; \
+    cp tools/legal_workflow_tool.py /opt/lex-hermes/tools/legal_workflow_tool.py; \
+    cp toolsets.py /opt/lex-hermes/toolsets.py; \
+    cp hermes_cli/tools_config.py /opt/lex-hermes/hermes_cli/tools_config.py; \
+    cp hermes_cli/container_boot.py /opt/lex-hermes/hermes_cli/container_boot.py; \
+    cp hermes_cli/project_commands.py /opt/lex-hermes/hermes_cli/project_commands.py; \
+    cp gateway/agent_cache.py /opt/lex-hermes/gateway/agent_cache.py; \
+    cp gateway/agent_execution.py /opt/lex-hermes/gateway/agent_execution.py; \
+    cp gateway/message_handler.py /opt/lex-hermes/gateway/message_handler.py; \
+    cp gateway/slash_commands.py /opt/lex-hermes/gateway/slash_commands.py; \
+    \
+    mkdir -p /opt/hermes/.hermes-project/roles /opt/hermes/tests /opt/lex-hermes/tests; \
+    cp .hermes-project/roles/hpswarm-coordinator.md /opt/hermes/.hermes-project/roles/hpswarm-coordinator.md; \
+    cp .hermes-project/roles/hpswarm-drafter.md /opt/hermes/.hermes-project/roles/hpswarm-drafter.md; \
+    cp .hermes-project/roles/hpswarm-reviewer-content.md /opt/hermes/.hermes-project/roles/hpswarm-reviewer-content.md; \
+    cp .hermes-project/roles/hpswarm-reviewer-format.md /opt/hermes/.hermes-project/roles/hpswarm-reviewer-format.md; \
+    cp .hermes-project/roles/hpswarm-coordinator.md /opt/lex-hermes/.hermes-project/roles/hpswarm-coordinator.md; \
+    cp tests/test_legal_harness_toolsets.py /opt/hermes/tests/test_legal_harness_toolsets.py; \
+    cp tests/test_legal_harness_toolsets.py /opt/lex-hermes/tests/test_legal_harness_toolsets.py; \
+    cp hermes_state.py /opt/hermes/hermes_state.py; \
+    \
+    find /opt/lexitool/lexitool/__pycache__ -name '*.pyc' -delete 2>/dev/null; \
     find /opt/hermes/vendor/lexitool/lexitool/__pycache__ -name '*.pyc' -delete 2>/dev/null; \
     find /opt/hermes/tools/__pycache__ -name '*.pyc' -delete 2>/dev/null; \
     find /opt/lex-hermes/tools/__pycache__ -name '*.pyc' -delete 2>/dev/null; \
-    chmod 644 /opt/hermes/hermes_cli/container_boot.py /opt/lex-hermes/hermes_cli/container_boot.py \
+    chmod 644 \
+      /opt/hermes/hermes_cli/container_boot.py /opt/lex-hermes/hermes_cli/container_boot.py \
       /opt/hermes/hermes_cli/project_commands.py /opt/lex-hermes/hermes_cli/project_commands.py \
       /opt/hermes/tools/project_management_tool.py /opt/lex-hermes/tools/project_management_tool.py \
       /opt/hermes/gateway/agent_cache.py /opt/lex-hermes/gateway/agent_cache.py \
@@ -83,4 +82,18 @@ RUN find /opt/lexitool/lexitool/__pycache__ -name '*.pyc' -delete 2>/dev/null; \
       /opt/hermes/gateway/message_handler.py /opt/lex-hermes/gateway/message_handler.py \
       /opt/hermes/gateway/slash_commands.py /opt/lex-hermes/gateway/slash_commands.py; \
     python3 -c "import lexitool.edit_ops, lexitool.markup, lexitool.ocr, lexitool.ocr_cli, lexitool.openxml_opc, lexitool.review_detailed; print('All modules import OK')"; \
-    cd /opt/lex-hermes && /opt/hermes/.venv/bin/python -m py_compile toolsets.py tools/project_management_tool.py tools/legal_workflow_tool.py tools/legal_orchestration_tool.py hermes_cli/tools_config.py hermes_cli/container_boot.py hermes_cli/project_commands.py gateway/agent_cache.py gateway/agent_execution.py gateway/message_handler.py gateway/slash_commands.py tests/test_legal_harness_toolsets.py
+    cd /opt/lex-hermes; \
+    /opt/hermes/.venv/bin/python -m py_compile \
+      toolsets.py \
+      tools/project_management_tool.py \
+      tools/legal_workflow_tool.py \
+      tools/legal_orchestration_tool.py \
+      hermes_cli/tools_config.py \
+      hermes_cli/container_boot.py \
+      hermes_cli/project_commands.py \
+      gateway/agent_cache.py \
+      gateway/agent_execution.py \
+      gateway/message_handler.py \
+      gateway/slash_commands.py \
+      tests/test_legal_harness_toolsets.py; \
+    rm -rf /tmp/lex-hermes-patch
