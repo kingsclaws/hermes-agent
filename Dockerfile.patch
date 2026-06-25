@@ -50,6 +50,7 @@ RUN set -e; \
     cp gateway/agent_execution.py /opt/hermes/gateway/agent_execution.py; \
     cp gateway/message_handler.py /opt/hermes/gateway/message_handler.py; \
     cp gateway/slash_commands.py /opt/hermes/gateway/slash_commands.py; \
+    cp gateway/status.py /opt/hermes/gateway/status.py; \
     \
     cp tools/kanban_toolset.py /opt/lex-hermes/tools/kanban_toolset.py; \
     cp tools/lexitool_tool.py /opt/lex-hermes/tools/lexitool_tool.py; \
@@ -68,6 +69,7 @@ RUN set -e; \
     cp gateway/agent_execution.py /opt/lex-hermes/gateway/agent_execution.py; \
     cp gateway/message_handler.py /opt/lex-hermes/gateway/message_handler.py; \
     cp gateway/slash_commands.py /opt/lex-hermes/gateway/slash_commands.py; \
+    cp gateway/status.py /opt/lex-hermes/gateway/status.py; \
     \
     mkdir -p /opt/hermes/.hermes-project/roles /opt/hermes/tests /opt/lex-hermes/tests; \
     cp .hermes-project/roles/hpswarm-coordinator.md /opt/hermes/.hermes-project/roles/hpswarm-coordinator.md; \
@@ -77,6 +79,9 @@ RUN set -e; \
     cp .hermes-project/roles/hpswarm-coordinator.md /opt/lex-hermes/.hermes-project/roles/hpswarm-coordinator.md; \
     cp tests/test_legal_harness_toolsets.py /opt/hermes/tests/test_legal_harness_toolsets.py; \
     cp tests/test_legal_harness_toolsets.py /opt/lex-hermes/tests/test_legal_harness_toolsets.py; \
+    mkdir -p /opt/hermes/tests/gateway /opt/lex-hermes/tests/gateway; \
+    cp tests/gateway/test_status.py /opt/hermes/tests/gateway/test_status.py; \
+    cp tests/gateway/test_status.py /opt/lex-hermes/tests/gateway/test_status.py; \
     cp hermes_state.py /opt/hermes/hermes_state.py; \
     \
     find /opt/lexitool/lexitool/__pycache__ -name '*.pyc' -delete 2>/dev/null; \
@@ -96,7 +101,8 @@ RUN set -e; \
       /opt/hermes/gateway/agent_cache.py /opt/lex-hermes/gateway/agent_cache.py \
       /opt/hermes/gateway/agent_execution.py /opt/lex-hermes/gateway/agent_execution.py \
       /opt/hermes/gateway/message_handler.py /opt/lex-hermes/gateway/message_handler.py \
-      /opt/hermes/gateway/slash_commands.py /opt/lex-hermes/gateway/slash_commands.py; \
+      /opt/hermes/gateway/slash_commands.py /opt/lex-hermes/gateway/slash_commands.py \
+      /opt/hermes/gateway/status.py /opt/lex-hermes/gateway/status.py; \
     python3 -c "import lexitool.edit_ops, lexitool.markup, lexitool.ocr, lexitool.ocr_cli, lexitool.openxml_opc, lexitool.review_detailed; print('All modules import OK')"; \
     cd /opt/lex-hermes; \
     /opt/hermes/.venv/bin/python -m py_compile \
@@ -117,5 +123,7 @@ RUN set -e; \
       gateway/agent_execution.py \
       gateway/message_handler.py \
       gateway/slash_commands.py \
-      tests/test_legal_harness_toolsets.py; \
+      gateway/status.py \
+      tests/test_legal_harness_toolsets.py \
+      tests/gateway/test_status.py; \
     rm -rf /tmp/lex-hermes-patch

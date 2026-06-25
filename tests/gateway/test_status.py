@@ -311,6 +311,55 @@ class TestGatewayRuntimeStatus:
         assert payload["pid"] == os.getpid()
         assert payload["start_time"] == 2000
 
+    def test_read_runtime_status_downgrades_dead_running_pid(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        state_path = tmp_path / "gateway_state.json"
+        state_path.write_text(json.dumps({
+            "pid": 5879,
+            "start_time": 1000,
+            "kind": "hermes-gateway",
+            "gateway_state": "running",
+            "active_agents": 3,
+            "platforms": {},
+            "updated_at": "2026-06-25T00:00:00+00:00",
+        }))
+        monkeypatch.setattr(status, "_pid_exists", lambda pid: False)
+
+        payload = status.read_runtime_status()
+
+        assert payload["gateway_state"] == "stopped"
+        assert payload["active_agents"] == 0
+        assert payload["stale_gateway_pid"] == 5879
+        assert "pid 5879 is not running" in payload["exit_reason"]
+
+        persisted = json.loads(state_path.read_text())
+        assert persisted["gateway_state"] == "stopped"
+        assert persisted["stale_gateway_pid"] == 5879
+
+    def test_read_runtime_status_downgrades_pid_from_other_hermes_home(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / "profile-a"))
+        state_path = tmp_path / "profile-a" / "gateway_state.json"
+        state_path.parent.mkdir()
+        state_path.write_text(json.dumps({
+            "pid": 421,
+            "start_time": 1000,
+            "kind": "hermes-gateway",
+            "gateway_state": "running",
+            "argv": ["hermes", "-p", "profile-b", "gateway", "run"],
+            "platforms": {},
+            "updated_at": "2026-06-25T00:00:00+00:00",
+        }))
+        monkeypatch.setattr(status, "_pid_exists", lambda pid: True)
+        monkeypatch.setattr(status, "_get_process_start_time", lambda pid: 1000)
+        monkeypatch.setattr(status, "_read_process_env_var", lambda pid, name: str(tmp_path / "profile-b"))
+        monkeypatch.setattr(status, "_looks_like_gateway_process", lambda pid: True)
+
+        payload = status.read_runtime_status()
+
+        assert payload["gateway_state"] == "stopped"
+        assert payload["stale_gateway_pid"] == 421
+        assert "belongs to HERMES_HOME" in payload["exit_reason"]
+
     def test_write_runtime_status_records_platform_failure(self, tmp_path, monkeypatch):
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
 

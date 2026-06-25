@@ -34,6 +34,7 @@ _LOCKS_DIRNAME = "gateway-locks"
 _IS_WINDOWS = sys.platform == "win32"
 _UNSET = object()
 _GATEWAY_LOCK_FILENAME = "gateway.lock"
+_ACTIVE_RUNTIME_STATES = frozenset({"starting", "running", "degraded", "draining"})
 _gateway_lock_handle = None
 # Windows byte-range locks are mandatory for other readers. Lock a byte well
 # past the JSON payload so runtime status / PID readers can still read the file
@@ -198,6 +199,20 @@ def _read_process_cmdline(pid: int) -> Optional[str]:
     return None
 
 
+def _read_process_env_var(pid: int, name: str) -> Optional[str]:
+    """Read one environment variable from a live process when available."""
+    environ_path = Path(f"/proc/{pid}/environ")
+    try:
+        raw = environ_path.read_bytes()
+    except (FileNotFoundError, PermissionError, OSError):
+        return None
+    prefix = f"{name}=".encode("utf-8")
+    for part in raw.split(b"\x00"):
+        if part.startswith(prefix):
+            return part[len(prefix):].decode("utf-8", errors="ignore")
+    return None
+
+
 def _looks_like_gateway_process(pid: int) -> bool:
     """Return True when the live PID still looks like the Hermes gateway."""
     cmdline = _read_process_cmdline(pid)
@@ -240,6 +255,7 @@ def _build_pid_record() -> dict:
         "kind": _GATEWAY_KIND,
         "argv": list(sys.argv),
         "start_time": _get_process_start_time(os.getpid()),
+        "hermes_home": str(get_hermes_home()),
     }
 
 
@@ -254,6 +270,61 @@ def _build_runtime_status_record() -> dict[str, Any]:
         "updated_at": _utc_now_iso(),
     })
     return payload
+
+
+def _is_stale_runtime_status(payload: dict[str, Any]) -> tuple[bool, Optional[str]]:
+    """Return whether a persisted gateway_state.json record is stale.
+
+    ``gateway_state.json`` is diagnostic state, not the runtime mutex. Still,
+    several status surfaces and agents read it as a health signal. If a process
+    crashes after writing ``gateway_state=running`` the stale PID can make those
+    surfaces believe a profile gateway is alive when it is not. Validate active
+    states against the recorded PID and downgrade dead/reused/non-gateway PIDs
+    to ``stopped`` on read.
+    """
+    state = payload.get("gateway_state")
+    if state not in _ACTIVE_RUNTIME_STATES:
+        return False, None
+
+    pid = _pid_from_record(payload)
+    if pid is None:
+        return True, "stale runtime state: missing pid"
+    if not _pid_exists(pid):
+        return True, f"stale runtime state: pid {pid} is not running"
+
+    recorded_start = payload.get("start_time")
+    current_start = _get_process_start_time(pid)
+    if recorded_start is not None and current_start is not None and current_start != recorded_start:
+        return True, f"stale runtime state: pid {pid} was reused"
+
+    expected_home = str(get_hermes_home())
+    recorded_home = payload.get("hermes_home")
+    if isinstance(recorded_home, str) and recorded_home and recorded_home != expected_home:
+        return True, f"stale runtime state: recorded HERMES_HOME {recorded_home} != {expected_home}"
+
+    live_home = _read_process_env_var(pid, "HERMES_HOME")
+    if live_home and live_home != expected_home:
+        return True, f"stale runtime state: pid {pid} belongs to HERMES_HOME {live_home}"
+
+    if not (_looks_like_gateway_process(pid) or _record_looks_like_gateway(payload)):
+        return True, f"stale runtime state: pid {pid} is not a Hermes gateway"
+
+    return False, None
+
+
+def _downgrade_stale_runtime_status(
+    payload: dict[str, Any],
+    reason: str,
+) -> dict[str, Any]:
+    downgraded = dict(payload)
+    stale_pid = _pid_from_record(payload)
+    downgraded["gateway_state"] = "stopped"
+    downgraded["exit_reason"] = reason
+    downgraded["active_agents"] = 0
+    downgraded["restart_requested"] = False
+    downgraded["stale_gateway_pid"] = stale_pid
+    downgraded["updated_at"] = _utc_now_iso()
+    return downgraded
 
 
 def _read_json_file(path: Path) -> Optional[dict[str, Any]]:
@@ -580,9 +651,27 @@ def write_runtime_status(
     _write_json_file(path, payload)
 
 
-def read_runtime_status() -> Optional[dict[str, Any]]:
+def read_runtime_status(*, cleanup_stale: bool = True) -> Optional[dict[str, Any]]:
     """Read the persisted gateway runtime health/status information."""
-    return _read_json_file(_get_runtime_status_path())
+    path = _get_runtime_status_path()
+    payload = _read_json_file(path)
+    if not payload:
+        return payload
+
+    stale, reason = _is_stale_runtime_status(payload)
+    if not stale:
+        return payload
+
+    downgraded = _downgrade_stale_runtime_status(
+        payload,
+        reason or "stale runtime state",
+    )
+    if cleanup_stale:
+        try:
+            _write_json_file(path, downgraded)
+        except OSError:
+            pass
+    return downgraded
 
 
 def remove_pid_file() -> None:

@@ -652,7 +652,8 @@ def kanban_board_create_handler(args: dict, **kwargs) -> str:
             "counts": counts,
             "message": (
                 f"Board '{meta.get('name') or title}' 已就绪（Hermes Kanban: {meta['slug']}）。"
-                " 任务会由 gateway dispatcher 自动认领。"
+                " 任务由当前 coordinator/default gateway 内置的 Kanban dispatcher 扫描并 spawn worker 子进程。"
+                " 不要启动 assignee profile 的 gateway；请用 swarm_task_poll 或 /swarm follow 监控。"
             ),
         }, ensure_ascii=False)
     except Exception as exc:
@@ -813,7 +814,12 @@ def kanban_task_create_handler(args: dict, **kwargs) -> str:
             "board": {"slug": meta["slug"], "source": "hermes_kanban"},
             "message": (
                 f"任务 '{title}' 已创建（ID: {task_id}，Hermes Kanban board: {meta['slug']}）。"
-                + (f" assignee={assignee}，gateway dispatcher 会自动认领。" if assignee else " 未指定 assignee，需先分配。")
+                + (
+                    f" assignee={assignee}，coordinator/default gateway 的 Kanban dispatcher 会在下一 tick spawn worker 子进程。"
+                    " 不要检查或启动 assignee profile gateway；请用 swarm_task_poll 或 /swarm follow 监控。"
+                    if assignee else
+                    " 未指定 assignee，需先分配。"
+                )
             ),
         }, ensure_ascii=False)
     except Exception as exc:
@@ -910,7 +916,10 @@ def kanban_task_assign_handler(args: dict, **kwargs) -> str:
             "success": True,
             "task": _official_task_to_dict(task),
             "board": {"slug": meta["slug"], "source": "hermes_kanban"},
-            "message": f"任务 {task_id} 已分配给 {assignee}，dispatcher 会在下一 tick 认领。",
+            "message": (
+                f"任务 {task_id} 已分配给 {assignee}。coordinator/default gateway 的 Kanban dispatcher"
+                " 会在下一 tick spawn worker 子进程；不要启动 assignee profile gateway。"
+            ),
         }, ensure_ascii=False)
     except Exception as exc:
         return json.dumps({"success": False, "error": f"分配 Hermes Kanban 任务失败: {exc}"}, ensure_ascii=False)
