@@ -3,7 +3,7 @@
 ARG BASE_IMAGE=localhost:6678/lex-hermes:latest
 FROM ${BASE_IMAGE}
 
-ENV HERMES_AUTO_GATEWAY=0
+ENV HERMES_AUTO_GATEWAY=1
 ENV HERMES_AUTO_GATEWAY_PROFILES=lex-master
 
 # ── Changed lexitool vendored modules ──
