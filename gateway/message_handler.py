@@ -44,6 +44,7 @@ from gateway.run_helpers import (
     _AGENT_PENDING_SENTINEL,
     _INTERRUPT_REASON_RESET,
     _INTERRUPT_REASON_STOP,
+    _format_gateway_process_notification,
     _home_target_env_var,
     _home_thread_env_var,
 )

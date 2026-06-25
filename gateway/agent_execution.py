@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
 
 from agent.i18n import t
 from hermes_cli.config import cfg_get
+from utils import is_truthy_value
 
 from gateway.config import Platform
 from gateway.platforms.base import (
@@ -37,7 +38,10 @@ logger = logging.getLogger(__name__)
 import gateway.run_helpers as _gw
 from gateway.run_helpers import (
     _INTERRUPT_REASON_TIMEOUT,
+    _last_transcript_timestamp,
     _reload_runtime_env_preserving_config_authority,
+    _send_or_update_status_coro,
+    _wrap_current_message_with_observed_context,
 )
 
 
