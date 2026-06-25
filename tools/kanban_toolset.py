@@ -259,6 +259,100 @@ def _resolve_project_path(args: dict, parent_agent=None) -> str | None:
     return None
 
 
+def _official_board_slug(project_path: str) -> str:
+    """Stable Hermes Kanban board slug for a legal project path."""
+    import hashlib
+    import re
+
+    name = Path(project_path).name.lower()
+    slug = re.sub(r"[^a-z0-9]+", "-", name).strip("-")
+    digest = hashlib.sha1(str(Path(project_path).resolve()).encode("utf-8")).hexdigest()[:8]
+    if slug:
+        slug = slug[:48].strip("-")
+        return f"legal-{slug}-{digest}"
+    return f"legal-project-{digest}"
+
+
+def _official_board(project_path: str, title: str = "") -> dict:
+    """Create/read the canonical Hermes Kanban board for a project."""
+    from hermes_cli import kanban_db as kb
+
+    slug = _official_board_slug(project_path)
+    return kb.create_board(
+        slug,
+        name=title or Path(project_path).name,
+        description=f"Legal swarm board for {project_path}",
+        default_workdir=str(Path(project_path).resolve()),
+    )
+
+
+def _official_task_to_dict(task) -> dict:
+    return {
+        "id": task.id,
+        "task_id": task.id,
+        "title": task.title,
+        "description": task.body or "",
+        "assignee": task.assignee,
+        "status": task.status,
+        "priority": task.priority,
+        "created_at": task.created_at,
+        "started_at": task.started_at,
+        "completed_at": task.completed_at,
+        "workspace_path": task.workspace_path,
+        "result": task.result,
+        "source": "hermes_kanban",
+    }
+
+
+def _parse_gates(gates_raw: Any) -> list[dict]:
+    gates = []
+    if gates_raw:
+        if isinstance(gates_raw, str):
+            gates = json.loads(gates_raw)
+        else:
+            gates = gates_raw
+    if not isinstance(gates, list):
+        raise ValueError("gates 必须是 JSON 数组。")
+    for g in gates:
+        if not isinstance(g, dict):
+            raise ValueError("gates 的每一项必须是对象。")
+        if g.get("type") not in VALID_GATE_TYPES:
+            raise ValueError(
+                f"无效的 gate 类型: {g.get('type')}。有效值: {', '.join(sorted(VALID_GATE_TYPES))}"
+            )
+    return gates
+
+
+def _map_legacy_status_filter(status: str | None) -> str | None:
+    if not status:
+        return None
+    mapping = {
+        "todo": "todo",
+        "in_progress": "running",
+        "in_review": "review",
+        "approved": "done",
+        "rejected": "blocked",
+        "done": "done",
+        "blocked": "blocked",
+        "ready": "ready",
+        "running": "running",
+        "review": "review",
+    }
+    return mapping.get(status, status)
+
+
+def _latest_official_progress(conn, kb, task_id: str) -> dict | None:
+    events = kb.list_events(conn, task_id)
+    for event in reversed(events):
+        if event.kind in {"heartbeat", "comment", "completed", "blocked", "claimed"}:
+            return {
+                "kind": event.kind,
+                "at": event.created_at,
+                "payload": event.payload,
+            }
+    return None
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # COORDINATOR TOOLS
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -526,6 +620,44 @@ def kanban_board_create_handler(args: dict, **kwargs) -> str:
         return json.dumps({"success": False, "error": "无法确定项目路径。请指定 project_path 或先使用 project_select 选择项目。"})
 
     title = args.get("title", "").strip() or Path(project_path).name
+    try:
+        meta = _official_board(project_path, title=title)
+        from hermes_cli import kanban_db as kb
+
+        conn = kb.connect(board=meta["slug"])
+        try:
+            counts = {}
+            for status in kb.VALID_STATUSES:
+                counts[status] = len(kb.list_tasks(conn, status=status))
+        finally:
+            conn.close()
+        return json.dumps({
+            "success": True,
+            "board": {
+                "id": meta["slug"],
+                "slug": meta["slug"],
+                "project_path": str(Path(project_path).resolve()),
+                "title": meta.get("name") or title,
+                "db_path": meta.get("db_path"),
+                "source": "hermes_kanban",
+            },
+            "columns": [
+                {"id": "todo", "name": "To Do"},
+                {"id": "ready", "name": "Ready"},
+                {"id": "running", "name": "Running"},
+                {"id": "review", "name": "Review"},
+                {"id": "blocked", "name": "Blocked"},
+                {"id": "done", "name": "Done"},
+            ],
+            "counts": counts,
+            "message": (
+                f"Board '{meta.get('name') or title}' 已就绪（Hermes Kanban: {meta['slug']}）。"
+                " 任务会由 gateway dispatcher 自动认领。"
+            ),
+        }, ensure_ascii=False)
+    except Exception as exc:
+        return json.dumps({"success": False, "error": f"创建 Hermes Kanban board 失败: {exc}"}, ensure_ascii=False)
+
     conn, board_id = _connect(project_path, title=title)
 
     # Update title if this was an existing board (ensure title stays current)
@@ -556,6 +688,38 @@ def kanban_board_info_handler(args: dict, **kwargs) -> str:
     project_path = _resolve_project_path(args, kwargs.get("parent_agent"))
     if not project_path:
         return json.dumps({"success": False, "error": "无法确定项目路径。"})
+
+    try:
+        meta = _official_board(project_path, title=Path(project_path).name)
+        from hermes_cli import kanban_db as kb
+
+        conn = kb.connect(board=meta["slug"])
+        try:
+            columns = []
+            for status in ["triage", "todo", "ready", "running", "review", "blocked", "done"]:
+                columns.append({
+                    "id": status,
+                    "name": status,
+                    "task_count": len(kb.list_tasks(conn, status=status)),
+                })
+            total_tasks = len(kb.list_tasks(conn))
+        finally:
+            conn.close()
+        return json.dumps({
+            "success": True,
+            "board": {
+                "id": meta["slug"],
+                "slug": meta["slug"],
+                "project_path": str(Path(project_path).resolve()),
+                "title": meta.get("name"),
+                "db_path": meta.get("db_path"),
+                "source": "hermes_kanban",
+            },
+            "columns": columns,
+            "total_tasks": total_tasks,
+        }, ensure_ascii=False)
+    except Exception as exc:
+        return json.dumps({"success": False, "error": f"读取 Hermes Kanban board 失败: {exc}"}, ensure_ascii=False)
 
     conn, board_id = _connect(project_path)
     row = conn.execute("SELECT * FROM board WHERE id = ?", (board_id,)).fetchone()
@@ -595,6 +759,65 @@ def kanban_task_create_handler(args: dict, **kwargs) -> str:
     project_path = _resolve_project_path(args, kwargs.get("parent_agent"))
     if not project_path:
         return json.dumps({"success": False, "error": "无法确定项目路径。"})
+
+    try:
+        from hermes_cli import kanban_db as kb
+
+        meta = _official_board(project_path, title=Path(project_path).name)
+        gates = _parse_gates(args.get("gates", ""))
+        assignee = args.get("assignee", "").strip() or None
+        if not assignee and gates:
+            assignee = (gates[0].get("target_pool") or "").strip() or None
+
+        priority = int(args.get("priority", 0) or 0)
+        description = args.get("description", "").strip()
+        gates_text = ""
+        if gates:
+            gates_text = (
+                "\n\n## Review / gate hints\n"
+                + json.dumps(gates, ensure_ascii=False, indent=2)
+                + "\n\nThese gates are coordination hints. Complete this assigned task with the canonical kanban tools (`kanban_complete` or `kanban_block`)."
+            )
+        body = (
+            description
+            + gates_text
+            + f"\n\n## Project path\n{Path(project_path).resolve()}\n"
+        ).strip()
+
+        session_id = os.environ.get("HERMES_SESSION_ID", "") or None
+        parent_agent = kwargs.get("parent_agent")
+        if not session_id and parent_agent is not None:
+            session_id = getattr(parent_agent, "session_id", None)
+
+        conn = kb.connect(board=meta["slug"])
+        try:
+            task_id = kb.create_task(
+                conn,
+                title=title,
+                body=body,
+                assignee=assignee,
+                created_by="swarm_task_create",
+                workspace_kind="dir",
+                workspace_path=str(Path(project_path).resolve()),
+                priority=priority,
+                session_id=session_id,
+                board=meta["slug"],
+            )
+            task = kb.get_task(conn, task_id)
+        finally:
+            conn.close()
+
+        return json.dumps({
+            "success": True,
+            "task": _official_task_to_dict(task) if task else {"id": task_id, "task_id": task_id},
+            "board": {"slug": meta["slug"], "source": "hermes_kanban"},
+            "message": (
+                f"任务 '{title}' 已创建（ID: {task_id}，Hermes Kanban board: {meta['slug']}）。"
+                + (f" assignee={assignee}，gateway dispatcher 会自动认领。" if assignee else " 未指定 assignee，需先分配。")
+            ),
+        }, ensure_ascii=False)
+    except Exception as exc:
+        return json.dumps({"success": False, "error": f"创建 Hermes Kanban 任务失败: {exc}"}, ensure_ascii=False)
 
     conn, board_id = _connect(project_path)
 
@@ -670,6 +893,27 @@ def kanban_task_assign_handler(args: dict, **kwargs) -> str:
     project_path = _resolve_project_path(args, kwargs.get("parent_agent"))
     if not project_path:
         return json.dumps({"success": False, "error": "无法确定项目路径。"})
+
+    try:
+        from hermes_cli import kanban_db as kb
+
+        meta = _official_board(project_path, title=Path(project_path).name)
+        conn = kb.connect(board=meta["slug"])
+        try:
+            ok = kb.assign_task(conn, task_id, assignee)
+            task = kb.get_task(conn, task_id)
+        finally:
+            conn.close()
+        if not ok or not task:
+            return json.dumps({"success": False, "error": f"任务未找到或不可分配: {task_id}"}, ensure_ascii=False)
+        return json.dumps({
+            "success": True,
+            "task": _official_task_to_dict(task),
+            "board": {"slug": meta["slug"], "source": "hermes_kanban"},
+            "message": f"任务 {task_id} 已分配给 {assignee}，dispatcher 会在下一 tick 认领。",
+        }, ensure_ascii=False)
+    except Exception as exc:
+        return json.dumps({"success": False, "error": f"分配 Hermes Kanban 任务失败: {exc}"}, ensure_ascii=False)
 
     conn, board_id = _connect(project_path)
     row = conn.execute("SELECT * FROM tasks WHERE id = ? AND board_id = ?", (task_id, board_id)).fetchone()
@@ -845,6 +1089,46 @@ def kanban_board_status_handler(args: dict, **kwargs) -> str:
     if not project_path:
         return json.dumps({"success": False, "error": "无法确定项目路径。"})
 
+    try:
+        from hermes_cli import kanban_db as kb
+
+        meta = _official_board(project_path, title=Path(project_path).name)
+        status_filter = _map_legacy_status_filter(args.get("status_filter", "").strip() or None)
+        assignee_filter = args.get("assignee_filter", "").strip() or None
+        conn = kb.connect(board=meta["slug"])
+        try:
+            columns = []
+            statuses = ["triage", "todo", "ready", "running", "review", "blocked", "done"]
+            for status in statuses:
+                if status_filter and status != status_filter:
+                    continue
+                tasks = kb.list_tasks(
+                    conn,
+                    status=status,
+                    assignee=assignee_filter,
+                )
+                columns.append({
+                    "id": status,
+                    "name": status,
+                    "tasks": [_official_task_to_dict(t) for t in tasks],
+                    "task_count": len(tasks),
+                })
+        finally:
+            conn.close()
+        return json.dumps({
+            "success": True,
+            "board": {
+                "id": meta["slug"],
+                "slug": meta["slug"],
+                "project_path": str(Path(project_path).resolve()),
+                "title": meta.get("name"),
+                "source": "hermes_kanban",
+            },
+            "columns": columns,
+        }, ensure_ascii=False)
+    except Exception as exc:
+        return json.dumps({"success": False, "error": f"读取 Hermes Kanban 状态失败: {exc}"}, ensure_ascii=False)
+
     conn, board_id = _connect(project_path)
     board_row = conn.execute("SELECT * FROM board WHERE id = ?", (board_id,)).fetchone()
 
@@ -970,6 +1254,44 @@ def kanban_task_poll_handler(args: dict, **kwargs) -> str:
     if not project_path:
         return json.dumps({"success": False, "error": "无法确定项目路径。"})
 
+    try:
+        from hermes_cli import kanban_db as kb
+
+        meta = _official_board(project_path, title=Path(project_path).name)
+        conn = kb.connect(board=meta["slug"])
+        tasks = []
+        status_counts = {"todo": 0, "ready": 0, "running": 0, "review": 0, "done": 0, "blocked": 0}
+        try:
+            for tid in task_ids:
+                task = kb.get_task(conn, tid)
+                if not task:
+                    tasks.append({"task_id": tid, "error": "not found"})
+                    continue
+                item = _official_task_to_dict(task)
+                item["latest_progress"] = _latest_official_progress(conn, kb, tid)
+                tasks.append(item)
+                if task.status in status_counts:
+                    status_counts[task.status] += 1
+        finally:
+            conn.close()
+        return json.dumps({
+            "success": True,
+            "board": {"slug": meta["slug"], "source": "hermes_kanban"},
+            "tasks": tasks,
+            "summary": {
+                "total": len(tasks),
+                "todo": status_counts["todo"],
+                "ready": status_counts["ready"],
+                "in_progress": status_counts["running"],
+                "running": status_counts["running"],
+                "review": status_counts["review"],
+                "done": status_counts["done"],
+                "blocked": status_counts["blocked"],
+            },
+        }, ensure_ascii=False)
+    except Exception as exc:
+        return json.dumps({"success": False, "error": f"查询 Hermes Kanban 任务失败: {exc}"}, ensure_ascii=False)
+
     conn, board_id = _connect(project_path)
     tasks = []
     summary = {"total": 0, "todo": 0, "in_progress": 0, "in_review": 0, "done": 0, "blocked": 0}
@@ -1044,6 +1366,54 @@ def kanban_task_collect_handler(args: dict, **kwargs) -> str:
     project_path = _resolve_project_path(args, kwargs.get("parent_agent"))
     if not project_path:
         return json.dumps({"success": False, "error": "无法确定项目路径。"})
+
+    try:
+        from hermes_cli import kanban_db as kb
+
+        meta = _official_board(project_path, title=Path(project_path).name)
+        conn = kb.connect(board=meta["slug"])
+        try:
+            task = kb.get_task(conn, task_id)
+            if not task:
+                return json.dumps({"success": False, "error": f"任务未找到: {task_id}"}, ensure_ascii=False)
+            events = kb.list_events(conn, task_id)
+            comments = kb.list_comments(conn, task_id)
+        finally:
+            conn.close()
+
+        terminal = task.status in {"done", "blocked", "archived"}
+        event_summary = [
+            {"kind": e.kind, "at": e.created_at, "payload": e.payload}
+            for e in events
+            if e.kind in {"claimed", "completed", "blocked", "comment", "heartbeat", "crashed", "timed_out"}
+        ]
+        result = {
+            "success": True,
+            "board": {"slug": meta["slug"], "source": "hermes_kanban"},
+            "task_id": task_id,
+            "status": task.status,
+            "worker": task.assignee or "unknown",
+            "summary": task.result or (
+                f"Task completed with status '{task.status}'." if terminal else f"Task is in progress (status: {task.status})."
+            ),
+            "events_summary": event_summary,
+            "output": {
+                "comments": [
+                    {"author": c.author, "body": c.body, "at": c.created_at}
+                    for c in comments
+                ],
+                "files_touched": [],
+                "handoff_notes": [],
+            },
+        }
+        if not terminal:
+            result["warning"] = "task not yet terminal — output may be incomplete"
+            result["current_status"] = task.status
+        if include_events:
+            result["events"] = event_summary
+        return json.dumps(result, ensure_ascii=False)
+    except Exception as exc:
+        return json.dumps({"success": False, "error": f"收集 Hermes Kanban 任务失败: {exc}"}, ensure_ascii=False)
 
     conn, board_id = _connect(project_path)
     row = conn.execute(

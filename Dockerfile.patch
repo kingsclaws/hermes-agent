@@ -41,6 +41,7 @@ RUN set -e; \
     cp toolsets.py /opt/hermes/toolsets.py; \
     cp hermes_cli/tools_config.py /opt/hermes/hermes_cli/tools_config.py; \
     cp hermes_cli/container_boot.py /opt/hermes/hermes_cli/container_boot.py; \
+    cp hermes_cli/service_manager.py /opt/hermes/hermes_cli/service_manager.py; \
     cp hermes_cli/project_commands.py /opt/hermes/hermes_cli/project_commands.py; \
     cp gateway/agent_cache.py /opt/hermes/gateway/agent_cache.py; \
     cp gateway/agent_execution.py /opt/hermes/gateway/agent_execution.py; \
@@ -53,6 +54,7 @@ RUN set -e; \
     cp toolsets.py /opt/lex-hermes/toolsets.py; \
     cp hermes_cli/tools_config.py /opt/lex-hermes/hermes_cli/tools_config.py; \
     cp hermes_cli/container_boot.py /opt/lex-hermes/hermes_cli/container_boot.py; \
+    cp hermes_cli/service_manager.py /opt/lex-hermes/hermes_cli/service_manager.py; \
     cp hermes_cli/project_commands.py /opt/lex-hermes/hermes_cli/project_commands.py; \
     cp gateway/agent_cache.py /opt/lex-hermes/gateway/agent_cache.py; \
     cp gateway/agent_execution.py /opt/lex-hermes/gateway/agent_execution.py; \
@@ -75,6 +77,7 @@ RUN set -e; \
     find /opt/lex-hermes/tools/__pycache__ -name '*.pyc' -delete 2>/dev/null; \
     chmod 644 \
       /opt/hermes/hermes_cli/container_boot.py /opt/lex-hermes/hermes_cli/container_boot.py \
+      /opt/hermes/hermes_cli/service_manager.py /opt/lex-hermes/hermes_cli/service_manager.py \
       /opt/hermes/hermes_cli/project_commands.py /opt/lex-hermes/hermes_cli/project_commands.py \
       /opt/hermes/tools/project_management_tool.py /opt/lex-hermes/tools/project_management_tool.py \
       /opt/hermes/gateway/agent_cache.py /opt/lex-hermes/gateway/agent_cache.py \
@@ -90,6 +93,7 @@ RUN set -e; \
       tools/legal_orchestration_tool.py \
       hermes_cli/tools_config.py \
       hermes_cli/container_boot.py \
+      hermes_cli/service_manager.py \
       hermes_cli/project_commands.py \
       gateway/agent_cache.py \
       gateway/agent_execution.py \

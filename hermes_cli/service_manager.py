@@ -563,9 +563,11 @@ class S6ServiceManager:
         """Generate the run script for a profile-gateway s6 service.
 
         The script:
-          1. Sources HERMES_HOME (and any extra env) via with-contenv —
-             so e.g. ``-e HERMES_HOME=/data/hermes`` is honored at run
-             time, not Python-substituted at registration time (OQ8-C).
+          1. Sources the root HERMES_HOME via with-contenv, then pins named
+             profile services to ``$HERMES_HOME/profiles/<profile>`` before
+             Python imports any Hermes modules. This keeps gateway locks,
+             config, sessions, and logs profile-scoped even on paths that
+             inspect HERMES_HOME before argparse's ``-p`` handling completes.
           2. Uses ``HERMES_RUN_AS_ROOT`` to decide whether to keep root
              privileges or reset ``HOME`` to ``/opt/data`` before dropping
              to the unprivileged gateway process.
@@ -616,6 +618,14 @@ class S6ServiceManager:
             "cd /opt/data",
             ". /opt/hermes/.venv/bin/activate",
         ]
+        if profile == "default":
+            lines.append('export HERMES_HOME="${HERMES_HOME:-/opt/data}"')
+        else:
+            quoted_profile = shlex.quote(profile)
+            lines.extend([
+                'root_hermes_home="${HERMES_HOME:-/opt/data}"',
+                f'export HERMES_HOME="$root_hermes_home/profiles/{quoted_profile}"',
+            ])
         for k, v in sorted(extra_env.items()):
             lines.append(f"export {k}={shlex.quote(v)}")
         # Sentinel for the supervised-child path. Prevents recursive
