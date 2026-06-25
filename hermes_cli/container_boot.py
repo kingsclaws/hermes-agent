@@ -321,6 +321,43 @@ def _write_reconcile_log(
             )
 
 
+def _rescan_s6_services(scandir: Path) -> None:
+    """Ask s6-svscan to pick up dynamically-created profile services.
+
+    During container init, the control FIFO may or may not be ready depending
+    on s6-overlay timing. Failure is non-fatal: static services still start,
+    and operators can rescan manually, but successful rescan makes gateway
+    autostart deterministic after profile reconciliation.
+    """
+    import subprocess
+
+    candidates = (
+        Path("/command/s6-svscanctl"),
+        Path("/package/admin/s6/command/s6-svscanctl"),
+    )
+    ctl = next((p for p in candidates if p.exists()), None)
+    if ctl is None:
+        log.warning("s6-svscanctl not found; profile gateway services need manual rescan")
+        return
+    try:
+        result = subprocess.run(
+            [str(ctl), "-a", str(scandir)],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except Exception as exc:
+        log.warning("could not rescan %s: %s", scandir, exc)
+        return
+    if result.returncode != 0:
+        log.warning(
+            "s6-svscanctl failed for %s: %s",
+            scandir,
+            (result.stderr or result.stdout or "").strip(),
+        )
+
+
 # 256 KiB soft cap on container-boot.log; rotated to .1 when crossed.
 # At ~80 B per reconcile-action line this is ~3000 lines, or about a
 # year of daily reboots on a 5-profile container. Two files = ~512 KiB
@@ -348,6 +385,7 @@ def main() -> int:
             f"reconcile: profile={a.profile} "
             f"prior_state={a.prior_state} action={a.action}"
         )
+    _rescan_s6_services(scandir)
     return 0
 
 
