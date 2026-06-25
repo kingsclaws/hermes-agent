@@ -1,0 +1,11 @@
+{
+  "name": "hermes-agent",
+  "client": "",
+  "goal": "",
+  "cwd": "/opt/hermes-agent",
+  "management_dir": "/opt/hermes-agent",
+  "created": "2026-06-15T00:36:14Z",
+  "toolsets": [
+    "lexitool"
+  ]
+}

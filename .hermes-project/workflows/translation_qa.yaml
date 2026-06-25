@@ -1,0 +1,31 @@
+id: translation_qa
+version: 1
+description: Bilingual legal translation quality review.
+nodes:
+- id: segment
+  kind: analysis
+  profile: lex-coordinator
+  requires: []
+  output_required:
+  - status
+  - evidence
+- id: translation_review
+  kind: worker
+  profile: lex-reviewer-translation
+  requires:
+  - segment
+  output_required:
+  - status
+  - findings
+  - evidence
+- id: scorecard
+  kind: gate
+  profile: lex-coordinator
+  requires:
+  - translation_review
+  checks:
+  - review_plan
+scorecard:
+  required:
+  - review_plan
+  block_on_invalid_handoff: true

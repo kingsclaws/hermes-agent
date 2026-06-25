@@ -1,0 +1,32 @@
+id: template_fill
+version: 1
+description: Template audit, fill, cleanup, and delivery gate.
+nodes:
+- id: audit
+  kind: tool
+  tool: lex_template_audit
+  requires: []
+  output_required:
+  - status
+  - evidence
+- id: fill
+  kind: tool
+  tool: lex_template_fill
+  requires:
+  - audit
+  output_required:
+  - status
+  - modified_files
+  - evidence
+- id: scorecard
+  kind: gate
+  profile: lex-coordinator
+  requires:
+  - fill
+  checks:
+  - edit_verification
+scorecard:
+  required:
+  - edit_verification
+  block_on_failed_verification: true
+  block_on_invalid_handoff: true

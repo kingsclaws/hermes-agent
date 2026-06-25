@@ -1,0 +1,53 @@
+id: full_review
+version: 1
+description: Whole-document review with content, format, xref, and delivery gates.
+nodes:
+- id: plan
+  kind: analysis
+  profile: lex-coordinator
+  requires: []
+  output_required:
+  - status
+  - evidence
+- id: content
+  kind: worker
+  profile: lex-reviewer-content
+  requires:
+  - plan
+  output_required:
+  - status
+  - findings
+  - evidence
+- id: format
+  kind: worker
+  profile: lex-reviewer-format
+  requires:
+  - plan
+  output_required:
+  - status
+  - findings
+  - evidence
+- id: xref
+  kind: worker
+  profile: lex-reviewer-xref
+  requires:
+  - plan
+  output_required:
+  - status
+  - findings
+  - evidence
+- id: scorecard
+  kind: gate
+  profile: lex-coordinator
+  requires:
+  - content
+  - format
+  - xref
+  checks:
+  - review_plan
+  - edit_verification
+scorecard:
+  required:
+  - review_plan
+  block_on_failed_verification: true
+  block_on_invalid_handoff: true

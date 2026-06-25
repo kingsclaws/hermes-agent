@@ -1,0 +1,148 @@
+---
+name: lexitool-operations
+description: "Use native Lex tools for legal document operations."
+version: 1.0.0
+author: KingsClaws; Hermes Agent
+license: MIT
+platforms: [linux]
+metadata:
+  hermes:
+    tags: [Legal, DOCX, OCR, Lexitool, Track-Changes]
+    category: legal
+---
+
+# Lexitool Operations Skill
+
+This skill defines how Lex Hermes handles legal document operations. It does not replace the native tools; it tells you which native tool to call and when. Do not turn these tools into shell commands.
+
+## When to Use
+
+Use this skill when working with legal `.docx` documents, local PDFs, scanned legal materials, due-diligence files, syndicated-loan documents, template revisions, Track Changes, signing pages, tables, or cross-references.
+
+## Prerequisites
+
+The session should expose native Lex Hermes tools:
+
+`lex_ocr`, `lex_project_init`, `lex_read`, `lex_stats`, `lex_edit`, `lex_ref`, `lex_diff`, `lex_deliver`, `lex_gate_check`, `lex_translation_review`, `legal_orchestrate`, `legal_workflow`.
+
+If these tools are missing, state that the native Lex toolset is unavailable in this session. Do not silently fall back to `terminal` or `execute_code`.
+
+## How to Run
+
+Always call native tools directly:
+
+```text
+lex_ocr(file_path="/workingfile/project/营业执照.pdf", language="ch")
+lex_read(path="/workingfile/project/D01.docx", mode="structure")
+lex_translation_review(bilingual_path="/workingfile/project/bilingual.docx", sop_path="/workingfile/project/翻译校对SOP.md", instructions="Chinese controls; review clauses 9-16")
+lex_edit(path="/workingfile/project/D01.docx", op="replace", target="§29", new_text="...", tc=true)
+lex_ref(path="/workingfile/project/D01.docx", op="xref_audit")
+```
+
+Never run native Lex tools as terminal commands or direct Python imports.
+
+## Quick Reference
+
+`lex_ocr`: OCR for local legal PDFs and scans. Use before `vision_analyze`, `pymupdf`, `marker-pdf`, or `tesseract`.
+
+`lex_project_init`: Scan a project directory, extract `.docx` and `.pdf` content, and create project context.
+
+`lex_read`: Read `.docx` content. Use `mode="structure"` for headings/TOC; use `paras=[...]` for targeted reading.
+
+`lex_stats`: Get document stats, Track Changes count, fonts, sections, and diagnostics.
+
+`lex_edit`: Atomic `.docx` edits. Use `tc=true` and author `JT` unless Master specifies otherwise.
+
+`lex_ref`: Bookmarks, fields, cross-references, hardcoded reference conversion, and xref audit.
+
+`lex_diff`: Professional legal redline.
+
+`lex_deliver`: Delivery package and reports.
+
+`lex_gate_check`: Pre-delivery quality gates.
+
+`lex_translation_review`: Native bilingual legal translation QA. Use this before generic proofread for Chinese-English translation checks.
+
+`legal_orchestrate`: Multi-agent legal workflow orchestration for complex tasks.
+
+`legal_workflow`: Create visible workflow plans, including `translation_quality_review` for node-based review orchestration.
+
+## Procedure
+
+For project intake:
+
+1. Use `project_select` / `project_status` if project context exists.
+2. Search the project directory for source files.
+3. Use `lex_ocr` for PDFs and scanned materials.
+4. Use `lex_read` for DOCX files.
+5. Use `lex_project_init` for directory-level indexing.
+6. Summarize parties, documents, approvals, collateral, missing materials, risks, and next steps.
+
+For DOCX revision:
+
+1. Copy the template or source document first if editing creates a deliverable.
+2. **Run convention analysis** before editing an existing document:
+   - `lex_ref(path, op="term_format_audit")` — extract defined terms with their exact formatting (bold/italic/underline/caps/font)
+   - `lex_read(mode="structure")` — understand document structure and numbering scheme
+   - Sample-read 3-4 paragraphs of the same clause type with `lex_read(paras=[...], show_format=true)`
+   - Identify: defined term formatting convention, cross-reference convention (第X条 vs Section X vs Clause X), numbering scheme, drafting voice (shall/may vs 应当/可以)
+3. Use targeted `lex_read(paras=[...])` before each edit.
+4. Use `lex_edit` with Track Changes for atomic modifications.
+5. Use `lex_ref` when cross-references are affected.
+6. Execute the "Content Integration Verification" checklist:
+   - Defined term format matches host convention
+   - New terms exist in host's definition clause
+   - Cross-reference convention matches host
+   - Drafting voice and sentence structure consistent
+   - New clause reads as organically integrated
+7. Verify with `lex_read`, `lex_stats`, and relevant audits.
+
+For complex legal workflows:
+
+1. Use `legal_orchestrate` when work involves multiple documents, multiple issue types, or edit-plus-review.
+2. Use specialized reviewers for content, format, xref, TS consistency, and translation.
+3. Keep orchestration visible: state what was delegated, to whom, and what output is expected.
+
+For Chinese-English translation QA:
+
+1. Use `legal_workflow(action="create_plan", workflow_type="translation_quality_review", ...)` when the user wants a visible workflow plan.
+2. Use `lex_translation_review` for execution. If the Chinese and English are in one DOCX, pass `bilingual_path`; if separate, pass `source_path` and `translation_path`.
+3. Treat the built-in SOP as a general legal translation QA baseline, not as a project-specific rulebook.
+4. If the project has its own SOP, pass `sop_path`; if the user gives task-specific exceptions, pass `sop_overrides`; if the project has special terminology, pass `domain_terms`.
+5. Require reviewers to report structured findings by paragraph, issue type, severity, source text, translation text, and suggested wording.
+6. Do not use `lex_edit` until findings are aggregated and the user approves the specific wording changes.
+
+For workflow learning:
+
+1. Leave `enable_learning=true` for legal workflows unless Master asks to disable learning.
+2. Low-risk format, terminology, cross-reference, and schedule/table findings may auto-merge into global learned rules.
+3. Substantive legal drafting, TS-consistency, and translation-meaning findings are candidates only; use `legal_workflow(action="approve_learning_rule", rule_id="...")` after human review.
+4. Use `legal_workflow(action="list_learning_rules", workflow_type="contract_revision")` for drafting/revision rules.
+5. Use `legal_workflow(action="list_learning_rules", workflow_type="translation_quality_review")` for translation rules.
+6. Use `legal_workflow(action="export_learning_sop", workflow_type="...")` to refresh the Markdown SOP export.
+
+## Pitfalls
+
+Do not use `terminal` or `execute_code` to call `lexitool` Python APIs when native `lex_*` tools exist.
+
+Do not use `vision_analyze` on PDFs. It accepts real image files only.
+
+Do not install `pymupdf`, `marker-pdf`, or OCR packages before trying `lex_ocr`.
+
+Do not create a new document from scratch when a legal template exists. Copy and modify the template.
+
+Do not treat `[ref]` in `lex_read` as broken. Word may resolve it correctly. Use `lex_ref` audit.
+
+Do not convert hardcoded references by guessing. Match exact clause number and heading bookmark.
+
+Do not replace an entire paragraph containing a table marker; use table-specific operations or read context first.
+
+## Verification
+
+After OCR, confirm `char_count`, source file, API used, and whether output appears complete.
+
+After edits, read the affected paragraphs/tables and report Track Changes status.
+
+After cross-reference changes, run xref audit.
+
+Before delivery, run `lex_gate_check` and provide remaining risks.

@@ -1,0 +1,51 @@
+id: contract_revision
+version: 1
+description: Bounded legal document revision with machine gates.
+nodes:
+- id: profile
+  kind: analysis
+  profile: lex-coordinator
+  requires: []
+  output_required:
+  - status
+  - evidence
+  - guards
+- id: revise
+  kind: worker
+  profile: lex-drafter
+  requires:
+  - profile
+  output_required:
+  - status
+  - modified_files
+  - modified_locations
+  - guards
+  - evidence
+- id: review
+  kind: fanout
+  profiles:
+  - lex-reviewer-content
+  - lex-reviewer-format
+  - lex-reviewer-xref
+  requires:
+  - revise
+  output_required:
+  - status
+  - findings
+  - evidence
+- id: scorecard
+  kind: gate
+  profile: lex-coordinator
+  requires:
+  - review
+  checks:
+  - convention_profile
+  - revision_guard
+  - edit_verification
+  - review_plan
+scorecard:
+  required:
+  - convention_profile
+  - edit_verification
+  block_on_failed_verification: true
+  block_on_invalid_handoff: true

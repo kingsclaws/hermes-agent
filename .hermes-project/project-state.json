@@ -1,0 +1,16 @@
+{
+  "project_name": "hermes-agent",
+  "current_phase": "init",
+  "phase_history": [
+    {
+      "phase": "init",
+      "since": "2026-06-15T00:36:14Z",
+      "note": "Project initialised"
+    }
+  ],
+  "last_gate_check": null,
+  "key_findings": [],
+  "active_documents": [],
+  "decisions": [],
+  "updated_at": "2026-06-15T00:36:14Z"
+}

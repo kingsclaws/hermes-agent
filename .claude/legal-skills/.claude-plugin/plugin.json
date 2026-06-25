@@ -1,0 +1,10 @@
+{
+  "name": "legal-skills",
+  "description": "Legal document drafting, proofreading, and cross-reference management skills using lex-docx CLI for Chinese (NAFMII) and English (APLMA/LMA) contracts.",
+  "version": "1.0.0",
+  "author": {
+    "name": "KingsClaws; Hermes Agent"
+  },
+  "license": "MIT",
+  "keywords": ["legal", "docx", "contract", "proofread", "cross-reference", "drafting"]
+}
