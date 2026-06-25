@@ -26,6 +26,7 @@ from gateway.platforms.base import (
     BasePlatformAdapter,
     EphemeralReply,
     MessageEvent,
+    MessageType,
     merge_pending_message_event,
 )
 from gateway.session import (

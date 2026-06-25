@@ -33,6 +33,7 @@ from gateway.platforms.base import (
     BasePlatformAdapter,
     EphemeralReply,
     MessageEvent,
+    MessageType,
 )
 from gateway.session import SessionSource, SessionContext
 
