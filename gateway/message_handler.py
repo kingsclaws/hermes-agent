@@ -1208,6 +1208,9 @@ class MessageHandlerMixin:
         if canonical == "kanban":
             return await self._handle_kanban_command(event)
 
+        if canonical == "swarm":
+            return await self._handle_swarm_command(event)
+
         if canonical == "retry":
             return await self._handle_retry_command(event)
         

@@ -2852,3 +2852,228 @@ def run_slash(rest: str) -> str:
     if err and out:
         return f"{out}\n{err}"
     return err if err else (out or "(no output)")
+
+
+_SLASH_SWARM_HELP = """\
+Swarm activity
+
+  /swarm                         Active workers across all non-empty boards
+  /swarm status [--board <slug>]  Same, optionally scoped to one board
+  /swarm logs <task-id>           Worker log tail for one task
+  /swarm follow <task-id>         Status + recent events + worker log tail
+
+For full Kanban controls use `/kanban ...`.
+"""
+
+
+def _swarm_event_line(event) -> str:
+    payload = ""
+    if event.payload:
+        try:
+            payload = " " + json.dumps(event.payload, ensure_ascii=False)
+        except Exception:
+            payload = f" {event.payload}"
+    return f"[{_fmt_ts(event.created_at)}] {event.kind}{payload}"
+
+
+def _swarm_task_line(task, *, latest_summary: str | None = None, latest_event=None) -> str:
+    icon = _STATUS_ICONS.get(task.status, "?")
+    pid = f" pid={task.worker_pid}" if getattr(task, "worker_pid", None) else ""
+    line = f"{icon} {task.id:<10} {task.status:<9} @{task.assignee or '-'}{pid}  {task.title}"
+    details: list[str] = []
+    if latest_summary:
+        details.append(f"summary: {latest_summary.splitlines()[0][:140]}")
+    elif latest_event is not None:
+        details.append(f"event: {latest_event.kind} @ {_fmt_ts(latest_event.created_at)}")
+    if task.last_failure_error:
+        details.append(f"error: {task.last_failure_error.splitlines()[0][:140]}")
+    if details:
+        line += "\n    " + "\n    ".join(details)
+    return line
+
+
+def _swarm_status(*, board: str | None = None, include_done: bool = False, as_json: bool = False) -> str:
+    board_entries = [kb.read_board_metadata(board)] if board else kb.list_boards(include_archived=False)
+    statuses = ["running", "ready", "review", "blocked"]
+    if include_done:
+        statuses.append("done")
+
+    payload: list[dict[str, Any]] = []
+    lines: list[str] = []
+    for meta in board_entries:
+        slug = meta.get("slug") or kb.DEFAULT_BOARD
+        try:
+            with kb.connect_closing(board=slug) as conn:
+                board_tasks = []
+                for status in statuses:
+                    tasks = kb.list_tasks(conn, status=status, limit=20)
+                    for task in tasks:
+                        events = kb.list_events(conn, task.id)
+                        latest_event = events[-1] if events else None
+                        latest_summary = kb.latest_summary(conn, task.id)
+                        board_tasks.append((task, latest_summary, latest_event))
+        except Exception:
+            continue
+        if not board_tasks:
+            continue
+
+        if as_json:
+            payload.append({
+                "board": slug,
+                "name": meta.get("name") or slug,
+                "tasks": [
+                    {
+                        "id": task.id,
+                        "title": task.title,
+                        "status": task.status,
+                        "assignee": task.assignee,
+                        "worker_pid": task.worker_pid,
+                        "latest_summary": latest_summary,
+                        "latest_event": (
+                            {
+                                "kind": latest_event.kind,
+                                "payload": latest_event.payload,
+                                "created_at": latest_event.created_at,
+                            }
+                            if latest_event else None
+                        ),
+                    }
+                    for task, latest_summary, latest_event in board_tasks
+                ],
+            })
+            continue
+
+        lines.append(f"Board: {slug} — {meta.get('name') or slug}")
+        for task, latest_summary, latest_event in board_tasks:
+            lines.append(_swarm_task_line(task, latest_summary=latest_summary, latest_event=latest_event))
+        lines.append("")
+
+    if as_json:
+        return json.dumps(payload, indent=2, ensure_ascii=False)
+    if not lines:
+        scope = f" on board {board}" if board else ""
+        return f"(no active swarm tasks{scope}; use `/swarm status --done` to include completed tasks)"
+    lines.append("Commands: /swarm logs <task-id> · /swarm follow <task-id> · /kanban show <task-id>")
+    return "\n".join(lines).rstrip()
+
+
+def _find_task_board(task_id: str) -> str | None:
+    for meta in kb.list_boards(include_archived=False):
+        slug = meta.get("slug") or kb.DEFAULT_BOARD
+        try:
+            with kb.connect_closing(board=slug) as conn:
+                if kb.get_task(conn, task_id):
+                    return slug
+        except Exception:
+            continue
+    return None
+
+
+def _swarm_follow(task_id: str, *, tail_bytes: int = 6000) -> str:
+    board = _find_task_board(task_id)
+    if not board:
+        return f"no such task: {task_id}"
+    with kb.connect_closing(board=board) as conn:
+        task = kb.get_task(conn, task_id)
+        events = kb.list_events(conn, task_id)[-12:]
+        runs = kb.list_runs(conn, task_id)[-5:]
+        latest_summary = kb.latest_summary(conn, task_id)
+    if not task:
+        return f"no such task: {task_id}"
+
+    lines = [
+        f"Task {task.id} on {board}",
+        _swarm_task_line(task, latest_summary=latest_summary, latest_event=(events[-1] if events else None)),
+    ]
+    if runs:
+        lines.append("")
+        lines.append("Runs:")
+        for run in runs:
+            elapsed = max(0, (run.ended_at or int(time.time())) - run.started_at)
+            outcome = run.outcome or run.status or "active"
+            pid = f" pid={run.worker_pid}" if run.worker_pid else ""
+            lines.append(f"  #{run.id:<3} {outcome:<12} @{run.profile or '-'} {elapsed}s{pid}")
+            if run.summary:
+                lines.append(f"      → {run.summary.splitlines()[0][:160]}")
+            if run.error:
+                lines.append(f"      ! {run.error.splitlines()[0][:160]}")
+    if events:
+        lines.append("")
+        lines.append("Recent events:")
+        lines.extend(f"  {_swarm_event_line(e)}" for e in events)
+
+    log = kb.read_worker_log(task_id, tail_bytes=tail_bytes, board=board)
+    if log:
+        lines.append("")
+        lines.append(f"Worker log tail ({min(len(log), tail_bytes)} bytes):")
+        lines.append(log.rstrip())
+    else:
+        lines.append("")
+        lines.append("(no worker log yet)")
+    return "\n".join(lines)
+
+
+def run_swarm_slash(rest: str) -> str:
+    """Execute a compact ``/swarm`` command for CLI/TUI/gateway surfaces."""
+    tokens = shlex.split(rest) if rest and rest.strip() else []
+    if not tokens or tokens[0] in {"status", "list", "ls"}:
+        if tokens and tokens[0] in {"status", "list", "ls"}:
+            tokens = tokens[1:]
+        board = None
+        include_done = False
+        as_json = False
+        i = 0
+        while i < len(tokens):
+            tok = tokens[i]
+            if tok == "--board" and i + 1 < len(tokens):
+                board = tokens[i + 1]
+                i += 2
+                continue
+            if tok.startswith("--board="):
+                board = tok.split("=", 1)[1]
+                i += 1
+                continue
+            if tok in {"--done", "--include-done"}:
+                include_done = True
+                i += 1
+                continue
+            if tok == "--json":
+                as_json = True
+                i += 1
+                continue
+            return f"⚠ /swarm usage error\nunknown status argument: {tok}"
+        return _swarm_status(board=board, include_done=include_done, as_json=as_json)
+
+    action = tokens[0]
+    if action in {"help", "--help", "-h", "?"}:
+        return _SLASH_SWARM_HELP
+    if action in {"logs", "log"}:
+        if len(tokens) < 2:
+            return "⚠ /swarm logs requires a task id"
+        task_id = tokens[1]
+        tail = 12000
+        if "--tail" in tokens:
+            idx = tokens.index("--tail")
+            if idx + 1 < len(tokens):
+                try:
+                    tail = int(tokens[idx + 1])
+                except ValueError:
+                    return "⚠ /swarm logs --tail must be an integer"
+        board = _find_task_board(task_id)
+        if not board:
+            return f"no such task: {task_id}"
+        log = kb.read_worker_log(task_id, tail_bytes=tail, board=board)
+        return log.rstrip() if log else f"(no log for {task_id} — task may not have spawned yet)"
+    if action == "follow":
+        if len(tokens) < 2:
+            return "⚠ /swarm follow requires a task id"
+        tail = 6000
+        if "--tail" in tokens:
+            idx = tokens.index("--tail")
+            if idx + 1 < len(tokens):
+                try:
+                    tail = int(tokens[idx + 1])
+                except ValueError:
+                    return "⚠ /swarm follow --tail must be an integer"
+        return _swarm_follow(tokens[1], tail_bytes=tail)
+    return f"⚠ /swarm usage error\nunknown action: {action}\n\n{_SLASH_SWARM_HELP}"

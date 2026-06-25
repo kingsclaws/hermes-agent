@@ -531,6 +531,24 @@ class SlashCommandsMixin:
             output = output[:3800] + "\n" + t("gateway.kanban.truncated_suffix")
         return output or t("gateway.kanban.no_output")
 
+    async def _handle_swarm_command(self, event: MessageEvent) -> str:
+        """Handle /swarm — compact multi-agent Kanban activity view."""
+        import asyncio
+        from hermes_cli.kanban import run_swarm_slash
+
+        text = (event.text or "").strip()
+        if text.startswith("/"):
+            text = text.lstrip("/")
+        if text.startswith("swarm"):
+            text = text[len("swarm"):].lstrip()
+        try:
+            output = await asyncio.to_thread(run_swarm_slash, text)
+        except Exception as exc:  # pragma: no cover - defensive
+            return f"swarm error: {exc}"
+        if len(output) > 3800:
+            output = output[:3800] + "\n… truncated. Use `/swarm logs <task-id>` for details."
+        return output or "(no swarm activity)"
+
     async def _handle_status_command(self, event: MessageEvent) -> str:
         """Handle /status command."""
         source = event.source
