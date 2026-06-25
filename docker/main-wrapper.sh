@@ -22,6 +22,11 @@
 # upstream unprivileged hermes user behavior.
 set -e
 
+# Raise the FD limit early so the dashboard + all gateway children inherit
+# the higher ceiling. Default Docker ulimit is 1024 — the legal swarm can
+# exhaust that with ~500 pipe FDs from session gateways alone.
+ulimit -n 65536
+
 _truthy() {
     case "${1:-}" in
         1|true|TRUE|True|yes|YES|Yes|on|ON|On) return 0 ;;
