@@ -353,6 +353,55 @@ def _latest_official_progress(conn, kb, task_id: str) -> dict | None:
     return None
 
 
+def _dispatcher_status() -> dict[str, Any]:
+    """Return coordinator-visible dispatcher health for swarm tools."""
+    try:
+        from hermes_cli.kanban import _check_dispatcher_presence
+
+        active, message = _check_dispatcher_presence()
+    except Exception as exc:
+        return {
+            "active": None,
+            "source": "unknown",
+            "message": f"无法检测 dispatcher 状态: {exc}",
+            "warning": None,
+        }
+
+    warning = None
+    if not active:
+        warning = (
+            "Kanban dispatcher 当前不可用，assigned ready 任务不会自动启动。"
+            "如果你在 CLI/TUI 直接会话中工作，可以调用 swarm_dispatch_now 跑一次手动 dispatch；"
+            "不要启动 assignee profile gateway。"
+        )
+    return {
+        "active": bool(active),
+        "source": "gateway",
+        "message": message,
+        "warning": warning,
+    }
+
+
+def _assignee_status(assignee: str | None) -> dict[str, Any] | None:
+    if not assignee:
+        return None
+    try:
+        from hermes_cli.profiles import profile_exists
+
+        exists = bool(profile_exists(assignee))
+    except Exception as exc:
+        return {
+            "assignee": assignee,
+            "exists": None,
+            "warning": f"无法检查 assignee profile 是否存在: {exc}",
+        }
+    return {
+        "assignee": assignee,
+        "exists": exists,
+        "warning": None if exists else f"assignee profile 不存在: {assignee}。任务无法被 dispatcher spawn。",
+    }
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # COORDINATOR TOOLS
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -362,8 +411,8 @@ def _latest_official_progress(conn, kb, task_id: str) -> dict | None:
 KANBAN_BOARD_CREATE_SCHEMA = {
     "name": "swarm_board_create",
     "description": (
-        "为项目创建一个新的 Kanban Board。Board 存储在 <project>/kanban/ 目录下，"
-        "一个项目仅允许一个 Board。如果项目已有 Board 则直接返回已有 Board 信息。"
+        "为项目创建/读取官方 Hermes Kanban Board。"
+        "Board 由 Hermes Kanban DB 管理，dispatcher 根据 board slug 扫描并 spawn worker。"
     ),
     "parameters": {
         "type": "object",
@@ -408,8 +457,10 @@ KANBAN_TASK_CREATE_SCHEMA = {
         '[{"type": "review", "target_pool": "hpswarm-reviewer-content"},'
         ' {"type": "approve", "target_pool": "hpswarm-reviewer-format"}]'
         "\n\n"
-        "不指定 gates 时，任务创建后在 'To Do' 列等待 Worker 认领。"
-        "指定 gates 时，第一个 gate 的 target_pool 即为初始 assignee。"
+        "不指定 gates/assignee 时，任务进入 todo/待分配状态。"
+        "指定 gates 时，第一个 gate 的 target_pool 即为初始 assignee；"
+        "assigned ready 任务由 coordinator/default gateway 的 Kanban dispatcher spawn worker。"
+        "不要启动 assignee profile gateway。"
     ),
     "parameters": {
         "type": "object",
@@ -612,6 +663,33 @@ KANBAN_TASK_COLLECT_SCHEMA = {
     },
 }
 
+KANBAN_DISPATCH_NOW_SCHEMA = {
+    "name": "swarm_dispatch_now",
+    "description": (
+        "手动运行一次当前项目 Kanban board 的 dispatcher。"
+        "用于 CLI/TUI 直接会话且 gateway dispatcher 不在线时的 fallback。"
+        "这不是启动 assignee profile gateway；它直接复用 Hermes Kanban dispatch_once 路径 spawn worker。"
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "project_path": {
+                "type": "string",
+                "description": "项目路径。省略则使用当前项目。",
+            },
+            "dry_run": {
+                "type": "boolean",
+                "description": "只报告会 spawn 哪些任务，不实际启动 worker。",
+            },
+            "max_spawn": {
+                "type": "integer",
+                "description": "可选：本次 dispatch 的并发上限。",
+            },
+        },
+        "required": [],
+    },
+}
+
 # ── Handlers ───────────────────────────────────────────────────────────────────
 
 def kanban_board_create_handler(args: dict, **kwargs) -> str:
@@ -641,6 +719,7 @@ def kanban_board_create_handler(args: dict, **kwargs) -> str:
                 "db_path": meta.get("db_path"),
                 "source": "hermes_kanban",
             },
+            "dispatch_status": _dispatcher_status(),
             "columns": [
                 {"id": "todo", "name": "To Do"},
                 {"id": "ready", "name": "Ready"},
@@ -812,6 +891,8 @@ def kanban_task_create_handler(args: dict, **kwargs) -> str:
             "success": True,
             "task": _official_task_to_dict(task) if task else {"id": task_id, "task_id": task_id},
             "board": {"slug": meta["slug"], "source": "hermes_kanban"},
+            "dispatch_status": _dispatcher_status(),
+            "assignee_status": _assignee_status(assignee),
             "message": (
                 f"任务 '{title}' 已创建（ID: {task_id}，Hermes Kanban board: {meta['slug']}）。"
                 + (
@@ -916,6 +997,8 @@ def kanban_task_assign_handler(args: dict, **kwargs) -> str:
             "success": True,
             "task": _official_task_to_dict(task),
             "board": {"slug": meta["slug"], "source": "hermes_kanban"},
+            "dispatch_status": _dispatcher_status(),
+            "assignee_status": _assignee_status(assignee),
             "message": (
                 f"任务 {task_id} 已分配给 {assignee}。coordinator/default gateway 的 Kanban dispatcher"
                 " 会在下一 tick spawn worker 子进程；不要启动 assignee profile gateway。"
@@ -1133,6 +1216,7 @@ def kanban_board_status_handler(args: dict, **kwargs) -> str:
                 "title": meta.get("name"),
                 "source": "hermes_kanban",
             },
+            "dispatch_status": _dispatcher_status(),
             "columns": columns,
         }, ensure_ascii=False)
     except Exception as exc:
@@ -1267,6 +1351,7 @@ def kanban_task_poll_handler(args: dict, **kwargs) -> str:
         from hermes_cli import kanban_db as kb
 
         meta = _official_board(project_path, title=Path(project_path).name)
+        dispatch_status = _dispatcher_status()
         conn = kb.connect(board=meta["slug"])
         tasks = []
         status_counts = {"todo": 0, "ready": 0, "running": 0, "review": 0, "done": 0, "blocked": 0}
@@ -1278,6 +1363,13 @@ def kanban_task_poll_handler(args: dict, **kwargs) -> str:
                     continue
                 item = _official_task_to_dict(task)
                 item["latest_progress"] = _latest_official_progress(conn, kb, tid)
+                item["assignee_status"] = _assignee_status(task.assignee)
+                if task.status == "ready" and task.assignee and dispatch_status.get("active") is False:
+                    item["dispatch_blocked"] = True
+                    item["dispatch_blocked_reason"] = dispatch_status.get("message") or dispatch_status.get("warning")
+                elif task.status == "ready" and item["assignee_status"] and item["assignee_status"].get("exists") is False:
+                    item["dispatch_blocked"] = True
+                    item["dispatch_blocked_reason"] = item["assignee_status"].get("warning")
                 tasks.append(item)
                 if task.status in status_counts:
                     status_counts[task.status] += 1
@@ -1286,6 +1378,7 @@ def kanban_task_poll_handler(args: dict, **kwargs) -> str:
         return json.dumps({
             "success": True,
             "board": {"slug": meta["slug"], "source": "hermes_kanban"},
+            "dispatch_status": dispatch_status,
             "tasks": tasks,
             "summary": {
                 "total": len(tasks),
@@ -1536,6 +1629,61 @@ def kanban_task_collect_handler(args: dict, **kwargs) -> str:
         result["events"] = events
 
     return json.dumps(result, ensure_ascii=False)
+
+
+def kanban_dispatch_now_handler(args: dict, **kwargs) -> str:
+    project_path = _resolve_project_path(args, kwargs.get("parent_agent"))
+    if not project_path:
+        return json.dumps({"success": False, "error": "无法确定项目路径。"})
+
+    try:
+        from hermes_cli import kanban_db as kb
+
+        meta = _official_board(project_path, title=Path(project_path).name)
+        dry_run = bool(args.get("dry_run", False))
+        max_spawn_raw = args.get("max_spawn", None)
+        max_spawn = int(max_spawn_raw) if max_spawn_raw not in (None, "") else None
+
+        conn = kb.connect(board=meta["slug"])
+        try:
+            dispatch_result = kb.dispatch_once(
+                conn,
+                board=meta["slug"],
+                dry_run=dry_run,
+                max_spawn=max_spawn,
+            )
+        finally:
+            conn.close()
+
+        spawned = [
+            {"task_id": tid, "assignee": who, "workspace": ws}
+            for tid, who, ws in dispatch_result.spawned
+        ]
+        return json.dumps({
+            "success": True,
+            "board": {"slug": meta["slug"], "source": "hermes_kanban"},
+            "manual_dispatch": True,
+            "dry_run": dry_run,
+            "dispatch_status": _dispatcher_status(),
+            "result": {
+                "spawned": spawned,
+                "spawned_count": len(spawned),
+                "reclaimed": dispatch_result.reclaimed,
+                "crashed": dispatch_result.crashed,
+                "timed_out": dispatch_result.timed_out,
+                "stale": dispatch_result.stale,
+                "auto_blocked": dispatch_result.auto_blocked,
+                "promoted": dispatch_result.promoted,
+                "skipped_unassigned": dispatch_result.skipped_unassigned,
+                "skipped_nonspawnable": dispatch_result.skipped_nonspawnable,
+            },
+            "message": (
+                f"已手动运行一次 dispatcher（board={meta['slug']}，spawned={len(spawned)}）。"
+                " 这是 CLI/TUI 直接会话的 fallback；不要启动 assignee profile gateway。"
+            ),
+        }, ensure_ascii=False)
+    except Exception as exc:
+        return json.dumps({"success": False, "error": f"手动 dispatch 失败: {exc}"}, ensure_ascii=False)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -2317,6 +2465,16 @@ registry.register(
     check_fn=_check_kanban,
     description="收集已完成任务的 Worker 产出",
     emoji="📦",
+)
+
+registry.register(
+    name="swarm_dispatch_now",
+    toolset="kanban_swarm",
+    schema=KANBAN_DISPATCH_NOW_SCHEMA,
+    handler=lambda args, **kw: kanban_dispatch_now_handler(args, **kw),
+    check_fn=_check_kanban,
+    description="手动运行一次 Kanban dispatcher",
+    emoji="🚦",
 )
 
 # Worker tools

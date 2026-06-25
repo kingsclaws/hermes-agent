@@ -17,6 +17,6 @@ def test_legal_toolsets_expose_workflow_and_kanban_execution_layer():
         assert "legal_orchestrate" not in tools
         assert "legal_workflow" in tools
         assert "swarm_workflow_compile" in tools
+        assert "swarm_dispatch_now" in tools
         assert "swarm_task_poll" in tools
         assert "swarm_task_progress" in tools
-

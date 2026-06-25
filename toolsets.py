@@ -379,7 +379,7 @@ TOOLSETS = {
             "swarm_task_create", "swarm_task_assign",
             "swarm_task_wait", "swarm_task_poll",
             "swarm_task_collect", "swarm_workflow_compile",
-            "swarm_board_status",
+            "swarm_board_status", "swarm_dispatch_now",
             "swarm_task_claim", "swarm_task_read",
             "swarm_task_handoff", "swarm_task_approve",
             "swarm_task_reject", "swarm_task_revise",

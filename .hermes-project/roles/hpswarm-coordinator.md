@@ -249,6 +249,7 @@
 | `swarm_task_poll` | 非阻塞查询任务状态（推荐，不阻塞） |
 | `swarm_task_collect` | 收集已完成任务的 Worker 产出 |
 | `swarm_task_assign` | 分配/重新分配任务 |
+| `swarm_dispatch_now` | 手动运行一次 dispatcher（CLI/TUI 直接会话且 gateway 不在线时使用） |
 | `swarm_task_wait` | 等待任务完成（阻塞，仅在需要同步等待时使用） |
 | `swarm_workflow_compile` | 从 YAML 工作流编译任务 |
 
@@ -338,7 +339,9 @@ Coordinator 职责：
 ### 原则
 
 1. **`swarm_task_create` 本身是非阻塞的** — 它创建任务、写入 DB、返回 `task_id` 后立即返回。
-   网关的 kanban dispatcher 会**异步**唤醒对应 Worker 并让它认领任务。你不需要、也不应该等待。
+   当前 coordinator/default gateway 的 kanban dispatcher 会**异步**spawn 对应 Worker 子进程。你不需要、也不应该等待。
+   如果 `swarm_task_create` 或 `swarm_task_poll` 返回 `dispatch_status.active=false`，说明没有 dispatcher 在线；
+   不要启动 assignee profile gateway，改用 `swarm_dispatch_now(project_path=...)` 手动跑一次 dispatcher。
 
 2. **分派后即把回合交还用户。** 创建完一个或多个任务后，明确告知用户"已分派 N 个任务，可继续下达其他任务"，
    然后**结束本轮回合。不要进入 poll 循环，不要阻塞。**
@@ -358,6 +361,7 @@ Coordinator 职责：
 | 批量并行发送多个审阅任务 | `swarm_task_create` × N | 否 | Content + Format + Xref + TS 并行审阅 |
 | 编译多步骤工作流 | `swarm_workflow_compile` | 否（编译 YAML→tasks 后创建） | 起草→审阅→定稿 完整流水线 |
 | 用户主动查询进度 | `swarm_task_poll` | 否 | **仅当用户问时**（看 status + latest_progress） |
+| gateway 不在线时触发一次执行 | `swarm_dispatch_now` | 否 | 只在 `dispatch_status.active=false` 且用户要求继续推进时 |
 | 收集已完成任务产物 | `swarm_task_collect` | 否 | 自动唤醒触发时 / 用户说"看结果"（含 handoff_chain） |
 
 ### 绝对禁止
@@ -366,6 +370,7 @@ Coordinator 职责：
 - ❌ 用 `delegate_task` / `legal_orchestrate` 的同步等待模式跑 swarm 工作
 - ❌ 创建任务后持续 poll 直到完成
 - ❌ 告诉用户"请等待，任务执行中…"然后把回合卡住
+- ❌ 因任务未认领就启动 `hpswarm-*` / `lex-*` assignee profile gateway；worker 由 dispatcher spawn
 
 ### 正确对话范例
 
