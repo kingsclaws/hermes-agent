@@ -104,8 +104,10 @@ _HERMES_CORE_TOOLS = [
     "project_create", "project_delete", "project_select", "project_status", "project_context", "project_list",
     # Code execution + delegation
     "execute_code", "delegate_task",
-    # Legal workflow orchestration
-    "legal_orchestrate", "legal_workflow", "legal_profiles",
+    # Legal workflow orchestration.  legal_workflow is the public entrypoint;
+    # execution is compiled onto kanban_swarm rather than the retired
+    # legal_orchestrate direct dispatcher.
+    "legal_workflow", "legal_profiles",
     *_LEXITOOL_TOOLS,
     # Cronjob management
     "cronjob",
@@ -121,9 +123,6 @@ _HERMES_CORE_TOOLS = [
     "kanban_complete", "kanban_block", "kanban_heartbeat",
     "kanban_comment", "kanban_create", "kanban_link",
     "kanban_unblock",
-    # Kanban Swarm legal coordination — Board → Task → Gate three-layer model.
-    # Coordinator creates tasks, Workers claim/handoff/approve. Always available.
-    "kanban_swarm",
     # Computer use (macOS, gated on cua-driver being installed via check_fn)
     "computer_use",
     # Project management (always available for legal project lifecycle)
@@ -301,8 +300,8 @@ TOOLSETS = {
 
     "legal_orchestration": {
         "description": "Native legal workflow orchestration for drafting, review, revision, and delivery",
-        "tools": ["legal_orchestrate", "legal_workflow", "legal_profiles"],
-        "includes": []
+        "tools": ["legal_workflow", "legal_profiles"],
+        "includes": ["kanban_swarm"]
     },
 
     "lexitool": {
@@ -673,7 +672,7 @@ TOOLSETS = {
             "handle contract drafting, review, or legal document automation."
         ),
         "tools": ["lex_read", "lex_scan", "lex_revision_guard", "lex_stats", "lex_table_list", "lex_edit", "lex_tc", "lex_format", "lex_list", "lex_ref", "lex_section", "lex_doc", "lex_clause", "lex_corpus", "lex_ocr", "lex_project_init", "lex_diff", "lex_xref_audit", "lex_deliver", "lex_gate_check", "lex_git", "project_facts", "lex_convention_profile", "legal_review_plan", "edit_verification_record", "legal_harness_migrate", "legal_harness_workflow", "legal_handoff_record", "legal_scorecard", "update_project_state", "get_project_state", "refine_goal", "project_add_task", "project_list_tasks", "project_update_task", "project_delete_task", "execute_code"],
-        "includes": [],
+        "includes": ["kanban_swarm"],
     },
 
     # ── Coordinator harness: read-only lex tools ──────────────────────────
@@ -689,7 +688,7 @@ TOOLSETS = {
             "sub-agents via delegate_task."
         ),
         "tools": [
-            "legal_orchestrate", "legal_workflow", "legal_profiles",
+            "legal_workflow", "legal_profiles",
             "lex_read", "lex_scan", "lex_revision_guard", "lex_stats", "lex_table_list", "lex_list",
             "lex_tc",
             "lex_ref", "lex_section", "lex_doc", "lex_clause",
@@ -706,7 +705,7 @@ TOOLSETS = {
             "project_add_task", "project_list_tasks",
             "project_update_task", "project_delete_task",
         ],
-        "includes": [],
+        "includes": ["kanban_swarm"],
     },
 
     # ── Worker harness: full read-write lex tools ─────────────────────────
@@ -735,7 +734,7 @@ TOOLSETS = {
             "project_update_task", "project_delete_task",
             "lex_heal", "execute_code",
         ],
-        "includes": [],
+        "includes": ["kanban_swarm"],
     },
 
     "lex-docx": {
@@ -746,8 +745,8 @@ TOOLSETS = {
             "profiles that handle contract review, due diligence, or "
             "legal document automation."
         ),
-        "tools": ["legal_orchestrate", "legal_workflow", "legal_profiles", "lex_read", "lex_scan", "lex_revision_guard", "lex_stats", "lex_table_list", "lex_edit", "lex_tc", "lex_comment", "lex_format", "lex_list", "lex_ref", "lex_section", "lex_doc", "lex_clause", "lex_corpus", "lex_ocr", "lex_project_init", "lex_diff", "lex_xref_audit", "lex_deliver", "lex_gate_check", "lex_git", "project_facts", "lex_convention_profile", "legal_review_plan", "edit_verification_record", "lex_proofread", "lex_template_audit", "lex_template_fill", "lex_translation_review", "lex_review_workflow", "lex_verify_edits", "legal_harness_migrate", "legal_harness_workflow", "legal_handoff_record", "legal_scorecard", "update_project_state", "get_project_state", "refine_goal", "project_add_task", "project_list_tasks", "project_update_task", "project_delete_task", "lex_heal", "execute_code"],
-        "includes": [],
+        "tools": ["legal_workflow", "legal_profiles", "lex_read", "lex_scan", "lex_revision_guard", "lex_stats", "lex_table_list", "lex_edit", "lex_tc", "lex_comment", "lex_format", "lex_list", "lex_ref", "lex_section", "lex_doc", "lex_clause", "lex_corpus", "lex_ocr", "lex_project_init", "lex_diff", "lex_xref_audit", "lex_deliver", "lex_gate_check", "lex_git", "project_facts", "lex_convention_profile", "legal_review_plan", "edit_verification_record", "lex_proofread", "lex_template_audit", "lex_template_fill", "lex_translation_review", "lex_review_workflow", "lex_verify_edits", "legal_harness_migrate", "legal_harness_workflow", "legal_handoff_record", "legal_scorecard", "update_project_state", "get_project_state", "refine_goal", "project_add_task", "project_list_tasks", "project_update_task", "project_delete_task", "lex_heal", "execute_code"],
+        "includes": ["kanban_swarm"],
     },
 }
 

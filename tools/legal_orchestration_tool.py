@@ -1690,10 +1690,8 @@ def _handle_legal_orchestrate(args: dict, **kwargs) -> str:
     return _tool_ok(payload)
 
 
-registry.register(
-    name="legal_orchestrate",
-    toolset="legal_orchestration",
-    schema=LEGAL_ORCHESTRATE_SCHEMA,
-    handler=_handle_legal_orchestrate,
-    description=LEGAL_ORCHESTRATE_SCHEMA["description"],
-)
+# Retired from the native tool surface.  The legal harness now enters through
+# legal_workflow(action="start"), which compiles workflow runs onto kanban_swarm.
+# Keep the module importable for migration/reference tests, but do not register
+# legal_orchestrate: registry discovery treats top-level registry.register calls
+# as tool exposure.

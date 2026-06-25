@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from datetime import datetime, timezone
 
 from hermes_state import SessionDB
 from tools.project_management_tool import resolve_selected_project
@@ -186,7 +187,7 @@ def _default_document_drafting_workflow_steps(
         {
             "id": "iterative-drafting",
             "title": "逐段制作并逐段读回核对",
-            "type": "legal_orchestrate",
+            "type": "kanban_iterative_drafting",
             "role": "drafter",
             "depends_on": ["build-paragraph-production-map"],
             "input": {
@@ -495,6 +496,523 @@ def _infer_workflow_type(workflow: Dict[str, Any]) -> str:
     return "contract_revision"
 
 
+_ROLE_TO_PROFILE = {
+    "coordinator": "lex-coordinator",
+    "reader": "lex-coordinator",
+    "planner": "lex-coordinator",
+    "proofread_coordinator": "lex-coordinator",
+    "translation_coordinator": "lex-coordinator",
+    "drafter": "lex-drafter",
+    "xref": "lex-reviewer-xref",
+    "format_reviewer": "lex-reviewer-format",
+    "ts_reviewer": "lex-reviewer-ts",
+    "senior_legal_reviewer": "lex-reviewer-content",
+    "proofread_reviewer_pool": "lex-reviewer-content",
+}
+
+
+def _profile_for_step(step: Dict[str, Any]) -> str:
+    role = str(step.get("role") or "").strip()
+    if role in _ROLE_TO_PROFILE:
+        return _ROLE_TO_PROFILE[role]
+    if role.startswith("lex-"):
+        return role
+    step_type = str(step.get("type") or "").strip()
+    if step_type in {"lex_edit", "lex_template_fill"}:
+        return "lex-drafter"
+    if step_type in {"lex_proofread", "review"}:
+        return "lex-reviewer-content"
+    if step_type in {"lex_ref", "lex_xref_audit"}:
+        return "lex-reviewer-xref"
+    return "lex-coordinator"
+
+
+def _workflow_steps_to_kanban_spec(
+    *,
+    workflow_id: str,
+    steps: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    nodes = []
+    for step in steps:
+        step_id = str(step.get("id") or step.get("step_key") or "").strip()
+        if not step_id:
+            continue
+        kind = "gate" if str(step.get("type") or "") in {"approval_gate", "delivery", "lex_gate_check"} else "worker"
+        nodes.append({
+            "id": step_id,
+            "kind": kind,
+            "title": str(step.get("title") or step_id),
+            "profile": _profile_for_step(step),
+            "requires": [str(item) for item in (step.get("depends_on") or []) if str(item).strip()],
+            "output_required": ["status", "evidence", "verification"],
+            "input_schema": sorted((step.get("input") or {}).keys()) if isinstance(step.get("input"), dict) else [],
+            "timeout_minutes": 30,
+        })
+    return {
+        "id": workflow_id,
+        "version": 1,
+        "description": "Kanban-backed legal workflow generated from legal_workflow steps.",
+        "nodes": nodes,
+        "scorecard": {
+            "required": ["edit_verification"],
+            "block_on_failed_verification": True,
+            "block_on_invalid_handoff": True,
+        },
+    }
+
+
+def _compile_kanban_execution(
+    *,
+    workflow_run_id: str,
+    workflow_type: str,
+    project_dir: str,
+    steps: List[Dict[str, Any]],
+    params: Dict[str, Any],
+) -> Dict[str, Any]:
+    if not project_dir:
+        return {"ok": False, "error": "project_dir is required for kanban execution."}
+
+    from hermes_cli.kanban_legal_swarm import compile_workflow
+
+    workflow_id = f"lwf_{workflow_run_id}"
+    spec = _workflow_steps_to_kanban_spec(workflow_id=workflow_id, steps=steps)
+    workflows_dir = Path(project_dir) / ".hermes-project" / "workflows"
+    workflows_dir.mkdir(parents=True, exist_ok=True)
+    spec_path = workflows_dir / f"{workflow_id}.yaml"
+
+    try:
+        import yaml
+    except Exception as exc:
+        return {"ok": False, "error": f"PyYAML unavailable: {exc}"}
+
+    spec_path.write_text(yaml.safe_dump(spec, allow_unicode=True, sort_keys=False), encoding="utf-8")
+    run = compile_workflow(
+        project_dir=project_dir,
+        workflow_id=workflow_id,
+        run_id=workflow_run_id,
+        params={
+            **params,
+            "workflow_run_id": workflow_run_id,
+            "workflow_type": workflow_type,
+        },
+    )
+    return {
+        "ok": True,
+        "workflow_id": workflow_id,
+        "workflow_file": str(spec_path),
+        "board": run.board,
+        "kanban_run_id": run.run_id,
+        "root_task_id": run.root_task_id,
+        "node_mappings": {
+            key: {
+                "kind": mapping.kind,
+                "task_ids": mapping.task_ids,
+                "profile": mapping.profile,
+                "output_required": mapping.output_required,
+            }
+            for key, mapping in run.node_mappings.items()
+        },
+    }
+
+
+def _find_open_workflow(db: SessionDB, *, project: Dict[str, Optional[str]], document_path: Optional[str]) -> Optional[Dict[str, Any]]:
+    candidates = db.list_legal_workflows(
+        project_id=project.get("project_id"),
+        project_dir=project.get("project_dir"),
+        limit=20,
+    )
+    for workflow in candidates:
+        if workflow.get("status") in {"completed", "cancelled", "archived"}:
+            continue
+        if document_path and workflow.get("document_path") and str(workflow.get("document_path")) != document_path:
+            continue
+        return db.get_legal_workflow(workflow["id"])
+    return None
+
+
+def _workflow_kanban_binding(workflow: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    for step in workflow.get("steps") or []:
+        result = step.get("result")
+        if isinstance(result, dict) and isinstance(result.get("kanban"), dict):
+            return result["kanban"]
+    return None
+
+
+def _read_json_file(path: Path, default: Dict[str, Any]) -> Dict[str, Any]:
+    if not path.is_file():
+        return dict(default)
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else dict(default)
+    except Exception:
+        return dict(default)
+
+
+def _write_json_file(path: Path, data: Dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def _as_list(value: Any) -> List[Any]:
+    return value if isinstance(value, list) else []
+
+
+def _table_escape(value: Any) -> str:
+    return str(value if value is not None else "").replace("\n", " ").replace("|", "\\|").strip()
+
+
+def _table_rows(items: List[Any], columns: List[str]) -> List[str]:
+    rows = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        rows.append("| " + " | ".join(_table_escape(item.get(col, "")) for col in columns) + " |")
+    if not rows:
+        rows.append("|  | " * len(columns) + "|")
+    return rows
+
+
+def _render_transaction_structure_doc(payload: Dict[str, Any]) -> str:
+    tier = str(payload.get("structure_tier") or "minimal").strip() or "minimal"
+    confirmed_by = str(payload.get("confirmed_by") or "").strip()
+    confirmed_at = str(payload.get("confirmed_at") or "").strip()
+    terms = _as_list(payload.get("terms"))
+    parties = _as_list(payload.get("parties"))
+    amounts = _as_list(payload.get("amounts"))
+    transaction_files = _as_list(payload.get("transaction_files"))
+    format_conventions = payload.get("format_conventions") if isinstance(payload.get("format_conventions"), dict) else {}
+    notes = str(payload.get("notes") or "").strip()
+
+    lines = [
+        "# 交易结构与术语表",
+        "",
+        f"<!-- tier: {tier} | confirmed: {confirmed_by or 'unconfirmed'} / {confirmed_at or '-'} -->",
+        "",
+        "## ① 术语表",
+        "",
+        "| 术语 | 定义 | 使用场景 | 排除/替代 |",
+        "|------|------|----------|----------|",
+        *_table_rows(terms, ["term", "definition", "usage", "exclusion"]),
+        "",
+        "## ② 签署主体",
+        "",
+        "| 合同 | 角色 | 主体全称 |",
+        "|------|------|---------|",
+        *_table_rows(parties, ["contract", "role", "entity"]),
+        "",
+    ]
+
+    if tier == "full":
+        lines.extend([
+            "## ③ 关键金额与费率表",
+            "",
+            "| 项目 | 数值 | 出处/依据 | 备注 |",
+            "|------|------|----------|------|",
+            *_table_rows(amounts, ["item", "value", "source", "note"]),
+            "",
+            "## ④ 编号/格式约定",
+            "",
+            f"- 占位符格式：{_table_escape(format_conventions.get('placeholder_format', ''))}",
+            f"- 其他格式约定：{_table_escape(format_conventions.get('other', ''))}",
+            f"- 编号样式：{_table_escape(format_conventions.get('numbering', ''))}",
+            f"- 字体/字号约定：{_table_escape(format_conventions.get('font', ''))}",
+            "",
+            "## ⑤ 交易文件清单与跨文件引用",
+            "",
+            "| 文件名 | 角色（主合同/配套/担保/监管等） | 被引用方 |",
+            "|--------|------------------------------|---------|",
+            *_table_rows(transaction_files, ["file", "role", "referenced_by"]),
+            "",
+        ])
+
+    if notes:
+        lines.extend(["## 备注", "", notes, ""])
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _append_planning_log(project_dir: str, args: dict, payload: Dict[str, Any]) -> str:
+    root = Path(project_dir)
+    planning_dir = root / ".hermes-project" / "planning"
+    planning_dir.mkdir(parents=True, exist_ok=True)
+    log_path = planning_dir / "grill-log.md"
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    question = str(args.get("question") or args.get("clarify_question") or "").strip()
+    answer = args.get("answer", args.get("user_response"))
+    rationale = str(args.get("rationale") or "").strip()
+    changed_keys = [
+        key for key in (
+            "structure_tier",
+            "parties",
+            "terms",
+            "amounts",
+            "format_conventions",
+            "transaction_files",
+            "notes",
+        )
+        if key in args and args.get(key) not in (None, "")
+    ]
+
+    if not log_path.is_file():
+        log_path.write_text(
+            "# Planning Grill Log\n\n"
+            "> Native legal planning intake log. Each entry should correspond to a visible `clarify` question and the persisted answer.\n\n",
+            encoding="utf-8",
+        )
+
+    lines = [
+        f"## {now}",
+        "",
+        f"- Question: {question or '-'}",
+        f"- Answer: {_table_escape(answer) if answer is not None else '-'}",
+        f"- Changed fields: {', '.join(changed_keys) if changed_keys else '-'}",
+        f"- Confirmed: {bool(args.get('confirmed'))}",
+    ]
+    if rationale:
+        lines.append(f"- Rationale: {rationale}")
+    lines.extend([
+        "",
+        "```json",
+        json.dumps({key: payload.get(key) for key in changed_keys}, ensure_ascii=False, indent=2),
+        "```",
+        "",
+    ])
+    with log_path.open("a", encoding="utf-8") as handle:
+        handle.write("\n".join(lines))
+    return str(log_path)
+
+
+def _write_planning_decision(project_dir: str, payload: Dict[str, Any]) -> Optional[str]:
+    if not payload.get("confirmed_by") or not payload.get("confirmed_at"):
+        return None
+    root = Path(project_dir)
+    decisions_dir = root / ".hermes-project" / "decisions"
+    decisions_dir.mkdir(parents=True, exist_ok=True)
+    decision_path = decisions_dir / "transaction-structure.md"
+    tier = str(payload.get("structure_tier") or "minimal").strip() or "minimal"
+    confirmed_by = str(payload.get("confirmed_by") or "").strip()
+    confirmed_at = str(payload.get("confirmed_at") or "").strip()
+    lines = [
+        "# Decision: Transaction Structure And Terminology",
+        "",
+        f"- Status: accepted",
+        f"- Tier: {tier}",
+        f"- Confirmed by: {confirmed_by}",
+        f"- Confirmed at: {confirmed_at}",
+        "",
+        "## Decision",
+        "",
+        "Use `交易结构与术语表.md` as the project-level authoritative reference for party names, roles, terminology, key values, formatting conventions, and cross-document relationships.",
+        "",
+        "## Consequences",
+        "",
+        "- Drafter and Reviewer agents must consult this artifact before document drafting, review, or delivery.",
+        "- Later corrections must update `交易结构与术语表.md`, `.hermes-project/project-facts.json`, and this decision trail.",
+        "- Delivery gates may block handoff when the artifact is missing or unconfirmed.",
+        "",
+    ]
+    decision_path.write_text("\n".join(lines), encoding="utf-8")
+    return str(decision_path)
+
+
+def _record_planning_decision_in_state(project_dir: str, payload: Dict[str, Any], decision_path: Optional[str]) -> Dict[str, Any]:
+    state_path = Path(project_dir) / ".hermes-project" / "project-state.json"
+    if not state_path.is_file() or not payload.get("confirmed_by"):
+        return {"ok": False, "skipped": True, "reason": "project-state unavailable or planning not confirmed"}
+    try:
+        from hermes_cli.project_commands import update_project_state
+
+        return update_project_state(
+            project_dir,
+            decision=(
+                "交易结构与术语表 confirmed as authoritative "
+                f"(tier={payload.get('structure_tier') or 'minimal'}, "
+                f"confirmed_by={payload.get('confirmed_by')}, "
+                f"artifact=交易结构与术语表.md"
+                + (f", decision={decision_path}" if decision_path else "")
+                + ")."
+            ),
+        )
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+def _transaction_structure_status(project_dir: str) -> Dict[str, Any]:
+    root = Path(project_dir)
+    meta = _read_json_file(root / ".hermes-project" / "project-meta.json", {})
+    draft = _read_json_file(root / ".hermes-project" / "planning" / "transaction-structure-draft.json", {})
+    md_path = root / "交易结构与术语表.md"
+    tier = str(meta.get("structure_tier") or draft.get("structure_tier") or "").strip()
+    confirmed = bool(meta.get("structure_confirmed_by") and meta.get("structure_confirmed_at"))
+
+    missing: List[str] = []
+    next_question = ""
+    if not tier:
+        missing.append("structure_tier")
+        next_question = "本项目涉及几份合同/法律文件需要起草或修改？1份建议 minimal，2份以上建议 full。"
+    elif not _as_list(draft.get("parties")):
+        missing.append("parties")
+        next_question = "每份合同的签署方分别是谁？请给出正式法定全称和各方角色。"
+    elif not _as_list(draft.get("terms")):
+        missing.append("terms")
+        next_question = "本项目有哪些必须统一或避免使用的核心术语？请说明定义、使用场景和替代规则。"
+    elif tier == "full" and not _as_list(draft.get("transaction_files")):
+        missing.append("transaction_files")
+        next_question = "这些合同之间的引用关系是什么？哪份是主合同，哪些是配套/担保/监管文件？"
+    elif tier == "full" and not _as_list(draft.get("amounts")):
+        missing.append("amounts")
+        next_question = "本项目有哪些关键金额、费率、百分比或日期需要跨文件保持一致？"
+    elif tier == "full" and not isinstance(draft.get("format_conventions"), dict):
+        missing.append("format_conventions")
+        next_question = "文件占位符、编号、字体字号和其他格式约定是什么？"
+    elif not confirmed:
+        missing.append("user_confirmation")
+        next_question = "交易结构与术语表草稿已具备基础内容。请确认是否作为项目级权威参考生效。"
+
+    return {
+        "ok": True,
+        "project_dir": str(root),
+        "artifact_path": str(md_path),
+        "draft_path": str(root / ".hermes-project" / "planning" / "transaction-structure-draft.json"),
+        "meta_path": str(root / ".hermes-project" / "project-meta.json"),
+        "exists": md_path.is_file(),
+        "confirmed": confirmed,
+        "structure_tier": tier or None,
+        "missing": missing,
+        "next_question": next_question,
+        "draft": draft,
+        "meta": {
+            "structure_tier": meta.get("structure_tier"),
+            "structure_confirmed_by": meta.get("structure_confirmed_by"),
+            "structure_confirmed_at": meta.get("structure_confirmed_at"),
+        },
+    }
+
+
+def _sync_transaction_structure_facts(project_dir: str, payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+    from hermes_cli.project_commands import project_facts
+
+    updates: List[Dict[str, Any]] = []
+    for party in _as_list(payload.get("parties")):
+        if not isinstance(party, dict):
+            continue
+        key = ".".join(
+            part for part in [
+                str(party.get("contract") or "document").strip(),
+                str(party.get("role") or "party").strip(),
+            ] if part
+        )
+        result = project_facts(
+            project_dir,
+            "upsert",
+            category="transaction_parties",
+            key=key,
+            value=party.get("entity"),
+            source="legal_workflow.planning_intake",
+            confidence="high",
+            status="confirmed",
+            tags=["transaction_structure"],
+        )
+        updates.append(result)
+    for term in _as_list(payload.get("terms")):
+        if not isinstance(term, dict) or not term.get("term"):
+            continue
+        result = project_facts(
+            project_dir,
+            "upsert",
+            category="transaction_terms",
+            key=str(term.get("term")).strip(),
+            value={
+                "definition": term.get("definition", ""),
+                "usage": term.get("usage", ""),
+                "exclusion": term.get("exclusion", ""),
+            },
+            source="legal_workflow.planning_intake",
+            confidence="high",
+            status="confirmed",
+            tags=["transaction_structure"],
+        )
+        updates.append(result)
+    for amount in _as_list(payload.get("amounts")):
+        if not isinstance(amount, dict) or not amount.get("item"):
+            continue
+        result = project_facts(
+            project_dir,
+            "upsert",
+            category="transaction_amounts",
+            key=str(amount.get("item")).strip(),
+            value={
+                "value": amount.get("value", ""),
+                "source": amount.get("source", ""),
+                "note": amount.get("note", ""),
+            },
+            source="legal_workflow.planning_intake",
+            confidence="high",
+            status="confirmed",
+            tags=["transaction_structure"],
+        )
+        updates.append(result)
+    return updates
+
+
+def _record_planning_intake(args: dict, project_dir: str) -> Dict[str, Any]:
+    root = Path(project_dir)
+    planning_dir = root / ".hermes-project" / "planning"
+    draft_path = planning_dir / "transaction-structure-draft.json"
+    payload = _read_json_file(draft_path, {})
+    for key in (
+        "structure_tier",
+        "parties",
+        "terms",
+        "amounts",
+        "format_conventions",
+        "transaction_files",
+        "notes",
+    ):
+        if key in args and args.get(key) not in (None, ""):
+            payload[key] = args[key]
+    payload["updated_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    confirmed = bool(args.get("confirmed"))
+    confirmed_by = str(args.get("confirmed_by") or "").strip()
+    if confirmed and not confirmed_by:
+        return {"ok": False, "error": "confirmed_by is required when confirmed=true."}
+    if confirmed:
+        payload["confirmed_by"] = confirmed_by
+        payload["confirmed_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    _write_json_file(draft_path, payload)
+    md_path = root / "交易结构与术语表.md"
+    md_path.write_text(_render_transaction_structure_doc(payload), encoding="utf-8")
+    log_path = _append_planning_log(project_dir, args, payload)
+
+    meta_path = root / ".hermes-project" / "project-meta.json"
+    meta = _read_json_file(meta_path, {})
+    decision_path = None
+    state_update = {"ok": False, "skipped": True}
+    if confirmed:
+        meta["structure_tier"] = payload.get("structure_tier") or "minimal"
+        meta["structure_confirmed_by"] = payload["confirmed_by"]
+        meta["structure_confirmed_at"] = payload["confirmed_at"]
+        _write_json_file(meta_path, meta)
+        decision_path = _write_planning_decision(project_dir, payload)
+        state_update = _record_planning_decision_in_state(project_dir, payload, decision_path)
+
+    fact_updates = _sync_transaction_structure_facts(project_dir, payload)
+    status = _transaction_structure_status(project_dir)
+    return {
+        "ok": True,
+        "status": "confirmed" if confirmed else "drafted",
+        "artifact_path": str(md_path),
+        "planning_log_path": log_path,
+        "decision_path": decision_path,
+        "draft_path": str(draft_path),
+        "meta_path": str(meta_path),
+        "fact_updates": fact_updates,
+        "state_update": state_update,
+        "planning_status": status,
+    }
+
+
 LEGAL_WORKFLOW_SCHEMA = {
     "name": "legal_workflow",
     "description": (
@@ -508,11 +1026,17 @@ LEGAL_WORKFLOW_SCHEMA = {
             "action": {
                 "type": "string",
                 "enum": [
+                    "start",
                     "create_plan",
                     "get",
                     "list",
+                    "status",
+                    "next",
+                    "planning_status",
+                    "planning_intake",
                     "update_run",
                     "update_step",
+                    "finish",
                     "learn_from_run",
                     "list_learning_rules",
                     "approve_learning_rule",
@@ -600,6 +1124,90 @@ LEGAL_WORKFLOW_SCHEMA = {
                 },
             },
             "step": {"type": "object"},
+            "reuse_existing": {
+                "type": "boolean",
+                "description": "When action=start, resume an open workflow for the same project/document. Default: true.",
+            },
+            "confirmed": {
+                "type": "boolean",
+                "description": "For planning_intake: whether the user confirmed the transaction structure artifact as authoritative.",
+            },
+            "confirmed_by": {
+                "type": "string",
+                "description": "For planning_intake: user/person who confirmed the planning artifact.",
+            },
+            "structure_tier": {
+                "type": "string",
+                "enum": ["minimal", "full"],
+                "description": "Transaction structure planning tier. minimal=single document; full=multi-document/cross-reference matter.",
+            },
+            "parties": {
+                "type": "array",
+                "description": "Signing party rows: {contract, role, entity}.",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "contract": {"type": "string"},
+                        "role": {"type": "string"},
+                        "entity": {"type": "string"},
+                    },
+                },
+            },
+            "terms": {
+                "type": "array",
+                "description": "Terminology rows: {term, definition, usage, exclusion}.",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "term": {"type": "string"},
+                        "definition": {"type": "string"},
+                        "usage": {"type": "string"},
+                        "exclusion": {"type": "string"},
+                    },
+                },
+            },
+            "amounts": {
+                "type": "array",
+                "description": "Key amount/rate/date rows: {item, value, source, note}. Required for full tier.",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "item": {"type": "string"},
+                        "value": {"type": "string"},
+                        "source": {"type": "string"},
+                        "note": {"type": "string"},
+                    },
+                },
+            },
+            "format_conventions": {
+                "type": "object",
+                "description": "Format conventions: placeholder_format, other, numbering, font.",
+            },
+            "transaction_files": {
+                "type": "array",
+                "description": "Transaction document map rows: {file, role, referenced_by}. Required for full tier.",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "file": {"type": "string"},
+                        "role": {"type": "string"},
+                        "referenced_by": {"type": "string"},
+                    },
+                },
+            },
+            "notes": {"type": "string"},
+            "question": {
+                "type": "string",
+                "description": "For planning_intake: the clarify question that produced this intake update.",
+            },
+            "answer": {
+                "type": "string",
+                "description": "For planning_intake: the user's clarify answer, preserved in the planning grill log.",
+            },
+            "rationale": {
+                "type": "string",
+                "description": "For planning_intake: why this answer changes the plan or artifact.",
+            },
             "limit": {"type": "integer"},
         },
         "required": ["action"],
@@ -615,7 +1223,7 @@ def _handle_legal_workflow(args: dict, **kwargs) -> str:
     db = SessionDB()
     parent_agent = kwargs.get("parent_agent")
 
-    if action == "create_plan":
+    if action in {"start", "create_plan"}:
         project = _resolve_project(args, parent_agent=parent_agent)
         document_path = str(args.get("document_path") or "").strip() or None
         term_sheet_path = str(args.get("term_sheet_path") or "").strip() or None
@@ -636,6 +1244,14 @@ def _handle_legal_workflow(args: dict, **kwargs) -> str:
         chunk_size = int(args.get("chunk_size") or 180)
         instructions = str(args.get("instructions") or "").strip() or None
         workflow_type = str(args.get("workflow_type") or "contract_revision").strip()
+        if action == "start" and bool(args.get("reuse_existing", True)):
+            existing = _find_open_workflow(db, project=project, document_path=document_path)
+            if existing:
+                return _ok({
+                    "status": "resumed",
+                    "workflow": existing,
+                    "kanban": _workflow_kanban_binding(existing),
+                })
         default_name_by_type = {
             "contract_revision": "法律文书修订 workflow",
             "document_drafting": "法律文书逐段制作 workflow",
@@ -696,7 +1312,40 @@ def _handle_legal_workflow(args: dict, **kwargs) -> str:
             created_by_session_id=_existing_session_id(db, parent_agent),
             steps=steps,
         )
-        return _ok({"status": "created", "workflow": db.get_legal_workflow(run_id)})
+        workflow = db.get_legal_workflow(run_id)
+        kanban = None
+        if action == "start":
+            kanban = _compile_kanban_execution(
+                workflow_run_id=run_id,
+                workflow_type=workflow_type,
+                project_dir=project["project_dir"] or "",
+                steps=steps,
+                params={
+                    "document_path": document_path,
+                    "term_sheet_path": term_sheet_path,
+                    "bilingual_path": bilingual_path,
+                    "source_path": source_path,
+                    "translation_path": translation_path,
+                    "glossary_path": glossary_path,
+                    "sop_path": sop_path,
+                    "instructions": instructions,
+                    "chunk_size": chunk_size,
+                },
+            )
+            first_step = (workflow.get("steps") or [None])[0]
+            if first_step and kanban:
+                db.update_legal_workflow_step(
+                    first_step["id"],
+                    result={"kanban": kanban},
+                )
+                workflow = db.get_legal_workflow(run_id)
+            db.update_legal_workflow(run_id, status="running" if kanban and kanban.get("ok") else "blocked")
+            workflow = db.get_legal_workflow(run_id)
+        return _ok({
+            "status": "started" if action == "start" else "created",
+            "workflow": workflow,
+            "kanban": kanban,
+        })
 
     if action == "get":
         run_id = str(args.get("run_id") or "").strip()
@@ -715,6 +1364,69 @@ def _handle_legal_workflow(args: dict, **kwargs) -> str:
             limit=int(args.get("limit") or 20),
         )
         return _ok({"status": "ok", "workflows": workflows})
+
+    if action == "status":
+        run_id = str(args.get("run_id") or "").strip()
+        if not run_id:
+            return tool_error("run_id is required for legal_workflow status.")
+        workflow = db.get_legal_workflow(run_id)
+        if not workflow:
+            return tool_error(f"legal workflow not found: {run_id}")
+        kanban = _workflow_kanban_binding(workflow)
+        kanban_status = None
+        if kanban and kanban.get("board") and kanban.get("root_task_id"):
+            try:
+                from hermes_cli import kanban_db as kb
+                from hermes_cli.kanban_legal_swarm import run_status
+
+                conn = kb.connect(board=str(kanban["board"]))
+                try:
+                    kanban_status = run_status(conn, str(kanban["root_task_id"]))
+                finally:
+                    conn.close()
+            except Exception as exc:
+                kanban_status = {"ok": False, "error": str(exc)}
+        return _ok({"status": "ok", "workflow": workflow, "kanban": kanban, "kanban_status": kanban_status})
+
+    if action == "next":
+        run_id = str(args.get("run_id") or "").strip()
+        if not run_id:
+            return tool_error("run_id is required for legal_workflow next.")
+        workflow = db.get_legal_workflow(run_id)
+        if not workflow:
+            return tool_error(f"legal workflow not found: {run_id}")
+        pending = [
+            step for step in workflow.get("steps") or []
+            if step.get("status") in {"pending", "running", "blocked"}
+        ]
+        next_step = pending[0] if pending else None
+        return _ok({
+            "status": "ok",
+            "workflow_id": run_id,
+            "next_step": next_step,
+            "kanban": _workflow_kanban_binding(workflow),
+        })
+
+    if action == "planning_status":
+        project = _resolve_project(args, parent_agent=parent_agent)
+        if not project["project_dir"]:
+            return tool_error("project_dir or selected project is required for legal_workflow planning_status.")
+        status = _transaction_structure_status(project["project_dir"])
+        status["interaction_contract"] = {
+            "ask_with": "clarify",
+            "persist_with": "legal_workflow(action='planning_intake')",
+            "rule": "Ask one question at a time. Do not start kanban execution until confirmed=true.",
+        }
+        return _ok(status)
+
+    if action == "planning_intake":
+        project = _resolve_project(args, parent_agent=parent_agent)
+        if not project["project_dir"]:
+            return tool_error("project_dir or selected project is required for legal_workflow planning_intake.")
+        result = _record_planning_intake(args, project["project_dir"])
+        if not result.get("ok"):
+            return tool_error(str(result.get("error") or "planning_intake failed."))
+        return _ok(result)
 
     if action == "update_run":
         run_id = str(args.get("run_id") or "").strip()
@@ -737,6 +1449,33 @@ def _handle_legal_workflow(args: dict, **kwargs) -> str:
             return tool_error("step must be an object.")
         db.update_legal_workflow_step(step_id, **step)
         return _ok({"status": "updated", "step_id": step_id})
+
+    if action == "finish":
+        run_id = str(args.get("run_id") or "").strip()
+        if not run_id:
+            return tool_error("run_id is required for legal_workflow finish.")
+        workflow = db.get_legal_workflow(run_id)
+        if not workflow:
+            return tool_error(f"legal workflow not found: {run_id}")
+        try:
+            from hermes_cli.project_commands import legal_scorecard
+
+            scorecard = legal_scorecard(
+                workflow.get("project_dir") or "",
+                document_path=workflow.get("document_path"),
+                workflow_id=_infer_workflow_type(workflow),
+                run_id=run_id,
+                strict=True,
+            )
+        except Exception as exc:
+            scorecard = {"ok": False, "status": "failed", "error": str(exc)}
+        final_status = "completed" if scorecard.get("ok") else "blocked"
+        db.update_legal_workflow(run_id, status=final_status)
+        return _ok({
+            "status": final_status,
+            "workflow": db.get_legal_workflow(run_id),
+            "scorecard": scorecard,
+        })
 
     if action == "learn_from_run":
         run_id = str(args.get("run_id") or "").strip()

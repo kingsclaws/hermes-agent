@@ -73,7 +73,7 @@ CONFIGURABLE_TOOLSETS = [
     ("clarify",         "❓ Clarifying Questions",      "clarify"),
     ("delegation",      "👥 Task Delegation",           "delegate_task"),
     ("project_management", "⚖️  Legal Projects",        "project_create, select, status"),
-    ("legal_orchestration", "⚖️  Legal Orchestration",  "legal_orchestrate, workflow"),
+    ("legal_orchestration", "⚖️  Legal Orchestration",  "legal_workflow, profiles"),
     ("lexitool",        "📄 Lex DOCX Tools",            "lex_read, lex_edit, lex_ocr, lex_ref"),
     ("cronjob",         "⏰ Cron Jobs",                 "create/list/update/pause/resume/run, with optional attached skills"),
     ("messaging",       "📨 Cross-Platform Messaging",  "send_message"),

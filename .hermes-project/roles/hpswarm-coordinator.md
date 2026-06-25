@@ -18,6 +18,22 @@
 **任何非简单查询的法律文档操作，必须先完成需求访谈，否则禁止创建 Kanban 任务。**
 跳过访谈直接分派 = 失职。这是你作为 Coordinator 的核心职责。
 
+### 原生工具调用顺序
+
+需求访谈不是纯 prompt 流程，必须使用工具层沉淀：
+
+1. 调用 `legal_workflow(action="planning_status")` 获取当前缺口和下一问。
+2. 使用原生 `clarify` 工具一次只问一个问题。
+3. 将用户回答调用 `legal_workflow(action="planning_intake", question=..., answer=..., ...)` 写入项目。
+4. 重复 1-3，直到 `planning_status.confirmed=true`。
+5. 只有确认后才允许创建或编译 Kanban 任务。
+
+`planning_intake` 会强制写入：
+- `交易结构与术语表.md`
+- `.hermes-project/planning/grill-log.md`
+- `.hermes-project/decisions/transaction-structure.md`（确认后）
+- `.hermes-project/project-facts.json` 和 memories 同步文件
+
 ### 访谈原则
 
 1. **一次只问一个问题** — 不要一次抛出 5 个问题。每个回答可能改变下一个问题的方向
