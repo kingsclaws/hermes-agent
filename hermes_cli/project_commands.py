@@ -21,6 +21,31 @@ import yaml
 from utils import atomic_json_write
 
 
+def _project_session_db():
+    """Return the SessionDB used as the project registry.
+
+    Profiles keep sessions and memory isolated, but coordinator profiles may
+    need one shared legal-project registry. Set HERMES_PROJECTS_DB_PATH to the
+    root profile's state.db to opt into that behavior. The lex-master
+    coordinator defaults to the root registry so manual `hermes -p lex-master`
+    commands and gateway sessions see the same legal project list.
+    """
+    from hermes_state import SessionDB
+
+    db_path = os.environ.get("HERMES_PROJECTS_DB_PATH", "").strip()
+    if not db_path:
+        try:
+            from hermes_cli.profiles import get_active_profile_name
+            from hermes_constants import get_default_hermes_root
+
+            if get_active_profile_name() == "lex-master":
+                db_path = str(get_default_hermes_root() / "state.db")
+        except Exception:
+            db_path = ""
+
+    return SessionDB(db_path=Path(db_path)) if db_path else SessionDB()
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # Master SOP resolution — reads from the canonical role files instead of
 # using hardcoded lightweight templates.
@@ -2800,9 +2825,7 @@ def _register_in_db(name: str, path: str, client: str, goal: str, cwd: str = "")
     Also auto-creates the client profile directory if the client name
     is a real value (not the placeholder).
     """
-    from hermes_state import SessionDB
-
-    db = SessionDB()
+    db = _project_session_db()
     project_id = db.create_project(name, path, client, goal, cwd)
 
     # Auto-create client profile if this is a real client name
@@ -2935,9 +2958,7 @@ def project_init(args) -> None:
 
 def project_list(args) -> None:
     """List all registered projects."""
-    from hermes_state import SessionDB
-
-    db = SessionDB()
+    db = _project_session_db()
     projects = db.list_projects(getattr(args, "status", None))
 
     if not projects:
@@ -2958,9 +2979,7 @@ def project_list(args) -> None:
 
 def project_open(args) -> None:
     """Open a project — set TERMINAL_CWD and launch hermes."""
-    from hermes_state import SessionDB
-
-    db = SessionDB()
+    db = _project_session_db()
     project = db.get_project(args.name)
     if not project:
         print(f"Project not found: {args.name}")
@@ -2982,9 +3001,7 @@ def project_open(args) -> None:
 
 def project_status(args) -> None:
     """Show or set project status."""
-    from hermes_state import SessionDB
-
-    db = SessionDB()
+    db = _project_session_db()
     project = db.get_project(args.name)
     if not project:
         print(f"Project not found: {args.name}")
@@ -3008,9 +3025,7 @@ def project_status(args) -> None:
 
 def project_archive(args) -> None:
     """Archive a completed project."""
-    from hermes_state import SessionDB
-
-    db = SessionDB()
+    db = _project_session_db()
     project = db.get_project(args.name)
     if not project:
         print(f"Project not found: {args.name}")
@@ -3021,9 +3036,7 @@ def project_archive(args) -> None:
 
 def project_sessions(args) -> None:
     """List sessions linked to a project."""
-    from hermes_state import SessionDB
-
-    db = SessionDB()
+    db = _project_session_db()
     project = db.get_project(args.name)
     if not project:
         print(f"Project not found: {args.name}")

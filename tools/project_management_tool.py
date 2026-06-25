@@ -17,6 +17,24 @@ import os
 from pathlib import Path
 
 
+def _project_session_db():
+    """Return the SessionDB used as the shared project registry."""
+    from hermes_state import SessionDB
+
+    db_path = os.environ.get("HERMES_PROJECTS_DB_PATH", "").strip()
+    if not db_path:
+        try:
+            from hermes_cli.profiles import get_active_profile_name
+            from hermes_constants import get_default_hermes_root
+
+            if get_active_profile_name() == "lex-master":
+                db_path = str(get_default_hermes_root() / "state.db")
+        except Exception:
+            db_path = ""
+
+    return SessionDB(db_path=Path(db_path)) if db_path else SessionDB()
+
+
 # ── Schemas ──────────────────────────────────────────────────────────────────
 
 PROJECT_INIT_SCHEMA = {
@@ -166,9 +184,7 @@ def _resolve_cwd() -> str:
 
 def _resolve_project(name_or_id: str):
     """Look up a project by name or ID. Returns dict or None."""
-    from hermes_state import SessionDB
-
-    db = SessionDB()
+    db = _project_session_db()
     return db.get_project(name_or_id)
 
 
@@ -178,9 +194,7 @@ def resolve_selected_project(parent_agent=None, session_id: str | None = None):
     This is intentionally read-only and best-effort. It lets orchestration tools
     resolve project context without depending on CLI-only state.
     """
-    from hermes_state import SessionDB
-
-    db = SessionDB()
+    db = _project_session_db()
 
     if _active_project_name:
         project = db.get_project(_active_project_name)
@@ -311,9 +325,7 @@ def project_init_handler(args: dict, **kwargs) -> str:
 
 def project_list_handler(args: dict, **kwargs) -> str:
     """List all registered projects."""
-    from hermes_state import SessionDB
-
-    db = SessionDB()
+    db = _project_session_db()
     status = args.get("status")
     projects = db.list_projects(status)
 
@@ -402,8 +414,6 @@ def project_select_handler(args: dict, **kwargs) -> str:
 
 def project_context_handler(args: dict, **kwargs) -> str:
     """Read or update project context."""
-    from hermes_state import SessionDB
-
     project_name = args.get("project_name") or _active_project_name
     if not project_name:
         return json.dumps(
@@ -465,7 +475,7 @@ def project_context_handler(args: dict, **kwargs) -> str:
                 }
             )
 
-        db = SessionDB()
+        db = _project_session_db()
         db.update_project(project["id"], **{field: value})
 
         # Also update project-meta.json on disk
@@ -497,8 +507,6 @@ def project_context_handler(args: dict, **kwargs) -> str:
 
 def project_status_handler(args: dict, **kwargs) -> str:
     """Read or update project status."""
-    from hermes_state import SessionDB
-
     project_name = args.get("project_name") or _active_project_name
 
     if not project_name:
@@ -539,7 +547,7 @@ def project_status_handler(args: dict, **kwargs) -> str:
             }
         )
 
-    db = SessionDB()
+    db = _project_session_db()
     previous = project["status"]
     db.update_project(project["id"], status=new_status)
 
