@@ -116,6 +116,40 @@ def test_stopped_profile_is_registered_but_not_started(tmp_path: Path) -> None:
     assert (scandir / "gateway-writer" / "down").exists()
 
 
+def test_force_start_profile_overrides_stopped_state(tmp_path: Path) -> None:
+    scandir = tmp_path / "run-service"; scandir.mkdir()
+    _make_profile(tmp_path, "lex-master", state="stopped")
+
+    actions = reconcile_profile_gateways(
+        hermes_home=tmp_path,
+        scandir=scandir,
+        force_start_profiles={"lex-master"},
+        dry_run=False,
+    )
+
+    assert _named_actions(actions) == [ReconcileAction(
+        profile="lex-master", prior_state="stopped", action="started",
+    )]
+    assert not (scandir / "gateway-lex-master" / "down").exists()
+
+
+def test_force_start_default_overrides_stopped_state(tmp_path: Path) -> None:
+    scandir = tmp_path / "run-service"; scandir.mkdir()
+    _seed_default_root(tmp_path, state="stopped")
+
+    actions = reconcile_profile_gateways(
+        hermes_home=tmp_path,
+        scandir=scandir,
+        force_start_default=True,
+        dry_run=False,
+    )
+
+    assert actions[0] == ReconcileAction(
+        profile="default", prior_state="stopped", action="started",
+    )
+    assert not (scandir / "gateway-default" / "down").exists()
+
+
 def test_startup_failed_does_not_autostart(tmp_path: Path) -> None:
     """Avoid crash-loop on restart when the gateway was failing to boot."""
     scandir = tmp_path / "run-service"; scandir.mkdir()

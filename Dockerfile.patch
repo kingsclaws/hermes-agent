@@ -3,6 +3,9 @@
 ARG BASE_IMAGE=localhost:6678/lex-hermes:latest
 FROM ${BASE_IMAGE}
 
+ENV HERMES_AUTO_GATEWAY=1
+ENV HERMES_AUTO_GATEWAY_PROFILES=lex-master
+
 # ── Changed lexitool vendored modules ──
 COPY vendor/lexitool/lexitool/edit_ops.py /opt/lexitool/lexitool/edit_ops.py
 COPY vendor/lexitool/lexitool/markup.py /opt/lexitool/lexitool/markup.py
@@ -29,6 +32,7 @@ COPY tools/legal_orchestration_tool.py /opt/hermes/tools/legal_orchestration_too
 COPY tools/legal_workflow_tool.py /opt/hermes/tools/legal_workflow_tool.py
 COPY toolsets.py /opt/hermes/toolsets.py
 COPY hermes_cli/tools_config.py /opt/hermes/hermes_cli/tools_config.py
+COPY hermes_cli/container_boot.py /opt/hermes/hermes_cli/container_boot.py
 COPY gateway/agent_cache.py /opt/hermes/gateway/agent_cache.py
 COPY gateway/agent_execution.py /opt/hermes/gateway/agent_execution.py
 COPY gateway/message_handler.py /opt/hermes/gateway/message_handler.py
@@ -40,6 +44,7 @@ COPY tools/legal_orchestration_tool.py /opt/lex-hermes/tools/legal_orchestration
 COPY tools/legal_workflow_tool.py /opt/lex-hermes/tools/legal_workflow_tool.py
 COPY toolsets.py /opt/lex-hermes/toolsets.py
 COPY hermes_cli/tools_config.py /opt/lex-hermes/hermes_cli/tools_config.py
+COPY hermes_cli/container_boot.py /opt/lex-hermes/hermes_cli/container_boot.py
 COPY gateway/agent_cache.py /opt/lex-hermes/gateway/agent_cache.py
 COPY gateway/agent_execution.py /opt/lex-hermes/gateway/agent_execution.py
 COPY gateway/message_handler.py /opt/lex-hermes/gateway/message_handler.py
@@ -67,4 +72,4 @@ RUN find /opt/lexitool/lexitool/__pycache__ -name '*.pyc' -delete 2>/dev/null; \
     find /opt/hermes/tools/__pycache__ -name '*.pyc' -delete 2>/dev/null; \
     find /opt/lex-hermes/tools/__pycache__ -name '*.pyc' -delete 2>/dev/null; \
     python3 -c "import lexitool.edit_ops, lexitool.markup, lexitool.ocr, lexitool.ocr_cli, lexitool.openxml_opc, lexitool.review_detailed; print('All modules import OK')"; \
-    cd /opt/lex-hermes && /opt/hermes/.venv/bin/python -m py_compile toolsets.py tools/legal_workflow_tool.py tools/legal_orchestration_tool.py hermes_cli/tools_config.py gateway/agent_cache.py gateway/agent_execution.py gateway/message_handler.py gateway/slash_commands.py tests/test_legal_harness_toolsets.py
+    cd /opt/lex-hermes && /opt/hermes/.venv/bin/python -m py_compile toolsets.py tools/legal_workflow_tool.py tools/legal_orchestration_tool.py hermes_cli/tools_config.py hermes_cli/container_boot.py gateway/agent_cache.py gateway/agent_execution.py gateway/message_handler.py gateway/slash_commands.py tests/test_legal_harness_toolsets.py

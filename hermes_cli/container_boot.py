@@ -44,6 +44,18 @@ _STALE_RUNTIME_FILES = ("gateway.pid", "processes.json")
 ReconcileActionLabel = Literal["started", "registered", "skipped"]
 
 
+def _is_truthy_env(value: str | None) -> bool:
+    return (value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _parse_autostart_profiles(value: str | None) -> set[str]:
+    """Parse a comma/space separated profile list for container boot."""
+    if not value:
+        return set()
+    normalized = value.replace(",", " ")
+    return {part.strip() for part in normalized.split() if part.strip()}
+
+
 @dataclass(frozen=True)
 class ReconcileAction:
     """One profile's outcome from a single reconciliation pass."""
@@ -56,6 +68,8 @@ def reconcile_profile_gateways(
     *,
     hermes_home: Path,
     scandir: Path,
+    force_start_default: bool = False,
+    force_start_profiles: set[str] | None = None,
     dry_run: bool = False,
 ) -> list[ReconcileAction]:
     """Recreate s6 service registrations for every persistent profile.
@@ -95,7 +109,12 @@ def reconcile_profile_gateways(
     # auto-up only when the prior state was "running" (same rule as
     # named profiles).
     default_prior_state = _read_prior_state(hermes_home)
-    default_should_start = default_prior_state in _AUTOSTART_STATES
+    force_start_profiles = force_start_profiles or set()
+    default_should_start = (
+        default_prior_state in _AUTOSTART_STATES
+        or force_start_default
+        or "default" in force_start_profiles
+    )
     if not dry_run:
         _cleanup_stale_runtime_files(hermes_home)
         _register_service(scandir, "default", start=default_should_start)
@@ -130,7 +149,11 @@ def reconcile_profile_gateways(
                 continue
 
             prior_state = _read_prior_state(entry)
-            should_start = prior_state in _AUTOSTART_STATES
+            should_start = (
+                prior_state in _AUTOSTART_STATES
+                or entry.name in force_start_profiles
+                or "*" in force_start_profiles
+            )
 
             if not dry_run:
                 _cleanup_stale_runtime_files(entry)
@@ -310,8 +333,15 @@ def main() -> int:
     """Entry point invoked from /etc/cont-init.d/02-reconcile-profiles."""
     hermes_home = Path(os.environ.get("HERMES_HOME", "/opt/data"))
     scandir = Path(os.environ.get("S6_PROFILE_GATEWAY_SCANDIR", "/run/service"))
+    force_start_default = _is_truthy_env(os.environ.get("HERMES_AUTO_GATEWAY"))
+    force_start_profiles = _parse_autostart_profiles(
+        os.environ.get("HERMES_AUTO_GATEWAY_PROFILES")
+    )
     actions = reconcile_profile_gateways(
-        hermes_home=hermes_home, scandir=scandir,
+        hermes_home=hermes_home,
+        scandir=scandir,
+        force_start_default=force_start_default,
+        force_start_profiles=force_start_profiles,
     )
     for a in actions:
         print(
