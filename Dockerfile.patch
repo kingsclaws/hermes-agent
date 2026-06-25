@@ -10,6 +10,7 @@ COPY vendor/lexitool/lexitool/ocr.py /opt/lexitool/lexitool/ocr.py
 COPY vendor/lexitool/lexitool/ocr_cli.py /opt/lexitool/lexitool/ocr_cli.py
 COPY vendor/lexitool/lexitool/openxml_opc.py /opt/lexitool/lexitool/openxml_opc.py
 COPY vendor/lexitool/lexitool/review_detailed.py /opt/lexitool/lexitool/review_detailed.py
+COPY vendor/lexitool/lexitool/tc_utils.py /opt/lexitool/lexitool/tc_utils.py
 
 # Also update the hermes vendored copy
 COPY vendor/lexitool/lexitool/edit_ops.py /opt/hermes/vendor/lexitool/lexitool/edit_ops.py
@@ -18,13 +19,23 @@ COPY vendor/lexitool/lexitool/ocr.py /opt/hermes/vendor/lexitool/lexitool/ocr.py
 COPY vendor/lexitool/lexitool/ocr_cli.py /opt/hermes/vendor/lexitool/lexitool/ocr_cli.py
 COPY vendor/lexitool/lexitool/openxml_opc.py /opt/hermes/vendor/lexitool/lexitool/openxml_opc.py
 COPY vendor/lexitool/lexitool/review_detailed.py /opt/hermes/vendor/lexitool/lexitool/review_detailed.py
+COPY vendor/lexitool/lexitool/tc_utils.py /opt/hermes/vendor/lexitool/lexitool/tc_utils.py
 
 # ── Changed tool registration ──
 COPY tools/kanban_toolset.py /opt/hermes/tools/kanban_toolset.py
 COPY tools/lexitool_tool.py /opt/hermes/tools/lexitool_tool.py
 COPY tools/project_management_tool.py /opt/hermes/tools/project_management_tool.py
 COPY tools/legal_orchestration_tool.py /opt/hermes/tools/legal_orchestration_tool.py
+COPY tools/legal_workflow_tool.py /opt/hermes/tools/legal_workflow_tool.py
 COPY toolsets.py /opt/hermes/toolsets.py
+COPY hermes_cli/tools_config.py /opt/hermes/hermes_cli/tools_config.py
+
+# Keep the editable /opt/lex-hermes checkout in sync for images that import
+# from that source path via site-packages .pth metadata.
+COPY tools/legal_orchestration_tool.py /opt/lex-hermes/tools/legal_orchestration_tool.py
+COPY tools/legal_workflow_tool.py /opt/lex-hermes/tools/legal_workflow_tool.py
+COPY toolsets.py /opt/lex-hermes/toolsets.py
+COPY hermes_cli/tools_config.py /opt/lex-hermes/hermes_cli/tools_config.py
 
 # ── Updated HPSwarm SOPs ──
 RUN mkdir -p /opt/hermes/.hermes-project/roles
@@ -32,6 +43,12 @@ COPY .hermes-project/roles/hpswarm-coordinator.md /opt/hermes/.hermes-project/ro
 COPY .hermes-project/roles/hpswarm-drafter.md /opt/hermes/.hermes-project/roles/hpswarm-drafter.md
 COPY .hermes-project/roles/hpswarm-reviewer-content.md /opt/hermes/.hermes-project/roles/hpswarm-reviewer-content.md
 COPY .hermes-project/roles/hpswarm-reviewer-format.md /opt/hermes/.hermes-project/roles/hpswarm-reviewer-format.md
+COPY .hermes-project/roles/hpswarm-coordinator.md /opt/lex-hermes/.hermes-project/roles/hpswarm-coordinator.md
+
+# ── Legal harness tests ──
+RUN mkdir -p /opt/hermes/tests /opt/lex-hermes/tests
+COPY tests/test_legal_harness_toolsets.py /opt/hermes/tests/test_legal_harness_toolsets.py
+COPY tests/test_legal_harness_toolsets.py /opt/lex-hermes/tests/test_legal_harness_toolsets.py
 
 # ── Updated session/project binding ──
 COPY hermes_state.py /opt/hermes/hermes_state.py
@@ -40,4 +57,6 @@ COPY hermes_state.py /opt/hermes/hermes_state.py
 RUN find /opt/lexitool/lexitool/__pycache__ -name '*.pyc' -delete 2>/dev/null; \
     find /opt/hermes/vendor/lexitool/lexitool/__pycache__ -name '*.pyc' -delete 2>/dev/null; \
     find /opt/hermes/tools/__pycache__ -name '*.pyc' -delete 2>/dev/null; \
-    python3 -c "import lexitool.edit_ops, lexitool.markup, lexitool.ocr, lexitool.ocr_cli, lexitool.openxml_opc, lexitool.review_detailed; print('All modules import OK')"
+    find /opt/lex-hermes/tools/__pycache__ -name '*.pyc' -delete 2>/dev/null; \
+    python3 -c "import lexitool.edit_ops, lexitool.markup, lexitool.ocr, lexitool.ocr_cli, lexitool.openxml_opc, lexitool.review_detailed; print('All modules import OK')"; \
+    cd /opt/lex-hermes && /opt/hermes/.venv/bin/python -m py_compile toolsets.py tools/legal_workflow_tool.py tools/legal_orchestration_tool.py hermes_cli/tools_config.py tests/test_legal_harness_toolsets.py
