@@ -133,6 +133,8 @@ RUN set -e; \
     cp .hermes-project/roles/hpswarm-reviewer-format.md /opt/lex-hermes/.hermes-project/roles/hpswarm-reviewer-format.md; \
     cp tests/test_legal_harness_toolsets.py /opt/hermes/tests/test_legal_harness_toolsets.py; \
     cp tests/test_legal_harness_toolsets.py /opt/lex-hermes/tests/test_legal_harness_toolsets.py; \
+    cp tests/test_lex_master_route.py /opt/hermes/tests/test_lex_master_route.py; \
+    cp tests/test_lex_master_route.py /opt/lex-hermes/tests/test_lex_master_route.py; \
     cp tests/test_lexitool_ocr_fallback.py /opt/hermes/tests/test_lexitool_ocr_fallback.py; \
     cp tests/test_lexitool_ocr_fallback.py /opt/lex-hermes/tests/test_lexitool_ocr_fallback.py; \
     mkdir -p /opt/hermes/tests/plugins /opt/lex-hermes/tests/plugins; \
@@ -194,6 +196,7 @@ RUN set -e; \
       gateway/status.py \
       tests/test_lexitool_ocr_fallback.py \
       tests/test_legal_harness_toolsets.py \
+      tests/test_lex_master_route.py \
       tests/plugins/test_backoffice_issue_relay.py \
       tests/plugins/test_legal_drafting_gate.py \
       plugins/backoffice-issue-relay/__init__.py \

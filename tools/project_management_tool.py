@@ -14,6 +14,9 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
+import time
+import uuid
 from pathlib import Path
 
 
@@ -169,6 +172,58 @@ PROJECT_STATUS_SCHEMA = {
     },
 }
 
+LEX_MASTER_ROUTE_SCHEMA = {
+    "name": "lex_master_route",
+    "description": (
+        "Lex-master routing tool. Use this before doing any project-specific "
+        "legal work from the lex-master profile. It lists registered projects, "
+        "resolves a user request to the right project/coordinator session, and "
+        "can dispatch the request to that coordinator by resuming the project "
+        "session under the default/root profile. lex-master should coordinate "
+        "and report routing status, not directly edit project documents."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "action": {
+                "type": "string",
+                "enum": ["list_projects", "resolve", "dispatch", "status"],
+                "description": (
+                    "list_projects: show shared registry projects. resolve: find "
+                    "best project/coordinator session. dispatch: asynchronously "
+                    "send task to that coordinator session. status: inspect a "
+                    "previous dispatch route_id."
+                ),
+            },
+            "query": {
+                "type": "string",
+                "description": "Project hint or natural-language request, e.g. '魔方投资银团变更'.",
+            },
+            "project_id": {
+                "type": "string",
+                "description": "Optional exact project id. Takes precedence over query.",
+            },
+            "task": {
+                "type": "string",
+                "description": "Task/instruction to send to the project coordinator for action=dispatch.",
+            },
+            "session_id": {
+                "type": "string",
+                "description": "Optional exact coordinator session id. If omitted, the best project session is chosen.",
+            },
+            "route_id": {
+                "type": "string",
+                "description": "Route id returned by dispatch; used by action=status.",
+            },
+            "async": {
+                "type": "boolean",
+                "description": "Dispatch asynchronously. Default true.",
+            },
+        },
+        "required": ["action"],
+    },
+}
+
 
 # ── Internal helpers ─────────────────────────────────────────────────────────
 
@@ -186,6 +241,175 @@ def _resolve_project(name_or_id: str):
     """Look up a project by name or ID. Returns dict or None."""
     db = _project_session_db()
     return db.get_project(name_or_id)
+
+
+def _shared_project_db_path() -> Path:
+    """Root/default project registry used by lex-master cross-profile routing."""
+    configured = os.environ.get("HERMES_PROJECTS_DB_PATH", "").strip()
+    if configured:
+        return Path(configured)
+    try:
+        from hermes_constants import get_default_hermes_root
+
+        return get_default_hermes_root() / "state.db"
+    except Exception:
+        return Path("/root/.hermes/state.db")
+
+
+def _route_dir() -> Path:
+    try:
+        from hermes_constants import get_hermes_home
+
+        base = get_hermes_home()
+    except Exception:
+        base = Path.home() / ".hermes"
+    path = base / "master-routes"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _norm_text(value: object) -> str:
+    return str(value or "").strip().lower().replace(" ", "")
+
+
+def _score_project(project: dict, query: str) -> int:
+    q = _norm_text(query)
+    if not q:
+        return 0
+    fields = [
+        project.get("id"),
+        project.get("name"),
+        project.get("client"),
+        project.get("goal"),
+        project.get("path"),
+        project.get("cwd"),
+        project.get("notes"),
+    ]
+    score = 0
+    for field in fields:
+        text = _norm_text(field)
+        if not text:
+            continue
+        if q == text:
+            score += 100
+        elif q in text:
+            score += 40
+        elif text in q and len(text) >= 2:
+            score += 35
+        else:
+            for token in [t for t in q.replace("/", " ").split() if len(t) >= 2]:
+                if token in text:
+                    score += 5
+    return score
+
+
+def _session_last_activity(row: dict) -> float:
+    for key in ("ended_at", "started_at"):
+        try:
+            value = row.get(key)
+            if value is not None:
+                return float(value)
+        except Exception:
+            pass
+    return 0.0
+
+
+def _project_candidates(db, query: str = "", project_id: str = "") -> list[dict]:
+    projects = db.list_projects()
+    if project_id:
+        return [p for p in projects if p.get("id") == project_id]
+    if not query:
+        return sorted(projects, key=lambda p: p.get("updated_at") or p.get("created_at") or 0, reverse=True)
+    scored = [(p, _score_project(p, query)) for p in projects]
+    return [p for p, score in sorted(scored, key=lambda item: item[1], reverse=True) if score > 0]
+
+
+def _session_score(session: dict, project: dict) -> int:
+    score = 0
+    if session.get("project_id") == project.get("id"):
+        score += 100
+    project_path = str(project.get("path") or project.get("cwd") or "")
+    session_cwd = str(session.get("project_cwd") or "")
+    if project_path and session_cwd and (session_cwd.startswith(project_path) or project_path.startswith(session_cwd)):
+        score += 50
+    title = _norm_text(session.get("title"))
+    pname = _norm_text(project.get("name"))
+    if pname and title and pname in title:
+        score += 30
+    if session.get("parent_session_id"):
+        score -= 20
+    if session.get("end_reason") in {"compression", "resumed_other"}:
+        score -= 10
+    score += min(int(_session_last_activity(session) // 1_000_000), 9999)
+    return score
+
+
+def _find_coordinator_session(db, project: dict, session_id: str = "") -> dict | None:
+    if session_id:
+        try:
+            return db.get_session(session_id)
+        except Exception:
+            return None
+    sessions = db.list_sessions_rich(limit=500)
+    scored = [(s, _session_score(s, project)) for s in sessions]
+    scored = [(s, score) for s, score in scored if score > 0]
+    if not scored:
+        return None
+    return sorted(scored, key=lambda item: item[1], reverse=True)[0][0]
+
+
+def _dispatch_to_session(*, session_id: str, task: str, project: dict, route_id: str, async_mode: bool) -> dict:
+    route_path = _route_dir() / f"{route_id}.json"
+    log_path = _route_dir() / f"{route_id}.log"
+    prompt = (
+        "[lex-master route]\n"
+        f"Project: {project.get('name')} ({project.get('id')})\n"
+        f"Project path: {project.get('path') or project.get('cwd') or ''}\n"
+        "You are the project coordinator session for this matter. Do not treat "
+        "this as a fresh unrelated request. Continue the existing project context, "
+        "use project facts/kanban/harness as appropriate, and report progress/results "
+        "back in this session.\n\n"
+        f"User request from lex-master:\n{task.strip()}\n"
+    )
+    cmd = ["hermes", "-p", "default", "--resume", session_id, "-z", prompt]
+    record = {
+        "route_id": route_id,
+        "created_at": time.time(),
+        "project_id": project.get("id"),
+        "project_name": project.get("name"),
+        "session_id": session_id,
+        "task": task,
+        "command": cmd,
+        "log_path": str(log_path),
+        "status": "starting",
+    }
+    route_path.write_text(json.dumps(record, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+    if async_mode:
+        with log_path.open("ab") as log:
+            proc = subprocess.Popen(
+                cmd,
+                stdout=log,
+                stderr=subprocess.STDOUT,
+                stdin=subprocess.DEVNULL,
+                start_new_session=True,
+                env={**os.environ, "HERMES_PROJECTS_DB_PATH": str(_shared_project_db_path())},
+            )
+        record.update({"status": "dispatched", "pid": proc.pid})
+        route_path.write_text(json.dumps(record, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        return record
+
+    completed = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        timeout=1800,
+        env={**os.environ, "HERMES_PROJECTS_DB_PATH": str(_shared_project_db_path())},
+    )
+    log_path.write_text((completed.stdout or "") + (completed.stderr or ""), encoding="utf-8")
+    record.update({"status": "completed" if completed.returncode == 0 else "failed", "returncode": completed.returncode})
+    route_path.write_text(json.dumps(record, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return record
 
 
 def resolve_selected_project(parent_agent=None, session_id: str | None = None):
@@ -575,6 +799,172 @@ def project_status_handler(args: dict, **kwargs) -> str:
     )
 
 
+def lex_master_route_handler(args: dict, **kwargs) -> str:
+    """Route lex-master requests to the right project coordinator session."""
+    action = str(args.get("action") or "").strip()
+    db_path = _shared_project_db_path()
+    try:
+        from hermes_state import SessionDB
+
+        db = SessionDB(db_path=db_path)
+    except Exception as exc:
+        return json.dumps(
+            {
+                "success": False,
+                "error": f"Cannot open shared project registry: {exc}",
+                "db_path": str(db_path),
+            },
+            ensure_ascii=False,
+        )
+
+    if action == "list_projects":
+        projects = _project_candidates(db)
+        return json.dumps(
+            {
+                "success": True,
+                "db_path": str(db_path),
+                "projects": [
+                    {
+                        "id": p.get("id"),
+                        "name": p.get("name"),
+                        "client": p.get("client"),
+                        "goal": p.get("goal"),
+                        "status": p.get("status"),
+                        "path": p.get("path") or p.get("cwd"),
+                        "updated_at": p.get("updated_at"),
+                    }
+                    for p in projects
+                ],
+                "count": len(projects),
+            },
+            ensure_ascii=False,
+        )
+
+    if action == "status":
+        route_id = str(args.get("route_id") or "").strip()
+        if not route_id:
+            return json.dumps({"success": False, "error": "route_id is required for status"}, ensure_ascii=False)
+        route_path = _route_dir() / f"{route_id}.json"
+        if not route_path.is_file():
+            return json.dumps({"success": False, "error": f"route not found: {route_id}"}, ensure_ascii=False)
+        try:
+            record = json.loads(route_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            return json.dumps({"success": False, "error": f"cannot read route: {exc}"}, ensure_ascii=False)
+        pid = record.get("pid")
+        if pid:
+            try:
+                os.kill(int(pid), 0)
+                record["process_alive"] = True
+            except OSError:
+                record["process_alive"] = False
+        log_path = Path(record.get("log_path") or "")
+        if log_path.is_file():
+            try:
+                text = log_path.read_text(encoding="utf-8", errors="ignore")
+                record["log_tail"] = text[-4000:]
+            except Exception:
+                pass
+        return json.dumps({"success": True, "route": record}, ensure_ascii=False)
+
+    if action not in {"resolve", "dispatch"}:
+        return json.dumps(
+            {"success": False, "error": "action must be list_projects, resolve, dispatch, or status"},
+            ensure_ascii=False,
+        )
+
+    query = str(args.get("query") or args.get("task") or "").strip()
+    project_id = str(args.get("project_id") or "").strip()
+    candidates = _project_candidates(db, query=query, project_id=project_id)
+    if not candidates:
+        return json.dumps(
+            {
+                "success": False,
+                "error": "No matching project found.",
+                "db_path": str(db_path),
+                "query": query,
+                "hint": "Call lex_master_route(action='list_projects') and ask the user to choose a project.",
+            },
+            ensure_ascii=False,
+        )
+
+    project = candidates[0]
+    session = _find_coordinator_session(db, project, str(args.get("session_id") or "").strip())
+    response = {
+        "success": True,
+        "action": action,
+        "db_path": str(db_path),
+        "project": {
+            "id": project.get("id"),
+            "name": project.get("name"),
+            "client": project.get("client"),
+            "goal": project.get("goal"),
+            "status": project.get("status"),
+            "path": project.get("path") or project.get("cwd"),
+        },
+        "coordinator_session": (
+            {
+                "id": session.get("id"),
+                "title": session.get("title"),
+                "source": session.get("source"),
+                "project_id": session.get("project_id"),
+                "project_cwd": session.get("project_cwd"),
+                "started_at": session.get("started_at"),
+                "ended_at": session.get("ended_at"),
+                "end_reason": session.get("end_reason"),
+                "message_count": session.get("message_count"),
+            }
+            if session
+            else None
+        ),
+        "other_candidates": [
+            {"id": p.get("id"), "name": p.get("name"), "path": p.get("path") or p.get("cwd")}
+            for p in candidates[1:5]
+        ],
+    }
+
+    if action == "resolve":
+        if not session:
+            response["warning"] = "Project resolved, but no coordinator session was found."
+        return json.dumps(response, ensure_ascii=False)
+
+    task = str(args.get("task") or "").strip()
+    if not task:
+        response.update({"success": False, "error": "task is required for dispatch"})
+        return json.dumps(response, ensure_ascii=False)
+    if not session:
+        response.update(
+            {
+                "success": False,
+                "error": "No coordinator session found for project; ask user whether to create a project session first.",
+            }
+        )
+        return json.dumps(
+            response,
+            ensure_ascii=False,
+        )
+
+    route_id = f"route_{uuid.uuid4().hex[:12]}"
+    async_mode = bool(args.get("async", True))
+    try:
+        route_record = _dispatch_to_session(
+            session_id=session["id"],
+            task=task,
+            project=project,
+            route_id=route_id,
+            async_mode=async_mode,
+        )
+    except Exception as exc:
+        response.update({"success": False, "error": f"dispatch failed: {exc}"})
+        return json.dumps(response, ensure_ascii=False)
+    response["route"] = route_record
+    response["message"] = (
+        "Task dispatched to the project coordinator session. lex-master should now report the route_id "
+        "and wait for or poll status instead of doing the project work itself."
+    )
+    return json.dumps(response, ensure_ascii=False)
+
+
 # ── Registry registration (discovered by AST scanner) ────────────────────────
 
 from tools.registry import registry, tool_error, tool_result  # noqa: E402
@@ -617,4 +1007,12 @@ registry.register(
     schema=PROJECT_STATUS_SCHEMA,
     handler=lambda args, **kw: project_status_handler(args, **kw),
     emoji="🔄",
+)
+
+registry.register(
+    name="lex_master_route",
+    toolset="project_management",
+    schema=LEX_MASTER_ROUTE_SCHEMA,
+    handler=lambda args, **kw: lex_master_route_handler(args, **kw),
+    emoji="🧭",
 )

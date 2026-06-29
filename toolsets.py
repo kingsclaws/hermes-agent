@@ -102,6 +102,7 @@ _HERMES_CORE_TOOLS = [
     "clarify",
     # Project management
     "project_create", "project_delete", "project_select", "project_status", "project_context", "project_list",
+    "lex_master_route",
     # Code execution + delegation
     "execute_code", "delegate_task",
     # Legal workflow orchestration.  legal_workflow is the public entrypoint;
@@ -127,7 +128,7 @@ _HERMES_CORE_TOOLS = [
     "computer_use",
     # Project management (always available for legal project lifecycle)
     "project_init", "project_list", "project_select",
-    "project_context", "project_status",
+    "project_context", "project_status", "lex_master_route",
 ]
 
 # Webhook events may originate from untrusted third-party content (for example,
