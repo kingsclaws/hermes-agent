@@ -11,6 +11,11 @@ FROM ${BASE_IMAGE}
 ENV HERMES_AUTO_GATEWAY=1
 ENV HERMES_AUTO_GATEWAY_PROFILES=lex-master
 ENV HERMES_PROJECTS_DB_PATH=/root/.hermes/state.db
+ENV PATH=/opt/hermes/.venv/bin:/opt/hermes/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ENV VIRTUAL_ENV=/opt/hermes/.venv
+ENV HERMES_WEB_DIST=/opt/hermes/hermes_cli/web_dist
+
+ENTRYPOINT ["/start-lex.sh"]
 
 COPY . /tmp/lex-hermes-patch
 
@@ -161,7 +166,7 @@ RUN set -e; \
       /opt/hermes/gateway/message_handler.py /opt/lex-hermes/gateway/message_handler.py \
       /opt/hermes/gateway/slash_commands.py /opt/lex-hermes/gateway/slash_commands.py \
       /opt/hermes/gateway/status.py /opt/lex-hermes/gateway/status.py; \
-    python3 -c "import lexitool.edit_ops, lexitool.markup, lexitool.ocr, lexitool.ocr_cli, lexitool.openxml_opc, lexitool.review_detailed; print('All modules import OK')"; \
+    /opt/hermes/.venv/bin/python -c "import lexitool.edit_ops, lexitool.markup, lexitool.ocr, lexitool.ocr_cli, lexitool.openxml_opc, lexitool.review_detailed; print('All modules import OK')"; \
     /opt/hermes/.venv/bin/python -c "import lexitool.ocr; print(lexitool.ocr.__file__)"; \
     cd /opt/lex-hermes; \
     /opt/hermes/.venv/bin/python -m py_compile \
