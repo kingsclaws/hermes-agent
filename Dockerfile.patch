@@ -32,6 +32,9 @@ RUN set -e; \
     cp vendor/lexitool/lexitool/openxml_opc.py /opt/hermes/vendor/lexitool/lexitool/openxml_opc.py; \
     cp vendor/lexitool/lexitool/review_detailed.py /opt/hermes/vendor/lexitool/lexitool/review_detailed.py; \
     cp vendor/lexitool/lexitool/tc_utils.py /opt/hermes/vendor/lexitool/lexitool/tc_utils.py; \
+    VENV_LEXITOOL=$(/opt/hermes/.venv/bin/python -c 'import pathlib, lexitool; print(pathlib.Path(lexitool.__file__).parent)'); \
+    cp vendor/lexitool/lexitool/ocr.py "$VENV_LEXITOOL/ocr.py"; \
+    cp vendor/lexitool/lexitool/ocr_cli.py "$VENV_LEXITOOL/ocr_cli.py"; \
     \
     cp tools/kanban_toolset.py /opt/hermes/tools/kanban_toolset.py; \
     cp tools/lexitool_tool.py /opt/hermes/tools/lexitool_tool.py; \
@@ -102,6 +105,8 @@ RUN set -e; \
     cp .hermes-project/roles/hpswarm-reviewer-format.md /opt/lex-hermes/.hermes-project/roles/hpswarm-reviewer-format.md; \
     cp tests/test_legal_harness_toolsets.py /opt/hermes/tests/test_legal_harness_toolsets.py; \
     cp tests/test_legal_harness_toolsets.py /opt/lex-hermes/tests/test_legal_harness_toolsets.py; \
+    cp tests/test_lexitool_ocr_fallback.py /opt/hermes/tests/test_lexitool_ocr_fallback.py; \
+    cp tests/test_lexitool_ocr_fallback.py /opt/lex-hermes/tests/test_lexitool_ocr_fallback.py; \
     mkdir -p /opt/hermes/tests/gateway /opt/lex-hermes/tests/gateway; \
     cp tests/gateway/test_status.py /opt/hermes/tests/gateway/test_status.py; \
     cp tests/gateway/test_status.py /opt/lex-hermes/tests/gateway/test_status.py; \
@@ -109,6 +114,7 @@ RUN set -e; \
     \
     find /opt/lexitool/lexitool/__pycache__ -name '*.pyc' -delete 2>/dev/null; \
     find /opt/hermes/vendor/lexitool/lexitool/__pycache__ -name '*.pyc' -delete 2>/dev/null; \
+    find "$VENV_LEXITOOL/__pycache__" -name '*.pyc' -delete 2>/dev/null; \
     find /opt/hermes/tools/__pycache__ -name '*.pyc' -delete 2>/dev/null; \
     find /opt/lex-hermes/tools/__pycache__ -name '*.pyc' -delete 2>/dev/null; \
     chmod 644 \
@@ -128,6 +134,7 @@ RUN set -e; \
       /opt/hermes/gateway/slash_commands.py /opt/lex-hermes/gateway/slash_commands.py \
       /opt/hermes/gateway/status.py /opt/lex-hermes/gateway/status.py; \
     python3 -c "import lexitool.edit_ops, lexitool.markup, lexitool.ocr, lexitool.ocr_cli, lexitool.openxml_opc, lexitool.review_detailed; print('All modules import OK')"; \
+    /opt/hermes/.venv/bin/python -c "import lexitool.ocr; print(lexitool.ocr.__file__)"; \
     cd /opt/lex-hermes; \
     /opt/hermes/.venv/bin/python -m py_compile \
       cli.py \
@@ -149,6 +156,7 @@ RUN set -e; \
       gateway/message_handler.py \
       gateway/slash_commands.py \
       gateway/status.py \
+      tests/test_lexitool_ocr_fallback.py \
       tests/test_legal_harness_toolsets.py \
       tests/gateway/test_status.py; \
     rm -rf /tmp/lex-hermes-patch

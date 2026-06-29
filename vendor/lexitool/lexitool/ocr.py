@@ -11,6 +11,8 @@ Fallback: local Tesseract OCR (if tesseract + pdftoppm are installed).
 
 from __future__ import annotations
 
+import base64
+import json
 import os
 import shutil
 import subprocess
@@ -31,6 +33,28 @@ def _get_token() -> str | None:
         or os.environ.get("MINERU_TOKEN")
         or os.environ.get("MINERU_API_TOKEN")
     )
+
+
+def _safe_error(exc: Exception) -> str:
+    """Return a concise error string without exposing request headers/tokens."""
+    message = str(exc).strip()
+    if not message:
+        return exc.__class__.__name__
+    return message.replace("\n", " ")[:500]
+
+
+def _token_appears_expired(token: str) -> bool:
+    """Best-effort JWT expiry check. Opaque tokens are treated as unknown."""
+    parts = token.split(".")
+    if len(parts) < 2:
+        return False
+    payload = parts[1] + ("=" * (-len(parts[1]) % 4))
+    try:
+        data = json.loads(base64.urlsafe_b64decode(payload.encode("ascii")))
+    except Exception:
+        return False
+    exp = data.get("exp")
+    return isinstance(exp, (int, float)) and exp <= time.time() + 60
 
 
 def _poll(url: str, headers: dict, field: str = "state",
@@ -332,6 +356,7 @@ def parse_pdf(
 
     token = _get_token()
     api_used = "agent"
+    warnings: list[str] = []
 
     try:
         md_text = None
@@ -345,23 +370,32 @@ def parse_pdf(
 
         # 2) Remote PreciseAPI (best quality, needs token)
         if md_text is None and token and prefer_precise:
-            api = PreciseAPI(token)
-            md_text = api.parse_file(
-                file_path, model_version=model_version,
-                language=language, page_ranges=page_range, timeout=timeout,
-            )
-            if md_text:
-                api_used = "precise"
+            if _token_appears_expired(token):
+                warnings.append("MinerU Precision API token appears expired; skipped Precision API and used fallback OCR.")
+            else:
+                try:
+                    api = PreciseAPI(token)
+                    md_text = api.parse_file(
+                        file_path, model_version=model_version,
+                        language=language, page_ranges=page_range, timeout=timeout,
+                    )
+                    if md_text:
+                        api_used = "precise"
+                except Exception as exc:
+                    warnings.append(f"MinerU Precision API failed; falling back: {_safe_error(exc)}")
 
         # 3) Remote AgentAPI (free, no token)
         if md_text is None:
-            api = AgentAPI()
-            md_text = api.parse_file(
-                file_path, language=language,
-                page_range=page_range, timeout=timeout,
-            )
-            if md_text:
-                api_used = "agent"
+            try:
+                api = AgentAPI()
+                md_text = api.parse_file(
+                    file_path, language=language,
+                    page_range=page_range, timeout=timeout,
+                )
+                if md_text:
+                    api_used = "agent"
+            except Exception as exc:
+                warnings.append(f"MinerU Agent API failed; falling back: {_safe_error(exc)}")
 
         # 4) Tesseract fallback
         if md_text is None and _check_tesseract():
@@ -370,7 +404,7 @@ def parse_pdf(
                 api_used = "tesseract"
 
         if md_text:
-            return {
+            result = {
                 "ok": True,
                 "api": api_used,
                 "file": os.path.basename(file_path),
@@ -378,19 +412,25 @@ def parse_pdf(
                 "markdown": md_text,
                 "char_count": len(md_text),
             }
+            if warnings:
+                result["warnings"] = warnings
+            return result
         else:
-            return {
+            result = {
                 "ok": False,
                 "error": f"MinerU {api_used} API returned no content (timeout or parse failure)",
                 "api": api_used,
             }
+            if warnings:
+                result["warnings"] = warnings
+            return result
     except Exception as e:
         # Last resort: try tesseract if MinerU threw an exception
         if _check_tesseract():
             try:
                 md_text = _tesseract_pdf(file_path, language=language, page_range=page_range)
                 if md_text:
-                    return {
+                    result = {
                         "ok": True,
                         "api": "tesseract",
                         "file": os.path.basename(file_path),
@@ -398,6 +438,12 @@ def parse_pdf(
                         "markdown": md_text,
                         "char_count": len(md_text),
                     }
+                    if warnings:
+                        result["warnings"] = warnings
+                    return result
             except Exception:
                 pass
-        return {"ok": False, "error": str(e), "api": api_used}
+        result = {"ok": False, "error": _safe_error(e), "api": api_used}
+        if warnings:
+            result["warnings"] = warnings
+        return result
