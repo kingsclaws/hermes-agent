@@ -631,11 +631,11 @@ export function NativeChatSurface({
       <div className="flex items-center justify-between gap-2 border-b border-current/10 px-3 py-2">
         <div className="min-w-0 flex-1">
           <div className="text-xs uppercase tracking-wider text-muted-foreground">
-            native legal chat
+            Lex Gateway Web
           </div>
           <div className="flex items-center gap-3">
             <div className="truncate text-sm text-muted-foreground">
-              JSON-RPC session · tools and workflow rendered by Web UI
+              JSON-RPC session · native tools, slash commands, and workflow
             </div>
             {projectContext && (
               <div
@@ -730,7 +730,7 @@ export function NativeChatSurface({
             }}
             disabled={!sessionId || conn !== "open"}
             rows={2}
-            placeholder="输入法律工作指令。Shift+Enter 换行。Cmd+K 命令面板。"
+            placeholder="输入任务，或使用 /resume、/swarm、/kanban 等命令。Shift+Enter 换行。Cmd+K 命令面板。"
             className="min-h-12 flex-1 resize-none rounded border border-current/15 bg-black/10 px-3 py-2 text-sm outline-none focus:border-primary/60"
           />
           <Button

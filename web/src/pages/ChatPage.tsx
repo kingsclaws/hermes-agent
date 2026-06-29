@@ -36,7 +36,7 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
   const binding = useChatSessionBinding({ isActive, tabs, activeTabId, addTab, updateTab, findOrCreateTab });
   const {
     projects, sessions, selectedProjectId,
-    resumeParam, channel, handleSelectProject,
+    resumeParam, channel, handleSelectProject, handleSelectSession,
   } = binding;
 
   // Lazy-mount tabs: once visited, stay mounted for session persistence.
@@ -278,6 +278,9 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
         selectedProjectId={selectedProjectId}
         projects={projects}
         onSelectProject={handleSelectProject}
+        selectedSessionId={resumeParam}
+        sessions={sessions}
+        onSelectSession={handleSelectSession}
         sessionTitle={(() => {
           const s = resumeParam ? sessions.find((x) => x.id === resumeParam) : null;
           return s ? (s.title || s.id.slice(0, 12)) : null;
@@ -316,7 +319,7 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
                 )}
               >
                 <span className="truncate opacity-75">
-                  Native Web Chat · structured legal workspace
+                  Lex Gateway Web · projects, sessions, tools, and workflow
                 </span>
               </div>
 

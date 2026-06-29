@@ -287,9 +287,11 @@ def _official_board(project_path: str, title: str = "") -> dict:
 
 
 def _official_task_to_dict(task) -> dict:
+    project_path = task.workspace_path
     return {
         "id": task.id,
         "task_id": task.id,
+        "board_slug": getattr(task, "board", None),
         "title": task.title,
         "description": task.body or "",
         "assignee": task.assignee,
@@ -298,7 +300,10 @@ def _official_task_to_dict(task) -> dict:
         "created_at": task.created_at,
         "started_at": task.started_at,
         "completed_at": task.completed_at,
+        "workspace_kind": task.workspace_kind,
         "workspace_path": task.workspace_path,
+        "project_path": project_path,
+        "session_id": task.session_id,
         "result": task.result,
         "source": "hermes_kanban",
     }
@@ -1377,7 +1382,14 @@ def kanban_task_poll_handler(args: dict, **kwargs) -> str:
             conn.close()
         return json.dumps({
             "success": True,
-            "board": {"slug": meta["slug"], "source": "hermes_kanban"},
+            "board": {
+                "slug": meta["slug"],
+                "title": meta.get("name") or Path(project_path).name,
+                "source": "hermes_kanban",
+                "project_path": str(Path(project_path).resolve()),
+                "default_workdir": meta.get("default_workdir"),
+                "db_path": meta.get("db_path"),
+            },
             "dispatch_status": dispatch_status,
             "tasks": tasks,
             "summary": {

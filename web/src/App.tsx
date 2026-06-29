@@ -89,7 +89,7 @@ import type { Translations } from "@/i18n/types";
 import { PluginPage, PluginSlot, usePlugins } from "@/plugins";
 import type { PluginManifest } from "@/plugins";
 import { useTheme } from "@/themes";
-import { isDashboardEmbeddedChatEnabled } from "@/lib/dashboard-flags";
+import { isDashboardChatEnabled } from "@/lib/dashboard-flags";
 import { api } from "@/lib/api";
 import type { StatusResponse } from "@/lib/api";
 import { StatusBar } from "@/components/StatusBar";
@@ -399,7 +399,7 @@ export default function App() {
   const isDocsRoute = pathname === "/docs" || pathname === "/docs/";
   const normalizedPath = pathname.replace(/\/$/, "") || "/";
   const isChatRoute = normalizedPath === "/chat";
-  const embeddedChat = isDashboardEmbeddedChatEnabled();
+  const chatEnabled = isDashboardChatEnabled();
 
   // `dashboard.show_token_analytics` gates the Analytics nav item.  The
   // page itself remains reachable by URL (it renders an explanation when
@@ -443,18 +443,18 @@ export default function App() {
   const builtinRoutes = useMemo(
     () => ({
       ...BUILTIN_ROUTES_CORE,
-      ...(embeddedChat ? { "/chat": ChatRouteSink } : {}),
+      ...(chatEnabled ? { "/chat": ChatRouteSink } : {}),
     }),
-    [embeddedChat],
+    [chatEnabled],
   );
 
   const builtinNav = useMemo(() => {
-    if (embeddedChat) return LEX_WORKSPACE_NAV;
+    if (chatEnabled) return LEX_WORKSPACE_NAV;
     const base = BUILTIN_NAV_REST;
     return showTokenAnalytics
       ? base
       : base.filter((n) => n.path !== "/analytics");
-  }, [embeddedChat, showTokenAnalytics]);
+  }, [chatEnabled, showTokenAnalytics]);
 
   const sidebarNav = useMemo(
     () => partitionSidebarNav(builtinNav, manifests),
@@ -777,7 +777,7 @@ export default function App() {
                   />
                 </Routes>
 
-                {embeddedChat && !chatOverriddenByPlugin && (
+                {chatEnabled && !chatOverriddenByPlugin && (
                   <div
                     data-chat-active={isChatRoute ? "true" : "false"}
                     className={cn(

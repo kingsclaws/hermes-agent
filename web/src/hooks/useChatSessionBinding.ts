@@ -34,6 +34,7 @@ export interface ChatSessionBinding {
   channel: string;
   creatingSessionRef: React.RefObject<boolean>;
   handleSelectProject: (projectId: string) => void;
+  handleSelectSession: (sessionId: string) => void;
   updateChatSearch: (updates: Record<string, string | null>) => void;
 }
 
@@ -296,6 +297,26 @@ export function useChatSessionBinding({
     [activeTabId, updateChatSearch, updateTab],
   );
 
+  const handleSelectSession = useCallback(
+    (sessionId: string) => {
+      if (!sessionId) {
+        if (activeTabId) updateTab(activeTabId, { sessionId: null });
+        updateChatSearch({ resume: null });
+        return;
+      }
+      const session = sessions.find((item) => item.id === sessionId);
+      findOrCreateTab(sessionId, selectedProjectId || undefined);
+      if (activeTabId) {
+        updateTab(activeTabId, {
+          sessionId,
+          title: session?.title || sessionId.slice(0, 16) + "…",
+        });
+      }
+      updateChatSearch({ resume: sessionId, project: selectedProjectId || null });
+    },
+    [activeTabId, findOrCreateTab, selectedProjectId, sessions, updateChatSearch, updateTab],
+  );
+
   return {
     projects,
     sessions,
@@ -307,6 +328,7 @@ export function useChatSessionBinding({
     channel,
     creatingSessionRef,
     handleSelectProject,
+    handleSelectSession,
     updateChatSearch,
   };
 }

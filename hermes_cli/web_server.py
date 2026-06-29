@@ -90,8 +90,9 @@ app = FastAPI(title="Hermes Agent", version=__version__)
 _SESSION_TOKEN = secrets.token_urlsafe(32)
 _SESSION_HEADER_NAME = "X-Hermes-Session-Token"
 
-# In-browser Chat tab (/chat, /api/pty, …).  Off unless ``hermes dashboard --tui``
-# or HERMES_DASHBOARD_TUI=1.  Set from :func:`start_server`.
+# Legacy in-browser PTY/TUI bridge (/api/pty, /api/pub, /api/events). Off
+# unless ``hermes dashboard --tui`` or HERMES_DASHBOARD_TUI=1. Native web chat
+# uses /api/ws and remains available behind the normal dashboard auth gate.
 _DASHBOARD_EMBEDDED_CHAT_ENABLED = False
 
 # Simple rate limiter for the reveal endpoint
@@ -6376,22 +6377,16 @@ async def pty_ws(ws: WebSocket) -> None:
 
 
 # ---------------------------------------------------------------------------
-# /api/ws — JSON-RPC WebSocket sidecar for the dashboard "Chat" tab.
+# /api/ws — JSON-RPC WebSocket for the dashboard native "Chat" tab.
 #
-# Drives the same `tui_gateway.dispatch` surface Ink uses over stdio, so the
-# dashboard can render structured metadata (model badge, tool-call sidebar,
-# slash launcher, session info) alongside the xterm.js terminal that PTY
-# already paints. Both transports bind to the same session id when one is
-# active, so a tool.start emitted by the agent fans out to both sinks.
+# Drives the same `tui_gateway.dispatch` surface Ink uses over stdio, while
+# React owns the transcript/composer and renders structured tool/workflow
+# metadata directly.
 # ---------------------------------------------------------------------------
 
 
 @app.websocket("/api/ws")
 async def gateway_ws(ws: WebSocket) -> None:
-    if not _DASHBOARD_EMBEDDED_CHAT_ENABLED:
-        await ws.close(code=4403)
-        return
-
     if not _ws_auth_ok(ws):
         await ws.close(code=4401)
         return
@@ -7498,13 +7493,15 @@ def mount_spa(application: FastAPI):
         auth scheme for /api/pty and /api/ws (ticket vs token).
         """
         html = _index_path.read_text()
-        chat_js = "true" if _DASHBOARD_EMBEDDED_CHAT_ENABLED else "false"
+        chat_js = "true"
+        embedded_chat_js = "true" if _DASHBOARD_EMBEDDED_CHAT_ENABLED else "false"
         gated = bool(getattr(app.state, "auth_required", False))
         gated_js = "true" if gated else "false"
         if gated:
             bootstrap_script = (
                 f"<script>"
-                f"window.__HERMES_DASHBOARD_EMBEDDED_CHAT__={chat_js};"
+                f"window.__HERMES_DASHBOARD_CHAT__={chat_js};"
+                f"window.__HERMES_DASHBOARD_EMBEDDED_CHAT__={embedded_chat_js};"
                 f'window.__HERMES_BASE_PATH__="{prefix}";'
                 f"window.__HERMES_AUTH_REQUIRED__={gated_js};"
                 f"</script>"
@@ -7512,7 +7509,8 @@ def mount_spa(application: FastAPI):
         else:
             bootstrap_script = (
                 f'<script>window.__HERMES_SESSION_TOKEN__="{_SESSION_TOKEN}";'
-                f"window.__HERMES_DASHBOARD_EMBEDDED_CHAT__={chat_js};"
+                f"window.__HERMES_DASHBOARD_CHAT__={chat_js};"
+                f"window.__HERMES_DASHBOARD_EMBEDDED_CHAT__={embedded_chat_js};"
                 f'window.__HERMES_BASE_PATH__="{prefix}";'
                 f"window.__HERMES_AUTH_REQUIRED__={gated_js};"
                 f"</script>"

@@ -2881,6 +2881,12 @@ def _swarm_task_line(task, *, latest_summary: str | None = None, latest_event=No
     pid = f" pid={task.worker_pid}" if getattr(task, "worker_pid", None) else ""
     line = f"{icon} {task.id:<10} {task.status:<9} @{task.assignee or '-'}{pid}  {task.title}"
     details: list[str] = []
+    workspace_path = getattr(task, "workspace_path", None)
+    session_id = getattr(task, "session_id", None)
+    if workspace_path:
+        details.append(f"project: {workspace_path}")
+    if session_id:
+        details.append(f"session: {session_id}")
     if latest_summary:
         details.append(f"summary: {latest_summary.splitlines()[0][:140]}")
     elif latest_event is not None:
@@ -2918,9 +2924,14 @@ def _swarm_status(*, board: str | None = None, include_done: bool = False, as_js
             continue
 
         if as_json:
+            project_path = meta.get("project_path") or meta.get("default_workdir")
             payload.append({
                 "board": slug,
                 "name": meta.get("name") or slug,
+                "description": meta.get("description"),
+                "project_path": project_path,
+                "default_workdir": meta.get("default_workdir"),
+                "db_path": meta.get("db_path"),
                 "tasks": [
                     {
                         "id": task.id,
@@ -2928,6 +2939,9 @@ def _swarm_status(*, board: str | None = None, include_done: bool = False, as_js
                         "status": task.status,
                         "assignee": task.assignee,
                         "worker_pid": task.worker_pid,
+                        "workspace_kind": getattr(task, "workspace_kind", None),
+                        "workspace_path": getattr(task, "workspace_path", None),
+                        "session_id": getattr(task, "session_id", None),
                         "latest_summary": latest_summary,
                         "latest_event": (
                             {
@@ -2944,6 +2958,9 @@ def _swarm_status(*, board: str | None = None, include_done: bool = False, as_js
             continue
 
         lines.append(f"Board: {slug} — {meta.get('name') or slug}")
+        project_path = meta.get("project_path") or meta.get("default_workdir")
+        if project_path:
+            lines.append(f"Project: {project_path}")
         for task, latest_summary, latest_event in board_tasks:
             lines.append(_swarm_task_line(task, latest_summary=latest_summary, latest_event=latest_event))
         lines.append("")
@@ -2978,13 +2995,22 @@ def _swarm_follow(task_id: str, *, tail_bytes: int = 6000) -> str:
         events = kb.list_events(conn, task_id)[-12:]
         runs = kb.list_runs(conn, task_id)[-5:]
         latest_summary = kb.latest_summary(conn, task_id)
+    meta = kb.read_board_metadata(board)
     if not task:
         return f"no such task: {task_id}"
 
-    lines = [
-        f"Task {task.id} on {board}",
-        _swarm_task_line(task, latest_summary=latest_summary, latest_event=(events[-1] if events else None)),
-    ]
+    lines = [f"Task {task.id} on {board}"]
+    project_path = meta.get("project_path") or meta.get("default_workdir")
+    if project_path:
+        lines.append(f"Project: {project_path}")
+    if getattr(task, "workspace_path", None):
+        workspace_kind = getattr(task, "workspace_kind", None) or "-"
+        lines.append(f"Workspace: {workspace_kind} @ {task.workspace_path}")
+    if getattr(task, "session_id", None):
+        lines.append(f"Session: {task.session_id}")
+    lines.append(
+        _swarm_task_line(task, latest_summary=latest_summary, latest_event=(events[-1] if events else None))
+    )
     if runs:
         lines.append("")
         lines.append("Runs:")

@@ -43,6 +43,7 @@ RUN set -e; \
     cp hermes_cli/tools_config.py /opt/hermes/hermes_cli/tools_config.py; \
     cp hermes_cli/commands.py /opt/hermes/hermes_cli/commands.py; \
     cp hermes_cli/kanban.py /opt/hermes/hermes_cli/kanban.py; \
+    cp hermes_cli/web_server.py /opt/hermes/hermes_cli/web_server.py; \
     cp hermes_cli/container_boot.py /opt/hermes/hermes_cli/container_boot.py; \
     cp hermes_cli/service_manager.py /opt/hermes/hermes_cli/service_manager.py; \
     cp hermes_cli/project_commands.py /opt/hermes/hermes_cli/project_commands.py; \
@@ -51,6 +52,14 @@ RUN set -e; \
     cp gateway/message_handler.py /opt/hermes/gateway/message_handler.py; \
     cp gateway/slash_commands.py /opt/hermes/gateway/slash_commands.py; \
     cp gateway/status.py /opt/hermes/gateway/status.py; \
+    mkdir -p /opt/hermes/web/src/components /opt/hermes/web/src/hooks /opt/hermes/web/src/lib /opt/hermes/web/src/pages; \
+    cp -a hermes_cli/web_dist /opt/hermes/hermes_cli/; \
+    cp web/src/App.tsx /opt/hermes/web/src/App.tsx; \
+    cp web/src/components/ChatTopBar.tsx /opt/hermes/web/src/components/ChatTopBar.tsx; \
+    cp web/src/components/NativeChatSurface.tsx /opt/hermes/web/src/components/NativeChatSurface.tsx; \
+    cp web/src/hooks/useChatSessionBinding.ts /opt/hermes/web/src/hooks/useChatSessionBinding.ts; \
+    cp web/src/lib/dashboard-flags.ts /opt/hermes/web/src/lib/dashboard-flags.ts; \
+    cp web/src/pages/ChatPage.tsx /opt/hermes/web/src/pages/ChatPage.tsx; \
     \
     cp tools/kanban_toolset.py /opt/lex-hermes/tools/kanban_toolset.py; \
     cp tools/lexitool_tool.py /opt/lex-hermes/tools/lexitool_tool.py; \
@@ -62,6 +71,7 @@ RUN set -e; \
     cp hermes_cli/tools_config.py /opt/lex-hermes/hermes_cli/tools_config.py; \
     cp hermes_cli/commands.py /opt/lex-hermes/hermes_cli/commands.py; \
     cp hermes_cli/kanban.py /opt/lex-hermes/hermes_cli/kanban.py; \
+    cp hermes_cli/web_server.py /opt/lex-hermes/hermes_cli/web_server.py; \
     cp hermes_cli/container_boot.py /opt/lex-hermes/hermes_cli/container_boot.py; \
     cp hermes_cli/service_manager.py /opt/lex-hermes/hermes_cli/service_manager.py; \
     cp hermes_cli/project_commands.py /opt/lex-hermes/hermes_cli/project_commands.py; \
@@ -70,6 +80,14 @@ RUN set -e; \
     cp gateway/message_handler.py /opt/lex-hermes/gateway/message_handler.py; \
     cp gateway/slash_commands.py /opt/lex-hermes/gateway/slash_commands.py; \
     cp gateway/status.py /opt/lex-hermes/gateway/status.py; \
+    mkdir -p /opt/lex-hermes/web/src/components /opt/lex-hermes/web/src/hooks /opt/lex-hermes/web/src/lib /opt/lex-hermes/web/src/pages; \
+    cp -a hermes_cli/web_dist /opt/lex-hermes/hermes_cli/; \
+    cp web/src/App.tsx /opt/lex-hermes/web/src/App.tsx; \
+    cp web/src/components/ChatTopBar.tsx /opt/lex-hermes/web/src/components/ChatTopBar.tsx; \
+    cp web/src/components/NativeChatSurface.tsx /opt/lex-hermes/web/src/components/NativeChatSurface.tsx; \
+    cp web/src/hooks/useChatSessionBinding.ts /opt/lex-hermes/web/src/hooks/useChatSessionBinding.ts; \
+    cp web/src/lib/dashboard-flags.ts /opt/lex-hermes/web/src/lib/dashboard-flags.ts; \
+    cp web/src/pages/ChatPage.tsx /opt/lex-hermes/web/src/pages/ChatPage.tsx; \
     \
     mkdir -p /opt/hermes/.hermes-project/roles /opt/hermes/tests /opt/lex-hermes/tests; \
     cp .hermes-project/roles/hpswarm-coordinator.md /opt/hermes/.hermes-project/roles/hpswarm-coordinator.md; \
@@ -92,6 +110,7 @@ RUN set -e; \
       /opt/hermes/hermes_cli/container_boot.py /opt/lex-hermes/hermes_cli/container_boot.py \
       /opt/hermes/hermes_cli/commands.py /opt/lex-hermes/hermes_cli/commands.py \
       /opt/hermes/hermes_cli/kanban.py /opt/lex-hermes/hermes_cli/kanban.py \
+      /opt/hermes/hermes_cli/web_server.py /opt/lex-hermes/hermes_cli/web_server.py \
       /opt/hermes/cli.py /opt/lex-hermes/cli.py \
       /opt/hermes/hermes_cli/service_manager.py /opt/lex-hermes/hermes_cli/service_manager.py \
       /opt/hermes/hermes_cli/project_commands.py /opt/lex-hermes/hermes_cli/project_commands.py \
@@ -116,6 +135,7 @@ RUN set -e; \
       hermes_cli/commands.py \
       hermes_cli/tools_config.py \
       hermes_cli/kanban.py \
+      hermes_cli/web_server.py \
       hermes_cli/container_boot.py \
       hermes_cli/service_manager.py \
       hermes_cli/project_commands.py \
