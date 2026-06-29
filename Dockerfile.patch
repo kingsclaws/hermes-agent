@@ -48,6 +48,8 @@ RUN set -e; \
     cp tools/legal_workflow_tool.py /opt/hermes/tools/legal_workflow_tool.py; \
     cp toolsets.py /opt/hermes/toolsets.py; \
     cp cli.py /opt/hermes/cli.py; \
+    cp hermes_cli/main.py /opt/hermes/hermes_cli/main.py; \
+    cp hermes_cli/backoffice.py /opt/hermes/hermes_cli/backoffice.py; \
     cp hermes_cli/tools_config.py /opt/hermes/hermes_cli/tools_config.py; \
     cp hermes_cli/commands.py /opt/hermes/hermes_cli/commands.py; \
     cp hermes_cli/kanban.py /opt/hermes/hermes_cli/kanban.py; \
@@ -80,6 +82,8 @@ RUN set -e; \
     cp tools/legal_workflow_tool.py /opt/lex-hermes/tools/legal_workflow_tool.py; \
     cp toolsets.py /opt/lex-hermes/toolsets.py; \
     cp cli.py /opt/lex-hermes/cli.py; \
+    cp hermes_cli/main.py /opt/lex-hermes/hermes_cli/main.py; \
+    cp hermes_cli/backoffice.py /opt/lex-hermes/hermes_cli/backoffice.py; \
     cp hermes_cli/tools_config.py /opt/lex-hermes/hermes_cli/tools_config.py; \
     cp hermes_cli/commands.py /opt/lex-hermes/hermes_cli/commands.py; \
     cp hermes_cli/kanban.py /opt/lex-hermes/hermes_cli/kanban.py; \
@@ -153,6 +157,8 @@ RUN set -e; \
     /opt/hermes/.venv/bin/python -m py_compile \
       cli.py \
       toolsets.py \
+      hermes_cli/main.py \
+      hermes_cli/backoffice.py \
       tools/kanban_toolset.py \
       tools/lexitool_tool.py \
       tools/project_management_tool.py \

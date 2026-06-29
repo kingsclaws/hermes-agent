@@ -6208,6 +6208,13 @@ def cmd_kanban(args):
     return kanban_command(args)
 
 
+def cmd_backoffice(args):
+    """Lex-Hermes backoffice report inbox."""
+    from hermes_cli.backoffice import backoffice_command
+
+    return backoffice_command(args)
+
+
 def cmd_hooks(args):
     """Shell-hook inspection and management."""
     from hermes_cli.hooks import hooks_command
@@ -11048,6 +11055,7 @@ _BUILTIN_SUBCOMMANDS = frozenset(
         "computer-use",
         "config", "cron", "curator", "dashboard", "debug", "doctor",
         "dump", "fallback", "gateway", "hooks", "import", "insights",
+        "backoffice",
         "kanban", "login", "logout", "logs", "lsp", "mcp", "memory", "migrate",
         "model", "pairing", "plugins", "portal", "postinstall", "profile", "project", "proxy",
         "send", "sessions", "setup",
@@ -12300,6 +12308,14 @@ def main():
 
     kanban_parser = _build_kanban_parser(subparsers)
     kanban_parser.set_defaults(func=cmd_kanban)
+
+    # =========================================================================
+    # backoffice command — shared inbox for Lex-Hermes diagnostics
+    # =========================================================================
+    from hermes_cli.backoffice import build_parser as _build_backoffice_parser
+
+    backoffice_parser = _build_backoffice_parser(subparsers)
+    backoffice_parser.set_defaults(func=cmd_backoffice)
 
     # =========================================================================
     # hooks command — shell-hook inspection and management
