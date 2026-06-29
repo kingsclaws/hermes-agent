@@ -38,6 +38,7 @@ Initial persistence:
 - Write issue envelopes to a shared path visible to both containers.
 - Preferred path: project-local `.hermes-project/backoffice/issues/*.json` when a project is active.
 - Fallback path: global `/workingfile/.lex-hermes-backoffice/issues/*.json`.
+- Write a sibling `*.REPORT.md` for each issue. JSON is the machine-readable queue item; Markdown is the human/maintainer-agent diagnostic report.
 
 Issue envelope fields:
 
@@ -59,6 +60,11 @@ Issue envelope fields:
 - `status` (`open`, `triaged`, `fixed`, `wont_fix`, `needs_user`)
 - `fix_commit`
 - `fixed_image_digest`
+- `issue_path`
+- `report_path`
+- `source_candidates`
+- `diagnostic_context`
+- `maintainer_prompt`
 
 The legal agent should continue the legal task when safe, but must not hide the issue. Final responses should mention any open backoffice issue that affected delivery quality.
 
@@ -70,10 +76,17 @@ Issue creation policy:
 - If a useful repro artifact would require attaching legal content, identity information, or long document excerpts, create the issue with `status: needs_user` and record only the path plus a note that explicit user approval is required before attachment.
 - Deduplicate repeated identical failures by fingerprint and increment an occurrence counter instead of spamming the shared issue directory.
 
+Report content policy:
+
+- The lex-hermes hook may inspect runtime metadata and infer source-code candidates, but it must not run expensive LLM analysis inside the tool hook.
+- The generated Markdown report must include enough context for the maintainer side to take over: observed error, redacted tool arguments, artifact paths, source candidates, runtime context, reproduction notes, and a ready-to-use maintainer prompt.
+- Deeper code reading, patching, testing, committing, image building, and closing the issue happen on the maintainer side after reading the report.
+
 ## Consequences
 
 - Lexitool and harness problems become durable artifacts instead of disappearing in chat.
 - The maintainer side can fix real project failures with context, repro data, and artifact paths.
+- The maintainer agent can treat shared `*.REPORT.md` files as its inbox for lex-hermes-originated tooling defects.
 - Legal workers stop improvising low-quality workarounds for tool defects.
 - Shared file paths are simple and robust across separate containers, but require cleanup/retention policy.
 - The relay is not a replacement for Kanban execution facts. It records harness/tooling problems, not legal work progress.

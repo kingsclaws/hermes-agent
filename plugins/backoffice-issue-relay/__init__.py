@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import re
+import sys
 import tempfile
 import threading
 from datetime import datetime, timezone
@@ -109,6 +110,61 @@ _ORDINARY_USER_ERRORS = (
     "Invalid op",
     "missing required",
 )
+
+_SOURCE_CANDIDATES_BY_TOOL = {
+    "lex_ocr": [
+        "tools/lexitool_tool.py",
+        "vendor/lexitool/lexitool/ocr.py",
+        "vendor/lexitool/lexitool/ocr_cli.py",
+    ],
+    "lex_edit": [
+        "tools/lexitool_tool.py",
+        "vendor/lexitool/lexitool/edit_ops.py",
+        "vendor/lexitool/lexitool/openxml_opc.py",
+        "vendor/lexitool/lexitool/tc_utils.py",
+    ],
+    "lex_read": [
+        "tools/lexitool_tool.py",
+        "vendor/lexitool/lexitool/markup.py",
+    ],
+    "lex_stats": [
+        "tools/lexitool_tool.py",
+        "vendor/lexitool/lexitool/markup.py",
+    ],
+    "lex_tc": [
+        "tools/lexitool_tool.py",
+        "vendor/lexitool/lexitool/tc_utils.py",
+        "vendor/lexitool/lexitool/markup.py",
+    ],
+    "lex_ref": [
+        "tools/lexitool_tool.py",
+        "vendor/lexitool/lexitool/markup.py",
+        "vendor/lexitool/lexitool/edit_ops.py",
+    ],
+    "kanban_task_blocked": [
+        "hermes_cli/kanban_db.py",
+        "tools/kanban_toolset.py",
+        "plugins/kanban",
+    ],
+}
+
+_SOURCE_CANDIDATES_BY_CATEGORY = {
+    "environment": [
+        "Dockerfile.patch",
+        "hermes_cli/container_boot.py",
+        "hermes_cli/service_manager.py",
+    ],
+    "permission": [
+        "Dockerfile.patch",
+        "hermes_cli/container_boot.py",
+    ],
+    "workflow": [
+        "tools/legal_workflow_tool.py",
+        "tools/legal_orchestration_tool.py",
+        "tools/kanban_toolset.py",
+        "hermes_cli/kanban_db.py",
+    ],
+}
 
 
 def register(ctx: Any) -> None:
@@ -293,6 +349,154 @@ def _atomic_write_json(path: Path, payload: Dict[str, Any]) -> None:
             pass
 
 
+def _repo_roots() -> list[Path]:
+    candidates = [
+        Path("/opt/hermes"),
+        Path("/opt/lex-hermes"),
+        Path("/root/.hermes/hermes-agent"),
+        Path.cwd(),
+    ]
+    roots: list[Path] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        try:
+            resolved = candidate.resolve()
+        except Exception:
+            resolved = candidate
+        key = str(resolved)
+        if key in seen:
+            continue
+        seen.add(key)
+        if candidate.exists():
+            roots.append(candidate)
+    return roots
+
+
+def _source_candidates(tool_name: str, category: str) -> list[Dict[str, Any]]:
+    relatives = list(_SOURCE_CANDIDATES_BY_TOOL.get(tool_name, []))
+    relatives.extend(_SOURCE_CANDIDATES_BY_CATEGORY.get(category, []))
+    if tool_name.startswith("lex_") and "tools/lexitool_tool.py" not in relatives:
+        relatives.insert(0, "tools/lexitool_tool.py")
+
+    results: list[Dict[str, Any]] = []
+    seen: set[str] = set()
+    for rel in relatives:
+        if rel in seen:
+            continue
+        seen.add(rel)
+        found = [str(root / rel) for root in _repo_roots() if (root / rel).exists()]
+        results.append({"relative": rel, "paths": found, "exists": bool(found)})
+    return results
+
+
+def _runtime_context() -> Dict[str, Any]:
+    return {
+        "cwd": os.getcwd(),
+        "python_executable": sys.executable,
+        "python_version": sys.version.split()[0],
+        "hermes_profile": os.environ.get("HERMES_PROFILE", "") or os.environ.get("HERMES_ACTIVE_PROFILE", ""),
+        "hermes_surface": os.environ.get("HERMES_SURFACE", "") or os.environ.get("HERMES_PLATFORM", ""),
+        "hermes_bundled_plugins": os.environ.get("HERMES_BUNDLED_PLUGINS", ""),
+        "hermes_home": os.environ.get("HERMES_HOME", ""),
+        "kanban_board": os.environ.get("HERMES_KANBAN_BOARD", ""),
+        "kanban_db": os.environ.get("HERMES_KANBAN_DB", ""),
+    }
+
+
+def _maintainer_prompt(issue: Dict[str, Any]) -> str:
+    report_path = issue.get("report_path") or ""
+    lines = [
+        "Read this Lex-Hermes backoffice report and fix the underlying harness/tooling defect.",
+        f"Report: {report_path}",
+        f"Issue JSON: {issue.get('issue_path', '') or issue.get('_path', '')}",
+        f"Category: {issue.get('category', '')}",
+        f"Tool: {issue.get('tool_name', '')}",
+        f"Summary: {issue.get('summary', '')}",
+        "",
+        "Expected workflow:",
+        "1. Reproduce or explain why reproduction is impossible from the redacted data.",
+        "2. Read the listed source_candidates and any relevant container logs.",
+        "3. Fix the code, add/adjust tests, hot-copy into lex-hermes if needed.",
+        "4. Commit, push, build & push the image when the fix is verified.",
+        "5. Update the issue JSON with status/fix_commit/fixed_image_digest.",
+    ]
+    return "\n".join(lines)
+
+
+def _write_markdown_report(issue_path: Path, issue: Dict[str, Any]) -> Path:
+    report_path = issue_path.with_suffix(".REPORT.md")
+    source_lines = []
+    for item in issue.get("source_candidates", []):
+        paths = item.get("paths") or []
+        if paths:
+            source_lines.append(f"- `{item.get('relative')}`")
+            for path in paths:
+                source_lines.append(f"  - `{path}`")
+        else:
+            source_lines.append(f"- `{item.get('relative')}` (not found in known roots)")
+
+    args_json = json.dumps(issue.get("tool_args_redacted", {}), ensure_ascii=False, indent=2, sort_keys=True)
+    runtime_json = json.dumps(issue.get("diagnostic_context", {}), ensure_ascii=False, indent=2, sort_keys=True)
+    artifacts = issue.get("artifact_paths") or []
+    artifact_lines = "\n".join(f"- `{path}`" for path in artifacts) if artifacts else "- None recorded"
+
+    body = f"""# Lex-Hermes Backoffice Report
+
+## Summary
+
+- Issue: `{issue.get('id', '')}`
+- Status: `{issue.get('status', '')}`
+- Category: `{issue.get('category', '')}`
+- Severity: `{issue.get('severity', '')}`
+- Tool: `{issue.get('tool_name', '')}`
+- Session: `{issue.get('session_id', '')}`
+- Project: `{issue.get('project_path', '') or 'unknown'}`
+- Created: `{issue.get('created_at', '')}`
+- Last seen: `{issue.get('last_seen_at', '')}`
+- Occurrences: `{issue.get('occurrences', '')}`
+
+{issue.get('summary', '')}
+
+## Observed Error
+
+```text
+{issue.get('error', '')}
+```
+
+## Redacted Tool Arguments
+
+```json
+{args_json}
+```
+
+## Artifact Paths
+
+{artifact_lines}
+
+## Source Candidates
+
+{chr(10).join(source_lines) if source_lines else '- None inferred'}
+
+## Runtime Context
+
+```json
+{runtime_json}
+```
+
+## Reproduction Notes
+
+{chr(10).join(f'- {step}' for step in issue.get('repro_steps', []))}
+
+## Maintainer Prompt
+
+```text
+{issue.get('maintainer_prompt', '')}
+```
+"""
+    report_path.write_text(body, encoding="utf-8")
+    return report_path
+
+
 def _record_issue(
     *,
     tool_name: str,
@@ -337,7 +541,13 @@ def _record_issue(
             issue["last_seen_at"] = _now()
             issue["occurrences"] = int(issue.get("occurrences") or 1) + 1
             issue.setdefault("status", "open")
+            issue.setdefault("diagnostic_context", _runtime_context())
+            issue.setdefault("source_candidates", _source_candidates(tool_name, issue.get("category", category)))
+            issue["issue_path"] = str(path)
+            issue["report_path"] = str(path.with_suffix(".REPORT.md"))
+            issue["maintainer_prompt"] = _maintainer_prompt(issue)
             _atomic_write_json(path, issue)
+            _write_markdown_report(path, issue)
             issue["_path"] = str(path)
             return issue
 
@@ -345,6 +555,7 @@ def _record_issue(
         path = issue_dir / f"{issue_id}_{fingerprint}.json"
         issue = {
             "id": issue_id,
+            "issue_path": str(path),
             "created_at": _now(),
             "last_seen_at": _now(),
             "occurrences": 1,
@@ -368,11 +579,16 @@ def _record_issue(
                 "Use artifact_paths for source files; do not infer document content from redacted fields.",
             ],
             "artifact_paths": _artifact_paths(args),
+            "source_candidates": _source_candidates(tool_name, category),
+            "diagnostic_context": _runtime_context(),
             "status": "open",
             "fix_commit": "",
             "fixed_image_digest": "",
         }
+        issue["report_path"] = str(path.with_suffix(".REPORT.md"))
+        issue["maintainer_prompt"] = _maintainer_prompt(issue)
         _atomic_write_json(path, issue)
+        _write_markdown_report(path, issue)
         issue["_path"] = str(path)
         return issue
 
@@ -381,6 +597,7 @@ def _append_issue_note(result: Any, issue: Dict[str, Any]) -> str:
     note = {
         "id": issue.get("id"),
         "path": issue.get("_path"),
+        "report_path": issue.get("report_path"),
         "status": issue.get("status", "open"),
         "summary": issue.get("summary"),
     }

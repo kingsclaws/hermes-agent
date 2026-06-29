@@ -41,9 +41,21 @@ def test_lex_ocr_401_creates_redacted_backoffice_issue(tmp_path, monkeypatch):
     issue = json.loads(files[0].read_text(encoding="utf-8"))
     assert issue["category"] == "ocr"
     assert issue["severity"] == "high"
+    assert issue["issue_path"] == str(files[0])
+    assert issue["report_path"] == str(files[0].with_suffix(".REPORT.md"))
+    assert "Read this Lex-Hermes backoffice report" in issue["maintainer_prompt"]
+    assert any(item["relative"] == "tools/lexitool_tool.py" for item in issue["source_candidates"])
+    assert "python_executable" in issue["diagnostic_context"]
     assert issue["tool_args_redacted"]["prompt"]["redacted"] is True
     assert issue["artifact_paths"] == ["/workingfile/140. 颐保银团/上海颐保综合授信额度核定.pdf"]
-    assert "backoffice_issue" in json.loads(transformed)
+    report = files[0].with_suffix(".REPORT.md")
+    assert report.exists()
+    report_text = report.read_text(encoding="utf-8")
+    assert "## Source Candidates" in report_text
+    assert "## Maintainer Prompt" in report_text
+    assert "读取这份文件的全部内容" not in report_text
+    note = json.loads(transformed)["backoffice_issue"]
+    assert note["report_path"] == str(report)
 
 
 def test_repeated_issue_deduplicates_by_fingerprint(tmp_path, monkeypatch):
@@ -66,6 +78,7 @@ def test_repeated_issue_deduplicates_by_fingerprint(tmp_path, monkeypatch):
     issue = json.loads(files[0].read_text(encoding="utf-8"))
     assert issue["occurrences"] == 2
     assert issue["tool_args_redacted"]["new_text"]["redacted"] is True
+    assert files[0].with_suffix(".REPORT.md").exists()
 
 
 def test_ordinary_user_validation_error_is_not_recorded(tmp_path, monkeypatch):
