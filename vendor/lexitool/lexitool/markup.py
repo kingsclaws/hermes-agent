@@ -1774,10 +1774,13 @@ def _export_stats(path: str) -> str:
     para_count = 0
     word_count = 0
     fonts = set()
-    tc_ins = 0
-    tc_del = 0
     sections = 0
     tables: list[dict] = []
+
+    # Match lex_tc(op="list")'s document-body revision scope: all w:ins/w:del
+    # descendants of w:body, including revisions inside tables.
+    tc_ins = sum(1 for _ in body.iter(f"{W}ins")) if body is not None else 0
+    tc_del = sum(1 for _ in body.iter(f"{W}del")) if body is not None else 0
 
     for child in body:
         if child.tag == f"{W}p":
@@ -1792,9 +1795,6 @@ def _export_stats(path: str) -> str:
                         val = rFonts.get(f"{W}{attr}", "")
                         if val:
                             fonts.add(val)
-
-            tc_ins += len(child.findall(f".//{W}ins"))
-            tc_del += len(child.findall(f".//{W}del"))
 
         elif child.tag == f"{W}tbl":
             rows = child.findall(f"{W}tr")
@@ -1831,6 +1831,7 @@ def _export_stats(path: str) -> str:
             f"{t['rows']}r × {t['cols']}c | header: {t['header']}"
         )
     lines.append(f"Fonts: {', '.join(sorted(fonts)) if fonts else '(none)'}")
+    lines.append("Paragraph Scope: body-level paragraphs only; table-cell paragraphs are represented under table summaries")
     lines.append(f"TC Insertions: {tc_ins}")
     lines.append(f"TC Deletions: {tc_del}")
 

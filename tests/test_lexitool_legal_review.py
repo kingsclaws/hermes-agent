@@ -32,7 +32,7 @@ from hermes_cli.project_commands import (
     legal_scorecard,
     lex_convention_profile,
 )
-from tools.lexitool_tool import _handle_comment, _handle_edit, _handle_format, _handle_revision_guard, _handle_scan
+from tools.lexitool_tool import _handle_comment, _handle_edit, _handle_format, _handle_revision_guard, _handle_scan, _handle_stats
 
 
 W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
@@ -383,6 +383,66 @@ def test_insert_paragraphs_compat_handles_legacy_insert_signature(monkeypatch, t
     assert captured["paragraphs"] == [{"text": "新增段落"}]
     assert captured["kwargs"]["tc"] is True
     assert captured["kwargs"]["output"] == str(path)
+
+
+def test_replace_paragraph_uses_visible_body_paragraph_and_tc(tmp_path):
+    path = tmp_path / "replace-paragraph.docx"
+    doc = Document()
+    doc.add_paragraph("第一段")
+    doc.add_paragraph("旧条款内容")
+    table = doc.add_table(rows=1, cols=1)
+    table.cell(0, 0).text = "表格内段落不应影响 § 坐标"
+    doc.add_paragraph("第三段")
+    doc.save(path)
+
+    result = _handle_edit({
+        "path": str(path),
+        "op": "replace_paragraph",
+        "target": "§2",
+        "new_text": "新条款内容",
+        "tc": True,
+        "author": "JT",
+    })
+
+    assert '"ok": true' in result
+    readback = lex_read(str(path), paras=[2], mode="full", show_tc=True, show_format=False)
+    assert "§2 [del]旧条款内容[/del][ins]新条款内容[/ins]" in readback
+
+    with zipfile.ZipFile(path, "r") as zf:
+        root = etree.fromstring(zf.read("word/document.xml"))
+    body_paras = [el for el in root.find(f"{W}body") if el.tag == f"{W}p"]
+    second_text = "".join((t.text or "") for t in body_paras[1].iter(f"{W}delText"))
+    assert second_text == "旧条款内容"
+
+
+def test_lex_stats_counts_table_track_changes_like_lex_tc_list(tmp_path):
+    path = tmp_path / "table-tc.docx"
+    doc = Document()
+    doc.add_paragraph("正文")
+    table = doc.add_table(rows=1, cols=1)
+    table.cell(0, 0).text = "表格原文"
+    doc.save(path)
+
+    with zipfile.ZipFile(path, "r") as zin, zipfile.ZipFile(path.with_suffix(".tmp.docx"), "w", zipfile.ZIP_DEFLATED) as zout:
+        root = etree.fromstring(zin.read("word/document.xml"))
+        cell_para = next(root.iter(f"{W}tc")).find(f"{W}p")
+        ins = etree.Element(f"{W}ins")
+        ins.set(f"{W}id", "9")
+        ins.set(f"{W}author", "JT")
+        run = etree.SubElement(ins, f"{W}r")
+        text = etree.SubElement(run, f"{W}t")
+        text.text = "表格新增"
+        cell_para.append(ins)
+        for item in zin.infolist():
+            data = zin.read(item.filename)
+            if item.filename == "word/document.xml":
+                data = etree.tostring(root, xml_declaration=True, encoding="UTF-8", standalone=True)
+            zout.writestr(item, data)
+    shutil.move(path.with_suffix(".tmp.docx"), path)
+
+    stats = _handle_stats({"path": str(path)})
+    assert "TC Insertions: 1" in stats
+    assert "Paragraph Scope: body-level paragraphs only" in stats
 
 
 def test_lex_format_accepts_indent_units_and_sets_paragraph_run_defaults(tmp_path):

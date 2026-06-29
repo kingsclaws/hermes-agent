@@ -528,6 +528,8 @@ LEX_EDIT_SCHEMA = {
         "  §3:r2        = run 2 in paragraph 3\n"
         "  §3:r2:5-10   = characters 5-10 in run 2 of paragraph 3\n"
         "  §3-7         = paragraphs 3 through 7\n\n"
+        "Paragraph coordinates are lex_read visible § numbers: body-level "
+        "paragraphs only. Table-cell text must be edited with table ops.\n\n"
         "## Table-level ops (require 'table_index')\n"
         "- replace_table_cell: find cell by old_text, replace with new_text\n"
         "- replace_table_cells: batch {old, new} across table cells\n"
@@ -555,7 +557,7 @@ LEX_EDIT_SCHEMA = {
             "op": {
                 "type": "string",
                 "enum": [
-                    "replace", "insert", "delete", "set_format",
+                    "replace", "replace_paragraph", "insert", "delete", "set_format",
                     "replace_table_cell", "replace_table_cells",
                     "set_table_cells",
                     "insert_table_rows", "insert_paragraphs",
@@ -568,6 +570,7 @@ LEX_EDIT_SCHEMA = {
                 ],
                 "description": (
                     "Operation type. Paragraph-level: replace, insert, delete, set_format, replace_all. "
+                    "replace_paragraph replaces a whole visible § paragraph using Track Changes. "
                     "Table-level: replace_table_cell (single cell), replace_table_cells (batch), "
                     "set_table_cells (batch by row/col coordinates), "
                     "insert_table_rows (copy template row with cell text), "
@@ -602,7 +605,7 @@ LEX_EDIT_SCHEMA = {
             },
             "new_text": {
                 "type": "string",
-                "description": "New text for replace/insert. May contain format markup like [b]bold[/b].",
+                "description": "New text for replace/replace_paragraph/insert. May contain format markup like [b]bold[/b].",
             },
             "format": {
                 "type": "object",
@@ -755,6 +758,7 @@ def _handle_edit(args: dict, **kwargs) -> str:
     from lxml import etree
     from lexitool.edit_ops import (
         _read_docx, _write_docx,
+        _first_run_rpr, _make_text_run_from_rpr,
         replace_table_cell_text, replace_table_cell_text_all,
         set_table_cells_by_position, insert_table_rows, insert_paragraph_block,
         remove_blue_text,
@@ -1079,7 +1083,7 @@ def _handle_edit(args: dict, **kwargs) -> str:
     W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
     target_str = args.get("target", "")
     if not target_str:
-        return tool_error("'target' is required for paragraph-level operations (replace, insert, delete, set_format)")
+        return tool_error("'target' is required for paragraph-level operations (replace, replace_paragraph, insert, delete, set_format)")
     new_text = args.get("new_text", "")
     fmt = args.get("format")
 
@@ -1129,6 +1133,45 @@ def _handle_edit(args: dict, **kwargs) -> str:
                 else:
                     for t_el in p_el.iter(f"{W}t"):
                         t_el.text = None
+
+        elif op == "replace_paragraph":
+            new_text_plain, format_segments = _parse_format_markers(new_text)
+            has_fmt = _has_format_markers(new_text)
+            if target.para_end and target.para_end > target.para_start:
+                return tool_error("replace_paragraph only supports a single § paragraph target")
+            if target.char_start is not None or target.char_end is not None:
+                return tool_error("replace_paragraph requires an entire paragraph target like §12")
+            if not str(new_text_plain).strip():
+                return tool_error("'new_text' is required for replace_paragraph")
+
+            if tc or has_fmt:
+                base_rPr = tc_del_paragraph(
+                    para_el,
+                    tc_id,
+                    author,
+                    delete_para_mark=False,
+                )
+                ins = tc_ins_text(
+                    para_el,
+                    new_text_plain,
+                    tc_id + 100,
+                    author,
+                    position="end",
+                    base_rPr=base_rPr,
+                )
+                if has_fmt:
+                    inserted_id = ins.get(f"{W}id")
+                    _apply_format_segments_to_ins(para_el, inserted_id, format_segments)
+            else:
+                pPr = para_el.find(f"{W}pPr")
+                base_rPr = _first_run_rpr(para_el)
+                for child in [c for c in list(para_el) if c is not pPr]:
+                    para_el.remove(child)
+                run = _make_text_run_from_rpr(new_text_plain, base_rPr)
+                if pPr is not None:
+                    pPr.addnext(run)
+                else:
+                    para_el.append(run)
 
         elif op == "replace":
             requested_old_text = args.get("old_text")
