@@ -158,9 +158,28 @@ export function NativeChatSurface({
   const toolNamesRef = useRef<Map<string, string>>(new Map());
   const onSwarmLaunchedRef = useRef(onSwarmLaunched);
   onSwarmLaunchedRef.current = onSwarmLaunched;
+  const projectContextKey = useMemo(() => {
+    if (!projectContext) return "no-project";
+    return [
+      projectContext.id,
+      projectContext.name,
+      projectContext.directory ?? projectContext.cwd ?? "",
+    ].join("\u0001");
+  }, [projectContext]);
 
   useEffect(() => {
     let cancelled = false;
+    setSessionId(null);
+    setMessages([]);
+    setTools([]);
+    setSubagents([]);
+    setThinkingBlocks([]);
+    setError(null);
+    setRunning(false);
+    setStopping(false);
+    assistantIdRef.current = null;
+    thinkingIdRef.current = null;
+    toolNamesRef.current.clear();
     const offState = gw.onState(setConn);
     const offStart = gw.on("message.start", () => {
       const id = `assistant-${Date.now()}`;
@@ -455,7 +474,7 @@ export function NativeChatSurface({
       offSubagentComplete();
       gw.close();
     };
-  }, [gw, resumeTarget]);
+  }, [gw, resumeTarget, projectContextKey]);
 
   // Propagate sessionId to parent (for per-tab persistence).
   useEffect(() => {

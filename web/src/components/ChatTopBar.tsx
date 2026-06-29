@@ -104,7 +104,7 @@ export function ChatTopBar({
       {/* Controls */}
       <div className="flex items-center gap-2 shrink-0 pr-2">
         {/* Project/session selectors */}
-        <div className={cn("flex items-center gap-1.5 shrink-0", narrow && "hidden")}>
+        <div className={cn("flex min-w-0 items-center gap-1.5 shrink", narrow && "max-w-[55vw]")}>
           <button
             type="button"
             disabled={!selectedProject}
@@ -120,14 +120,15 @@ export function ChatTopBar({
           >
             <Folder className="h-3 w-3 shrink-0" />
           </button>
-          <span className="text-[0.62rem] uppercase tracking-[0.16em] text-muted-foreground/60">
+          <span className={cn("text-[0.62rem] uppercase tracking-[0.16em] text-muted-foreground/60", narrow && "hidden")}>
             Project
           </span>
           <select
             value={selectedProjectId}
             onChange={(e) => onSelectProject(e.target.value)}
             className={cn(
-              "h-7 max-w-[220px] rounded border bg-background-base/80 px-1.5",
+              "h-7 rounded border bg-background-base/80 px-1.5",
+              narrow ? "max-w-[34vw]" : "max-w-[220px]",
               "text-[0.65rem] text-muted-foreground cursor-pointer",
               "border-current/15 hover:border-primary/40 focus:border-primary/50 focus:outline-none",
             )}
@@ -140,14 +141,15 @@ export function ChatTopBar({
               </option>
             ))}
           </select>
-          <span className="ml-1 text-[0.62rem] uppercase tracking-[0.16em] text-muted-foreground/60">
+          <span className={cn("ml-1 text-[0.62rem] uppercase tracking-[0.16em] text-muted-foreground/60", narrow && "hidden")}>
             Session
           </span>
           <select
             value={selectedSessionId ?? ""}
             onChange={(e) => onSelectSession(e.target.value)}
             className={cn(
-              "h-7 max-w-[280px] rounded border bg-background-base/80 px-1.5",
+              "h-7 rounded border bg-background-base/80 px-1.5",
+              narrow ? "max-w-[34vw]" : "max-w-[280px]",
               "text-[0.65rem] text-muted-foreground cursor-pointer",
               "border-current/15 hover:border-primary/40 focus:border-primary/50 focus:outline-none",
             )}
