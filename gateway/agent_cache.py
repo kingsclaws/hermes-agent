@@ -67,6 +67,36 @@ class AgentCacheMixin:
         except Exception:
             out["tools.registry_generation"] = None
 
+        # Profile identity files are loaded into the stable system prompt at
+        # agent construction time. If SOUL.md changes while a gateway is
+        # running, reuse of the cached AIAgent would keep the old role rules.
+        try:
+            from hermes_constants import get_hermes_home
+
+            soul_path = get_hermes_home() / "SOUL.md"
+            soul_stat = soul_path.stat()
+            out["profile.soul_md"] = (soul_stat.st_mtime_ns, soul_stat.st_size)
+        except Exception:
+            out["profile.soul_md"] = None
+
+        # Lex tools are edited in-place during harness development. Tool
+        # registration generation catches runtime registry mutations, but a
+        # rebuilt image or hot-copied source file should also bust cached
+        # gateway agents on the next turn after the process sees the new code.
+        try:
+            root = Path(__file__).resolve().parents[1]
+            lex_paths = (
+                root / "tools" / "project_management_tool.py",
+                root / "toolsets.py",
+            )
+            out["lex.tool_source_fingerprint"] = tuple(
+                (str(path.relative_to(root)), path.stat().st_mtime_ns, path.stat().st_size)
+                for path in lex_paths
+                if path.exists()
+            )
+        except Exception:
+            out["lex.tool_source_fingerprint"] = None
+
         try:
             from hermes_cli.plugins import plugin_runtime_signature
 
@@ -577,4 +607,3 @@ class AgentCacheMixin:
     # ------------------------------------------------------------------
     # Proxy mode: forward messages to a remote Hermes API server
     # ------------------------------------------------------------------
-
