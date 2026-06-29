@@ -85,6 +85,73 @@ def test_read_only_ref_ops_are_not_blocked(tmp_path):
     assert plugin._on_pre_tool_call("lex_ref", {"path": str(doc), "op": "audit"}) is None
 
 
+def test_lex_master_blocks_direct_project_execution(monkeypatch, tmp_path):
+    plugin = _load_plugin()
+    monkeypatch.setenv("HERMES_PROFILE", "lex-master")
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "lex-master"))
+
+    result = plugin._on_pre_tool_call("lex_edit", {"path": "/workingfile/140. Test/a.docx"})
+
+    assert result["action"] == "block"
+    assert "lex_master_route" in result["message"]
+
+
+def test_lex_master_allows_route_tool(monkeypatch):
+    plugin = _load_plugin()
+    monkeypatch.setenv("HERMES_PROFILE", "lex-master")
+
+    assert plugin._on_pre_tool_call("lex_master_route", {"action": "dispatch"}) is None
+
+
+def test_lex_master_bypass_requires_reason_and_writes_audit_log(monkeypatch, tmp_path):
+    plugin = _load_plugin()
+    home = tmp_path / "lex-master"
+    monkeypatch.setenv("HERMES_PROFILE", "lex-master")
+    monkeypatch.setenv("HERMES_HOME", str(home))
+
+    blocked = plugin._on_pre_tool_call(
+        "lex_ocr",
+        {"path": "/workingfile/140. Test/a.pdf", "bypass_lex_master_route_gate": True},
+    )
+    assert blocked["action"] == "block"
+
+    allowed = plugin._on_pre_tool_call(
+        "lex_ocr",
+        {
+            "path": "/workingfile/140. Test/a.pdf",
+            "bypass_lex_master_route_gate": True,
+            "bypass_reason": "User approved direct diagnostics.",
+        },
+        session_id="sess",
+        task_id="task",
+    )
+    assert allowed is None
+    log = json.loads((home / "master-route-bypass-log.json").read_text(encoding="utf-8"))
+    assert log["bypasses"][0]["reason"] == "User approved direct diagnostics."
+
+
+def test_delivery_gate_blocks_bare_legal_completion_claim():
+    plugin = _load_plugin()
+
+    transformed = plugin._on_transform_llm_output(
+        "合同修改完成，文件已经更新。"
+    )
+
+    assert transformed is not None
+    assert "Legal delivery gate blocked" in transformed
+    assert "evidence coverage" in transformed
+
+
+def test_delivery_gate_allows_completion_with_evidence_coverage():
+    plugin = _load_plugin()
+
+    transformed = plugin._on_transform_llm_output(
+        "合同修改完成。\n\nEvidence coverage:\n- 文件: a.docx\n- 段落: §12-§18\n- 验证: lex_read 读回确认。"
+    )
+
+    assert transformed is None
+
+
 def test_plugin_runtime_signature_changes_when_plugin_file_changes(tmp_path, monkeypatch):
     import hermes_cli.plugins as plugins
 
