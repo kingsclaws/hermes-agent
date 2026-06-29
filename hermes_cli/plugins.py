@@ -34,6 +34,7 @@ so plugin-defined tools appear alongside the built-in tools.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import importlib
 import importlib.metadata
 import importlib.util
@@ -1644,6 +1645,51 @@ def discover_plugins(force: bool = False) -> None:
     manifests and reload state in the current process.
     """
     get_plugin_manager().discover_and_load(force=force)
+
+
+def plugin_runtime_signature() -> str:
+    """Return a compact signature for loaded plugin runtime inputs.
+
+    Gateway sessions cache ``AIAgent`` instances to preserve prompt caching.
+    That cache is correct only while the tool/hook surface is unchanged.  This
+    signature lets long-lived gateway processes rebuild cached agents on the
+    next turn after plugin config or bundled plugin files change, while keeping
+    the conversation/session history intact.
+    """
+
+    try:
+        manager = get_plugin_manager()
+        if not manager._discovered:
+            manager.discover_and_load()
+        rows = []
+        for key, loaded in sorted(manager._plugins.items()):
+            manifest = loaded.manifest
+            path = Path(manifest.path) if manifest.path else Path()
+            file_bits = []
+            for name in ("plugin.yaml", "__init__.py"):
+                candidate = path / name
+                try:
+                    st = candidate.stat()
+                    file_bits.append((name, st.st_mtime_ns, st.st_size))
+                except OSError:
+                    file_bits.append((name, None, None))
+            rows.append(
+                (
+                    key,
+                    manifest.name,
+                    manifest.version,
+                    manifest.kind,
+                    manifest.source,
+                    bool(loaded.enabled),
+                    loaded.error or "",
+                    file_bits,
+                )
+            )
+        payload = repr(rows).encode("utf-8", errors="replace")
+        return hashlib.sha256(payload).hexdigest()[:16]
+    except Exception as exc:
+        logger.debug("plugin_runtime_signature failed: %s", exc, exc_info=True)
+        return "unavailable"
 
 
 def invoke_hook(hook_name: str, **kwargs: Any) -> List[Any]:

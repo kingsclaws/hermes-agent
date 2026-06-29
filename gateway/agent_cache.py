@@ -67,6 +67,13 @@ class AgentCacheMixin:
         except Exception:
             out["tools.registry_generation"] = None
 
+        try:
+            from hermes_cli.plugins import plugin_runtime_signature
+
+            out["plugins.runtime_signature"] = plugin_runtime_signature()
+        except Exception:
+            out["plugins.runtime_signature"] = None
+
         # Honcho identity-mapping keys live in honcho.json, not user_config.
         # HonchoSessionManager freezes the resolved peer_name / ai_peer /
         # pin / aliases / prefix at construction; without busting here,
@@ -570,5 +577,4 @@ class AgentCacheMixin:
     # ------------------------------------------------------------------
     # Proxy mode: forward messages to a remote Hermes API server
     # ------------------------------------------------------------------
-
 

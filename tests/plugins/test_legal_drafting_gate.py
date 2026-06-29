@@ -83,3 +83,34 @@ def test_read_only_ref_ops_are_not_blocked(tmp_path):
     doc.write_bytes(b"")
 
     assert plugin._on_pre_tool_call("lex_ref", {"path": str(doc), "op": "audit"}) is None
+
+
+def test_plugin_runtime_signature_changes_when_plugin_file_changes(tmp_path, monkeypatch):
+    import hermes_cli.plugins as plugins
+
+    root = tmp_path / "plugins"
+    plugin_dir = root / "legal-drafting-gate"
+    plugin_dir.mkdir(parents=True)
+    (plugin_dir / "plugin.yaml").write_text(
+        "\n".join(
+            [
+                "name: legal-drafting-gate",
+                "version: 0.1.0",
+                "description: test",
+                "author: test",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    init_path = plugin_dir / "__init__.py"
+    init_path.write_text("def register(ctx):\n    pass\n", encoding="utf-8")
+
+    monkeypatch.setenv("HERMES_BUNDLED_PLUGINS", str(root))
+    monkeypatch.setattr(plugins, "_plugin_manager", None)
+
+    before = plugins.plugin_runtime_signature()
+    init_path.write_text("def register(ctx):\n    pass\n# changed\n", encoding="utf-8")
+    plugins.discover_plugins(force=True)
+    after = plugins.plugin_runtime_signature()
+
+    assert before != after

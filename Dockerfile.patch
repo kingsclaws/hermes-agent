@@ -50,6 +50,7 @@ RUN set -e; \
     cp cli.py /opt/hermes/cli.py; \
     cp hermes_cli/main.py /opt/hermes/hermes_cli/main.py; \
     cp hermes_cli/backoffice.py /opt/hermes/hermes_cli/backoffice.py; \
+    cp hermes_cli/plugins.py /opt/hermes/hermes_cli/plugins.py; \
     cp hermes_cli/tools_config.py /opt/hermes/hermes_cli/tools_config.py; \
     cp hermes_cli/commands.py /opt/hermes/hermes_cli/commands.py; \
     cp hermes_cli/kanban.py /opt/hermes/hermes_cli/kanban.py; \
@@ -87,6 +88,7 @@ RUN set -e; \
     cp cli.py /opt/lex-hermes/cli.py; \
     cp hermes_cli/main.py /opt/lex-hermes/hermes_cli/main.py; \
     cp hermes_cli/backoffice.py /opt/lex-hermes/hermes_cli/backoffice.py; \
+    cp hermes_cli/plugins.py /opt/lex-hermes/hermes_cli/plugins.py; \
     cp hermes_cli/tools_config.py /opt/lex-hermes/hermes_cli/tools_config.py; \
     cp hermes_cli/commands.py /opt/lex-hermes/hermes_cli/commands.py; \
     cp hermes_cli/kanban.py /opt/lex-hermes/hermes_cli/kanban.py; \
@@ -167,6 +169,7 @@ RUN set -e; \
       toolsets.py \
       hermes_cli/main.py \
       hermes_cli/backoffice.py \
+      hermes_cli/plugins.py \
       tools/kanban_toolset.py \
       tools/lexitool_tool.py \
       tools/project_management_tool.py \
