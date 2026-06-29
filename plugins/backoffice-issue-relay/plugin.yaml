@@ -1,0 +1,8 @@
+name: backoffice-issue-relay
+version: 0.1.0
+description: "Record lexitool, OCR, kanban, gateway, and harness failures as structured shared backoffice issues."
+author: "Lex-Hermes"
+hooks:
+  - post_tool_call
+  - transform_tool_result
+  - kanban_task_blocked

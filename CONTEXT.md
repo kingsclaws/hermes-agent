@@ -23,3 +23,7 @@ _Avoid_: WebUI-only workflow, manual board setup, decorative kanban
 **Workflow Viewer**:
 The WebUI role for observing, inspecting, editing, and intervening in workflow state without being the required execution path.
 _Avoid_: Primary executor, required launcher
+
+**Backoffice Issue Relay**:
+The code-level handoff path for tooling, container, lexitool, OCR, gateway, database, image-build, or harness defects encountered during legal work. It records structured maintenance issues in shared storage so the maintainer environment can triage and fix them.
+_Avoid_: Legal workflow task, project fact, chat-only bug report
