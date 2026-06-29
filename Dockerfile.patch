@@ -65,6 +65,9 @@ RUN set -e; \
     mkdir -p /opt/hermes/plugins/backoffice-issue-relay; \
     cp plugins/backoffice-issue-relay/plugin.yaml /opt/hermes/plugins/backoffice-issue-relay/plugin.yaml; \
     cp plugins/backoffice-issue-relay/__init__.py /opt/hermes/plugins/backoffice-issue-relay/__init__.py; \
+    mkdir -p /opt/hermes/plugins/legal-drafting-gate; \
+    cp plugins/legal-drafting-gate/plugin.yaml /opt/hermes/plugins/legal-drafting-gate/plugin.yaml; \
+    cp plugins/legal-drafting-gate/__init__.py /opt/hermes/plugins/legal-drafting-gate/__init__.py; \
     mkdir -p /opt/hermes/web/src/components /opt/hermes/web/src/contexts /opt/hermes/web/src/hooks /opt/hermes/web/src/lib /opt/hermes/web/src/pages; \
     cp -a hermes_cli/web_dist /opt/hermes/hermes_cli/; \
     cp web/src/App.tsx /opt/hermes/web/src/App.tsx; \
@@ -99,6 +102,9 @@ RUN set -e; \
     mkdir -p /opt/lex-hermes/plugins/backoffice-issue-relay; \
     cp plugins/backoffice-issue-relay/plugin.yaml /opt/lex-hermes/plugins/backoffice-issue-relay/plugin.yaml; \
     cp plugins/backoffice-issue-relay/__init__.py /opt/lex-hermes/plugins/backoffice-issue-relay/__init__.py; \
+    mkdir -p /opt/lex-hermes/plugins/legal-drafting-gate; \
+    cp plugins/legal-drafting-gate/plugin.yaml /opt/lex-hermes/plugins/legal-drafting-gate/plugin.yaml; \
+    cp plugins/legal-drafting-gate/__init__.py /opt/lex-hermes/plugins/legal-drafting-gate/__init__.py; \
     mkdir -p /opt/lex-hermes/web/src/components /opt/lex-hermes/web/src/contexts /opt/lex-hermes/web/src/hooks /opt/lex-hermes/web/src/lib /opt/lex-hermes/web/src/pages; \
     cp -a hermes_cli/web_dist /opt/lex-hermes/hermes_cli/; \
     cp web/src/App.tsx /opt/lex-hermes/web/src/App.tsx; \
@@ -125,6 +131,8 @@ RUN set -e; \
     mkdir -p /opt/hermes/tests/plugins /opt/lex-hermes/tests/plugins; \
     cp tests/plugins/test_backoffice_issue_relay.py /opt/hermes/tests/plugins/test_backoffice_issue_relay.py; \
     cp tests/plugins/test_backoffice_issue_relay.py /opt/lex-hermes/tests/plugins/test_backoffice_issue_relay.py; \
+    cp tests/plugins/test_legal_drafting_gate.py /opt/hermes/tests/plugins/test_legal_drafting_gate.py; \
+    cp tests/plugins/test_legal_drafting_gate.py /opt/lex-hermes/tests/plugins/test_legal_drafting_gate.py; \
     mkdir -p /opt/hermes/tests/gateway /opt/lex-hermes/tests/gateway; \
     cp tests/gateway/test_status.py /opt/hermes/tests/gateway/test_status.py; \
     cp tests/gateway/test_status.py /opt/lex-hermes/tests/gateway/test_status.py; \
@@ -179,6 +187,8 @@ RUN set -e; \
       tests/test_lexitool_ocr_fallback.py \
       tests/test_legal_harness_toolsets.py \
       tests/plugins/test_backoffice_issue_relay.py \
+      tests/plugins/test_legal_drafting_gate.py \
       plugins/backoffice-issue-relay/__init__.py \
+      plugins/legal-drafting-gate/__init__.py \
       tests/gateway/test_status.py; \
     rm -rf /tmp/lex-hermes-patch

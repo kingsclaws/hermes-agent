@@ -603,6 +603,21 @@ LEX_EDIT_SCHEMA = {
                     "authorizes mechanical bulk replacement."
                 ),
             },
+            "bypass_legal_drafting_gate": {
+                "type": "boolean",
+                "description": (
+                    "Emergency override for the legal drafting gate. Use only after "
+                    "the user explicitly approves bypassing missing style memo or "
+                    "revision plan prerequisites. Must include bypass_reason."
+                ),
+            },
+            "bypass_reason": {
+                "type": "string",
+                "description": (
+                    "Required when bypass_legal_drafting_gate=true. Summarize the "
+                    "user approval and why editing may proceed before prerequisites."
+                ),
+            },
             "new_text": {
                 "type": "string",
                 "description": "New text for replace/replace_paragraph/insert. May contain format markup like [b]bold[/b].",
