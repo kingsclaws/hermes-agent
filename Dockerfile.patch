@@ -97,6 +97,9 @@ RUN set -e; \
     cp .hermes-project/roles/hpswarm-reviewer-content.md /opt/hermes/.hermes-project/roles/hpswarm-reviewer-content.md; \
     cp .hermes-project/roles/hpswarm-reviewer-format.md /opt/hermes/.hermes-project/roles/hpswarm-reviewer-format.md; \
     cp .hermes-project/roles/hpswarm-coordinator.md /opt/lex-hermes/.hermes-project/roles/hpswarm-coordinator.md; \
+    cp .hermes-project/roles/hpswarm-drafter.md /opt/lex-hermes/.hermes-project/roles/hpswarm-drafter.md; \
+    cp .hermes-project/roles/hpswarm-reviewer-content.md /opt/lex-hermes/.hermes-project/roles/hpswarm-reviewer-content.md; \
+    cp .hermes-project/roles/hpswarm-reviewer-format.md /opt/lex-hermes/.hermes-project/roles/hpswarm-reviewer-format.md; \
     cp tests/test_legal_harness_toolsets.py /opt/hermes/tests/test_legal_harness_toolsets.py; \
     cp tests/test_legal_harness_toolsets.py /opt/lex-hermes/tests/test_legal_harness_toolsets.py; \
     mkdir -p /opt/hermes/tests/gateway /opt/lex-hermes/tests/gateway; \
