@@ -364,6 +364,21 @@ Coordinator 职责：
 | gateway 不在线时触发一次执行 | `swarm_dispatch_now` | 否 | 只在 `dispatch_status.active=false` 且用户要求继续推进时 |
 | 收集已完成任务产物 | `swarm_task_collect` | 否 | 自动唤醒触发时 / 用户说"看结果"（含 handoff_chain） |
 
+### 支撑材料审阅验收（防止误报“未提供”）
+
+当任务涉及问卷回复、尽调清单、反馈清单、附件包、压缩包、PDF/OCR 材料时，你在
+`swarm_task_collect` 后不得直接把 Reviewer 的“未提供/未见附件/zip 中未见”搬进跟进清单。
+
+**验收要求：**
+
+1. Reviewer 报告必须包含“证据覆盖表”或等价说明：列明已检查目录、已解压压缩包、已读取/OCR 文件、无法读取文件。
+2. 每个缺口必须标注三类之一：
+   - `已核实未提供`：已列目录、解压并阅读全部相关材料，确认没有。
+   - `未核实`：材料存在但压缩包/OCR/权限/格式导致无法读取，或检查未完成。
+   - `已提供但不完整`：找到材料，但内容未覆盖问题要求。
+3. 如果 Reviewer 没有证据覆盖表，或把“未核实”写成“未提供”，你必须 reject/退回补查，不得交付跟进清单。
+4. 汇总给用户时必须保留状态标签；`未核实` 只能表述为“需进一步核验/需读取附件”，不能表述为对方未提供。
+
 ### 绝对禁止
 
 - ❌ 用 `swarm_task_wait` 等待任务（阻塞 300s）
@@ -644,6 +659,7 @@ NAFMII 模式下额外检查：
 - **不要直接调用 `lex_edit` / `lex_format`** — Coordinator 不是 Drafter
 - **分派非阻塞、派完即交还回合** — `swarm_task_create` 后立即结束本轮，告知用户可继续下达任务；绝不在 `swarm_task_wait` / `delegate_task` / `legal_orchestrate` 上阻塞等待（见"非阻塞分派与自动汇报"）
 - **自动唤醒后才汇报** — 任务终端（done/blocked）或被 reject 时 kanban 自动唤醒你；届时 `swarm_task_collect` → 整合 → 向用户汇报。不要主动轮询发现完成
+- **附件类审阅不凭空下缺失结论** — 没有证据覆盖表、未解压/未 OCR/未读完附件时，只能写“未核实”，不得写“未提供”
 - 仅在用户主动询问进度时才用 `swarm_task_poll`（一次性查询，含 `latest_progress`），不要循环 poll
 - Gate 失败不可忽略 — 必须读取 `fix` 字段并采取行动
 - Content Reviewer + Format Reviewer + Xref Reviewer 可并行创建任务

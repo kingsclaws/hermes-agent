@@ -129,9 +129,10 @@ export function ChatTabProvider({ children }: { children: ReactNode }) {
   //   (3) create new tab
   const findOrCreateTab = useCallback(
     (sessionId: string, projectId?: string): string => {
+      const normalizedSessionId = sessionId || null;
       // (1) Reuse existing tab with this session
-      if (sessionId) {
-        const existing = tabs.find((t) => t.sessionId === sessionId);
+      if (normalizedSessionId) {
+        const existing = tabs.find((t) => t.sessionId === normalizedSessionId);
         if (existing) {
           updateTab(existing.id, { lastActivityAt: Date.now() });
           setActiveTab(existing.id);
@@ -146,9 +147,9 @@ export function ChatTabProvider({ children }: { children: ReactNode }) {
       if (idleTab) {
         const now = Date.now();
         updateTab(idleTab.id, {
-          sessionId,
+          sessionId: normalizedSessionId,
           projectId: projectId ?? idleTab.projectId,
-          title: sessionId ? `Session ${sessionId.slice(0, 8)}` : idleTab.title,
+          title: normalizedSessionId ? `Session ${normalizedSessionId.slice(0, 8)}` : idleTab.title,
           lastActivityAt: now,
         });
         setActiveTab(idleTab.id);
@@ -157,8 +158,8 @@ export function ChatTabProvider({ children }: { children: ReactNode }) {
 
       // (3) Create a new tab
       return addTab({
-        title: sessionId ? `Session ${sessionId.slice(0, 8)}` : "New Chat",
-        sessionId,
+        title: normalizedSessionId ? `Session ${normalizedSessionId.slice(0, 8)}` : "New Chat",
+        sessionId: normalizedSessionId,
         projectId: projectId ?? null,
         projectName: null,
         type: "native",

@@ -44,7 +44,6 @@ export function useChatSessionBinding({
   activeTabId,
   addTab,
   updateTab,
-  findOrCreateTab,
 }: UseChatSessionBindingOptions): ChatSessionBinding {
   const [searchParams, setSearchParams] = useSearchParams();
   const resumeParam = searchParams.get("resume");
@@ -53,6 +52,7 @@ export function useChatSessionBinding({
 
   const [projects, setProjects] = useState<ProjectInfo[]>([]);
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
+  const [recentSessions, setRecentSessions] = useState<SessionInfo[]>([]);
   const [selectedProjectId, setSelectedProjectId] = useState<string>(() => {
     if (projectParam) return projectParam;
     try {
@@ -63,10 +63,8 @@ export function useChatSessionBinding({
   });
   const [selectorError, setSelectorError] = useState<string | null>(null);
   const [selectorBusy, setSelectorBusy] = useState(true);
-  const didAutoResume = useRef(false);
   const didInitTabs = useRef(false);
   const creatingSessionRef = useRef(false);
-  const lastBoundProjectId = useRef<string | null>(null);
 
   // Stable URL updater: reads searchParams via ref to avoid identity changes.
   const searchParamsRef = useRef(searchParams);
@@ -84,11 +82,39 @@ export function useChatSessionBinding({
     [setSearchParams],
   );
 
-  // Sync project param from URL → state.
+  // Sync explicit URL params into state/tab. This is the only URL → UI binding
+  // path; ordinary tab switches flow in the opposite direction below.
   useEffect(() => {
-    if (!projectParam || projectParam === selectedProjectId) return;
-    setSelectedProjectId(projectParam);
-  }, [projectParam, selectedProjectId]);
+    if (!isActive || (!projectParam && !resumeParam)) return;
+    const nextProjectId = projectParam ?? "";
+    if (nextProjectId !== selectedProjectId) {
+      setSelectedProjectId(nextProjectId);
+    }
+    const active = tabs.find((t) => t.id === activeTabId);
+    if (
+      active &&
+      ((active.projectId ?? null) !== (projectParam ?? null) ||
+        (active.sessionId ?? null) !== (resumeParam ?? null))
+    ) {
+      updateTab(active.id, {
+        projectId: projectParam ?? null,
+        sessionId: resumeParam ?? null,
+      });
+    }
+  }, [activeTabId, isActive, projectParam, resumeParam, selectedProjectId, tabs, updateTab]);
+
+  // Active tab is the source of truth for the top-bar selectors. This prevents
+  // stale localStorage/URL state from rebinding a newly opened tab to an old
+  // project and causing visible project/session jumping.
+  useEffect(() => {
+    if (!isActive || projectParam) return;
+    const active = tabs.find((t) => t.id === activeTabId);
+    if (!active) return;
+    const nextProjectId = active.projectId ?? "";
+    if (nextProjectId !== selectedProjectId) {
+      setSelectedProjectId(nextProjectId);
+    }
+  }, [activeTabId, isActive, projectParam, selectedProjectId, tabs]);
 
   // Initial load: projects + recent sessions.
   useEffect(() => {
@@ -107,7 +133,9 @@ export function useChatSessionBinding({
       .then(([projectRes, sessionRes]) => {
         if (cancelled) return;
         setProjects(projectRes.projects ?? []);
-        setSessions(sessionRes.sessions ?? []);
+        const loadedSessions = sessionRes.sessions ?? [];
+        setRecentSessions(loadedSessions);
+        setSessions(loadedSessions);
       })
       .catch((e: any) => {
         if (cancelled) return;
@@ -124,7 +152,10 @@ export function useChatSessionBinding({
 
   // When a project is selected, fetch its sessions.
   useEffect(() => {
-    if (!selectedProjectId) return;
+    if (!selectedProjectId) {
+      setSessions(recentSessions);
+      return;
+    }
     let cancelled = false;
     setSelectorBusy(true);
     setSelectorError(null);
@@ -132,9 +163,7 @@ export function useChatSessionBinding({
       .getProject(selectedProjectId)
       .then((project) => {
         if (cancelled) return;
-        if (project.sessions?.length) {
-          setSessions(project.sessions);
-        }
+        setSessions(project.sessions ?? []);
       })
       .catch(() => {})
       .finally(() => {
@@ -143,74 +172,11 @@ export function useChatSessionBinding({
     return () => {
       cancelled = true;
     };
-  }, [selectedProjectId]);
-
-  // Auto-resume: assign the most recent session using smart matching.
-  useEffect(() => {
-    if (!isActive || !activeTabId || didAutoResume.current || sessions.length === 0 || selectorBusy) return;
-    if (selectedProjectId) return;
-    const active = tabs.find((t) => t.id === activeTabId);
-    if (active?.sessionId) return;
-    didAutoResume.current = true;
-    const withMessages = sessions.filter((s) => s.message_count > 0);
-    const pick = withMessages[0] ?? sessions[0];
-    if (pick) {
-      findOrCreateTab(pick.id);
-      updateChatSearch({ resume: pick.id });
-    }
-  }, [isActive, activeTabId, sessions, selectorBusy, selectedProjectId, findOrCreateTab, updateChatSearch]);
-
-  // Project-binding: when a project is selected, bind it using smart matching.
-  useEffect(() => {
-    if (!isActive || !activeTabId || !selectedProjectId || selectorBusy) return;
-    if (creatingSessionRef.current) return;
-    // Bind only when the selected project actually changed. This effect also
-    // re-fires whenever activeTabId changes (e.g. closing/switching tabs); without
-    // this guard it would re-create a just-closed tab and re-lock the last project.
-    if (selectedProjectId === lastBoundProjectId.current) return;
-
-    const active = tabs.find((t) => t.id === activeTabId);
-    if (!active) return;
-
-    // Active tab already bound to this project — record it so future tab-close
-    // events don't trigger a rebind.
-    if (active.projectId === selectedProjectId && active.sessionId) {
-      lastBoundProjectId.current = selectedProjectId;
-      return;
-    }
-
-    lastBoundProjectId.current = selectedProjectId;
-
-    if (sessions.length > 0) {
-      const withMessages = sessions.filter((s) => s.message_count > 0);
-      const pick = withMessages[0] ?? sessions[0];
-      findOrCreateTab(pick.id, selectedProjectId);
-      updateChatSearch({ project: selectedProjectId, resume: pick.id });
-      return;
-    }
-
-    // No sessions for this project yet — create one pre-bound via the API
-    // so the gateway session gets project_id set from the start.
-    creatingSessionRef.current = true;
-    api
-      .createProjectSession(selectedProjectId)
-      .then((res) => {
-        creatingSessionRef.current = false;
-        if (res?.session_id) {
-          findOrCreateTab(res.session_id, selectedProjectId);
-          updateChatSearch({ project: selectedProjectId, resume: res.session_id });
-        }
-      })
-      .catch(() => {
-        creatingSessionRef.current = false;
-        updateTab(activeTabId, { projectId: selectedProjectId, sessionId: null });
-      });
-  }, [isActive, activeTabId, selectedProjectId, sessions, selectorBusy, findOrCreateTab, updateTab, updateChatSearch]);
+  }, [recentSessions, selectedProjectId]);
 
   // Reset per-visit guards when leaving chat.
   useEffect(() => {
     if (!isActive) {
-      didAutoResume.current = false;
       creatingSessionRef.current = false;
       didInitTabs.current = false;
     }
@@ -241,11 +207,11 @@ export function useChatSessionBinding({
 
     if (
       active.sessionId !== resumeParam ||
-      (active.projectId || null) !== (selectedProjectId || null)
+      (active.projectId || null) !== (projectParam || null)
     ) {
       updateChatSearch({ resume: active.sessionId, project: active.projectId });
     }
-  }, [activeTabId, isActive]);
+  }, [activeTabId, isActive, projectParam, resumeParam, tabs, updateChatSearch]);
 
   // Derive tab title from session/project.
   const selectedProject = useMemo<NativeProjectContext>(() => {
@@ -284,6 +250,7 @@ export function useChatSessionBinding({
 
   const handleSelectProject = useCallback(
     (projectId: string) => {
+      creatingSessionRef.current = false;
       setSelectedProjectId(projectId);
       try {
         if (projectId) localStorage.setItem(CHAT_PROJECT_KEY, projectId);
@@ -300,12 +267,13 @@ export function useChatSessionBinding({
   const handleSelectSession = useCallback(
     (sessionId: string) => {
       if (!sessionId) {
+        creatingSessionRef.current = false;
         if (activeTabId) updateTab(activeTabId, { sessionId: null });
         updateChatSearch({ resume: null });
         return;
       }
       const session = sessions.find((item) => item.id === sessionId);
-      findOrCreateTab(sessionId, selectedProjectId || undefined);
+      creatingSessionRef.current = false;
       if (activeTabId) {
         updateTab(activeTabId, {
           sessionId,
@@ -314,7 +282,7 @@ export function useChatSessionBinding({
       }
       updateChatSearch({ resume: sessionId, project: selectedProjectId || null });
     },
-    [activeTabId, findOrCreateTab, selectedProjectId, sessions, updateChatSearch, updateTab],
+    [activeTabId, selectedProjectId, sessions, updateChatSearch, updateTab],
   );
 
   return {
