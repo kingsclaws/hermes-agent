@@ -82,6 +82,13 @@ Report content policy:
 - The generated Markdown report must include enough context for the maintainer side to take over: observed error, redacted tool arguments, artifact paths, source candidates, runtime context, reproduction notes, and a ready-to-use maintainer prompt.
 - Deeper code reading, patching, testing, committing, image building, and closing the issue happen on the maintainer side after reading the report.
 
+Maintainer delivery policy:
+
+- `fixed` is a JSON state transition, not a file deletion signal.
+- A complete fix should record `fix_commit`, `fixed_image_digest`, and tests/verification evidence.
+- Deleting `*.REPORT.md` is an archive/cleanup action after JSON has been updated. It must not be the only signal that a problem is fixed.
+- Existing legal sessions are not automatically woken by file deletion. They can see repair status only if they read the stored issue path again, poll the backoffice inbox, or a future gateway notification bridge pushes the status back into the session.
+
 ## Consequences
 
 - Lexitool and harness problems become durable artifacts instead of disappearing in chat.
@@ -89,9 +96,10 @@ Report content policy:
 - The maintainer agent can treat shared `*.REPORT.md` files as its inbox for lex-hermes-originated tooling defects.
 - Legal workers stop improvising low-quality workarounds for tool defects.
 - Shared file paths are simple and robust across separate containers, but require cleanup/retention policy.
+- The maintainer inbox can stay clean by filtering default list/watch output to `open` and `needs_user`; fixed/archived items remain auditable in JSON unless explicitly removed.
 - The relay is not a replacement for Kanban execution facts. It records harness/tooling problems, not legal work progress.
 
 ## Open Questions
 
-- Should maintainer pickup be pull-based (`lex_backoffice list/claim`) or push-based via gateway/webhook notification?
+- Should maintainer pickup remain pull-based (`hermes backoffice list/watch`) or add push-based gateway/webhook notification?
 - Which errors should be auto-classified as "tool defect" instead of ordinary user/project error?

@@ -7,6 +7,7 @@ import json
 import os
 import subprocess
 import time
+from datetime import datetime, timezone
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Sequence
@@ -75,6 +76,23 @@ def _load_issue(report_path: Path) -> dict:
     return {"id": report_path.stem, "status": "missing-json"}
 
 
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _write_issue(path: Path, issue: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(issue, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _append_resolution_to_report(report: BackofficeReport, heading: str, lines: Sequence[str]) -> None:
+    if not report.report_path.exists():
+        return
+    body = report.report_path.read_text(encoding="utf-8")
+    addition = "\n\n## " + heading + "\n\n" + "\n".join(lines) + "\n"
+    report.report_path.write_text(body.rstrip() + addition, encoding="utf-8")
+
+
 def scan_reports(root: Path = DEFAULT_ROOT, *, statuses: Sequence[str] | None = None) -> list[BackofficeReport]:
     wanted = {s.lower() for s in statuses or [] if s}
     reports: list[BackofficeReport] = []
@@ -111,6 +129,10 @@ def _resolve_report(selector: str, reports: Sequence[BackofficeReport]) -> Backo
         if selector == item.issue_id or selector in item.issue_id or selector in str(item.report_path):
             return item
     raise SystemExit(f"Backoffice report not found: {selector}")
+
+
+def _all_reports_for_resolution(root: Path) -> list[BackofficeReport]:
+    return scan_reports(root, statuses=None)
 
 
 def _run_notify(command: str, report: BackofficeReport) -> None:
@@ -165,6 +187,95 @@ def _cmd_watch(args: argparse.Namespace) -> int:
         time.sleep(args.interval)
 
 
+def _cmd_claim(args: argparse.Namespace) -> int:
+    item = _resolve_report(args.selector, _all_reports_for_resolution(args.root))
+    issue = dict(item.issue)
+    issue["status"] = "triaged"
+    issue["claimed_at"] = _now()
+    issue["claimed_by"] = args.by
+    if args.note:
+        issue["claim_note"] = args.note
+    _write_issue(item.issue_path, issue)
+    _append_resolution_to_report(
+        item,
+        "Backoffice Claim",
+        [
+            f"- Claimed at: `{issue['claimed_at']}`",
+            f"- Claimed by: `{args.by}`",
+            f"- Note: {args.note or ''}",
+        ],
+    )
+    print(f"Claimed {item.issue_id}: {item.issue_path}")
+    return 0
+
+
+def _cmd_fix(args: argparse.Namespace) -> int:
+    if not args.allow_incomplete and (not args.commit or not args.image_digest):
+        raise SystemExit("backoffice fix requires --commit and --image-digest unless --allow-incomplete is set")
+    item = _resolve_report(args.selector, _all_reports_for_resolution(args.root))
+    issue = dict(item.issue)
+    issue["status"] = "fixed"
+    issue["fixed_at"] = _now()
+    issue["fixed_by"] = args.by
+    issue["fix_commit"] = args.commit or issue.get("fix_commit", "")
+    issue["fixed_image_digest"] = args.image_digest or issue.get("fixed_image_digest", "")
+    issue["fix_note"] = args.note or ""
+    issue["tests"] = args.test or []
+    issue["delivery_standard"] = {
+        "commit_required": True,
+        "push_required": True,
+        "image_build_push_required": True,
+        "commit": issue["fix_commit"],
+        "image_digest": issue["fixed_image_digest"],
+        "tests": issue["tests"],
+        "complete": bool(issue["fix_commit"] and issue["fixed_image_digest"]),
+    }
+    _write_issue(item.issue_path, issue)
+    _append_resolution_to_report(
+        item,
+        "Backoffice Fix",
+        [
+            f"- Fixed at: `{issue['fixed_at']}`",
+            f"- Fixed by: `{args.by}`",
+            f"- Commit: `{issue['fix_commit']}`",
+            f"- Image digest: `{issue['fixed_image_digest']}`",
+            f"- Tests: {', '.join(issue['tests']) if issue['tests'] else ''}",
+            f"- Note: {args.note or ''}",
+        ],
+    )
+    print(f"Fixed {item.issue_id}: {item.issue_path}")
+    if args.remove_report and item.report_path.exists():
+        item.report_path.unlink()
+        print(f"Removed report: {item.report_path}")
+    return 0
+
+
+def _cmd_archive(args: argparse.Namespace) -> int:
+    item = _resolve_report(args.selector, _all_reports_for_resolution(args.root))
+    issue = dict(item.issue)
+    issue["status"] = "archived"
+    issue["archived_at"] = _now()
+    issue["archived_by"] = args.by
+    if args.note:
+        issue["archive_note"] = args.note
+    _write_issue(item.issue_path, issue)
+    if args.remove_report and item.report_path.exists():
+        item.report_path.unlink()
+        print(f"Archived {item.issue_id} and removed report: {item.report_path}")
+    else:
+        _append_resolution_to_report(
+            item,
+            "Backoffice Archive",
+            [
+                f"- Archived at: `{issue['archived_at']}`",
+                f"- Archived by: `{args.by}`",
+                f"- Note: {args.note or ''}",
+            ],
+        )
+        print(f"Archived {item.issue_id}: {item.issue_path}")
+    return 0
+
+
 def build_parser(subparsers) -> argparse.ArgumentParser:
     parser = subparsers.add_parser(
         "backoffice",
@@ -207,6 +318,30 @@ def build_parser(subparsers) -> argparse.ArgumentParser:
         ),
     )
     watch_parser.set_defaults(backoffice_func=_cmd_watch)
+
+    claim_parser = action.add_parser("claim", help="Mark a report as triaged/claimed")
+    claim_parser.add_argument("selector", nargs="?", default="latest", help="latest, id fragment, or report path")
+    claim_parser.add_argument("--by", default=os.environ.get("USER", "maintainer"), help="Maintainer identity")
+    claim_parser.add_argument("--note", default="", help="Claim note")
+    claim_parser.set_defaults(backoffice_func=_cmd_claim)
+
+    fix_parser = action.add_parser("fix", help="Mark a report fixed with delivery evidence")
+    fix_parser.add_argument("selector", nargs="?", default="latest", help="latest, id fragment, or report path")
+    fix_parser.add_argument("--by", default=os.environ.get("USER", "maintainer"), help="Maintainer identity")
+    fix_parser.add_argument("--commit", help="Fix commit hash pushed to remote")
+    fix_parser.add_argument("--image-digest", help="Built and pushed image digest")
+    fix_parser.add_argument("--test", action="append", default=[], help="Verification command/result; repeatable")
+    fix_parser.add_argument("--note", default="", help="Fix note")
+    fix_parser.add_argument("--allow-incomplete", action="store_true", help="Allow fixed status without full delivery evidence")
+    fix_parser.add_argument("--remove-report", action="store_true", help="Remove the Markdown report after updating JSON")
+    fix_parser.set_defaults(backoffice_func=_cmd_fix)
+
+    archive_parser = action.add_parser("archive", help="Archive a report after it is no longer actionable")
+    archive_parser.add_argument("selector", nargs="?", default="latest", help="latest, id fragment, or report path")
+    archive_parser.add_argument("--by", default=os.environ.get("USER", "maintainer"), help="Maintainer identity")
+    archive_parser.add_argument("--note", default="", help="Archive note")
+    archive_parser.add_argument("--remove-report", action="store_true", help="Remove the Markdown report from the active inbox")
+    archive_parser.set_defaults(backoffice_func=_cmd_archive)
 
     parser.set_defaults(backoffice_func=_cmd_list)
     return parser
