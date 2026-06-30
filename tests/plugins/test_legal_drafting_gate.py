@@ -146,10 +146,24 @@ def test_delivery_gate_allows_completion_with_evidence_coverage():
     plugin = _load_plugin()
 
     transformed = plugin._on_transform_llm_output(
-        "合同修改完成。\n\nEvidence coverage:\n- 文件: a.docx\n- 段落: §12-§18\n- 验证: lex_read 读回确认。"
+        "合同修改完成。\n\n"
+        "报告路径：/workingfile/report.html；/workingfile/report.docx；/workingfile/report.md\n\n"
+        "Evidence coverage:\n- 文件: a.docx\n- 段落: §12-§18\n- 验证: lex_read 读回确认。"
     )
 
     assert transformed is None
+
+
+def test_delivery_gate_requires_html_and_docx_report_paths():
+    plugin = _load_plugin()
+
+    transformed = plugin._on_transform_llm_output(
+        "合同修改完成。\n\nEvidence coverage:\n- 文件: a.docx\n- 段落: §12-§18\n- 验证: lex_read 读回确认。"
+    )
+
+    assert transformed is not None
+    assert ".html" in transformed
+    assert ".docx" in transformed
 
 
 def test_plugin_runtime_signature_changes_when_plugin_file_changes(tmp_path, monkeypatch):

@@ -74,6 +74,8 @@ RUN set -e; \
     mkdir -p /opt/hermes/plugins/legal-drafting-gate; \
     cp plugins/legal-drafting-gate/plugin.yaml /opt/hermes/plugins/legal-drafting-gate/plugin.yaml; \
     cp plugins/legal-drafting-gate/__init__.py /opt/hermes/plugins/legal-drafting-gate/__init__.py; \
+    mkdir -p /opt/hermes/profiles; \
+    cp profiles/*.soul.md /opt/hermes/profiles/; \
     mkdir -p /opt/hermes/web/src/components /opt/hermes/web/src/contexts /opt/hermes/web/src/hooks /opt/hermes/web/src/lib /opt/hermes/web/src/pages; \
     cp -a hermes_cli/web_dist /opt/hermes/hermes_cli/; \
     cp web/src/App.tsx /opt/hermes/web/src/App.tsx; \
@@ -112,6 +114,8 @@ RUN set -e; \
     mkdir -p /opt/lex-hermes/plugins/legal-drafting-gate; \
     cp plugins/legal-drafting-gate/plugin.yaml /opt/lex-hermes/plugins/legal-drafting-gate/plugin.yaml; \
     cp plugins/legal-drafting-gate/__init__.py /opt/lex-hermes/plugins/legal-drafting-gate/__init__.py; \
+    mkdir -p /opt/lex-hermes/profiles; \
+    cp profiles/*.soul.md /opt/lex-hermes/profiles/; \
     mkdir -p /opt/lex-hermes/web/src/components /opt/lex-hermes/web/src/contexts /opt/lex-hermes/web/src/hooks /opt/lex-hermes/web/src/lib /opt/lex-hermes/web/src/pages; \
     cp -a hermes_cli/web_dist /opt/lex-hermes/hermes_cli/; \
     cp web/src/App.tsx /opt/lex-hermes/web/src/App.tsx; \

@@ -370,6 +370,10 @@ def _looks_like_legal_delivery(response_text: str) -> bool:
 def _has_evidence_coverage(response_text: str) -> bool:
     text = response_text or ""
     lowered = text.lower()
+    has_html = bool(re.search(r"[/\\\w\u4e00-\u9fff .()\[\]-]+\.html\b", text, re.IGNORECASE))
+    has_docx = bool(re.search(r"[/\\\w\u4e00-\u9fff .()\[\]-]+\.docx\b", text, re.IGNORECASE))
+    if not (has_html and has_docx):
+        return False
     marker_count = sum(1 for marker in _EVIDENCE_MARKERS if marker.lower() in lowered)
     if marker_count >= 2:
         return True
@@ -386,6 +390,8 @@ def _delivery_gate_message(response_text: str) -> str:
         "claim completion of legal document work without an evidence coverage "
         "summary.\n\n"
         "Before reporting completion, provide:\n"
+        "- user-facing `.html` report path and converted `.docx` report path;\n"
+        "- optional `.md` working draft path for future agents;\n"
         "- source files reviewed or modified;\n"
         "- paragraph/page/section ranges covered;\n"
         "- readback or verification tools used, such as lex_read, lex_diff, lex_proofread, lex_ref;\n"
