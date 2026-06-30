@@ -1,7 +1,13 @@
 import json
 
 from hermes_cli import kanban_db as kb
-from tools.kanban_toolset import kanban_task_create_handler
+from tools.legal_evidence_gate import (
+    read_before_conclude_errors as _read_before_conclude_errors,
+)
+from tools.kanban_tools import _handle_complete
+from tools.kanban_toolset import (
+    kanban_task_create_handler,
+)
 
 
 def test_swarm_task_create_subscribes_origin_session_and_requires_file_reading(monkeypatch, tmp_path):
@@ -42,3 +48,39 @@ def test_swarm_task_create_subscribes_origin_session_and_requires_file_reading(m
         and sub["thread_id"] == ""
         for sub in subs
     )
+
+
+def test_read_before_conclude_blocks_missing_claim_without_evidence():
+    errors = _read_before_conclude_errors("社保凭证未提供，zip中未见。")
+
+    assert errors
+    assert any("File Evidence Ledger" in err or "文件证据台账" in err for err in errors)
+    assert any("已核实未提供" in err for err in errors)
+
+
+def test_read_before_conclude_allows_verified_evidence_ledger():
+    note = """
+    ## File Evidence Ledger
+    文件名 | 工具 | 实际内容摘要 | 对应清单问题编号 | 结论
+    完税证明.pdf | lex_ocr | 显示社保缴纳记录 | Q29 | 已提供但不完整
+
+    跟进项：社保缴纳通知已核实未提供。
+    """
+
+    assert _read_before_conclude_errors(note) == []
+
+
+def test_read_before_conclude_does_not_block_non_missing_delivery_note():
+    assert _read_before_conclude_errors("已完成合同格式审阅，无需修订。") == []
+
+
+def test_kanban_complete_blocks_missing_claim_before_db_connect():
+    out = _handle_complete({
+        "task_id": "tsk_missing_evidence",
+        "summary": "社保凭证未提供，zip中未见。",
+    })
+    data = json.loads(out)
+
+    assert data["error"]
+    assert "Read-before-conclude" in data["error"]
+    assert "File Evidence Ledger" in data["error"]

@@ -49,6 +49,8 @@ RUN set -e; \
     cp vendor/lexitool/lexitool/tc_utils.py "$VENV_LEXITOOL/tc_utils.py"; \
     \
     cp tools/kanban_toolset.py /opt/hermes/tools/kanban_toolset.py; \
+    cp tools/kanban_tools.py /opt/hermes/tools/kanban_tools.py; \
+    cp tools/legal_evidence_gate.py /opt/hermes/tools/legal_evidence_gate.py; \
     cp tools/lexitool_tool.py /opt/hermes/tools/lexitool_tool.py; \
     cp tools/project_management_tool.py /opt/hermes/tools/project_management_tool.py; \
     cp tools/legal_orchestration_tool.py /opt/hermes/tools/legal_orchestration_tool.py; \
@@ -100,6 +102,8 @@ RUN set -e; \
     cp web/src/pages/ChatPage.tsx /opt/hermes/web/src/pages/ChatPage.tsx; \
     \
     cp tools/kanban_toolset.py /opt/lex-hermes/tools/kanban_toolset.py; \
+    cp tools/kanban_tools.py /opt/lex-hermes/tools/kanban_tools.py; \
+    cp tools/legal_evidence_gate.py /opt/lex-hermes/tools/legal_evidence_gate.py; \
     cp tools/lexitool_tool.py /opt/lex-hermes/tools/lexitool_tool.py; \
     cp tools/project_management_tool.py /opt/lex-hermes/tools/project_management_tool.py; \
     cp tools/legal_orchestration_tool.py /opt/lex-hermes/tools/legal_orchestration_tool.py; \
@@ -195,6 +199,8 @@ RUN set -e; \
       /opt/hermes/hermes_cli/service_manager.py /opt/lex-hermes/hermes_cli/service_manager.py \
       /opt/hermes/hermes_cli/project_commands.py /opt/lex-hermes/hermes_cli/project_commands.py \
       /opt/hermes/tools/kanban_toolset.py /opt/lex-hermes/tools/kanban_toolset.py \
+      /opt/hermes/tools/kanban_tools.py /opt/lex-hermes/tools/kanban_tools.py \
+      /opt/hermes/tools/legal_evidence_gate.py /opt/lex-hermes/tools/legal_evidence_gate.py \
       /opt/hermes/tools/lexitool_tool.py /opt/lex-hermes/tools/lexitool_tool.py \
       /opt/hermes/tools/project_management_tool.py /opt/lex-hermes/tools/project_management_tool.py \
       /opt/hermes/gateway/agent_cache.py /opt/lex-hermes/gateway/agent_cache.py \
@@ -212,6 +218,8 @@ RUN set -e; \
       hermes_cli/main.py \
       hermes_cli/backoffice.py \
       hermes_cli/plugins.py \
+      tools/legal_evidence_gate.py \
+      tools/kanban_tools.py \
       tools/kanban_toolset.py \
       tools/lexitool_tool.py \
       tools/project_management_tool.py \

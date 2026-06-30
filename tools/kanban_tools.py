@@ -33,6 +33,10 @@ import logging
 import os
 from typing import Any, Optional
 
+from tools.legal_evidence_gate import (
+    read_before_conclude_errors,
+    render_completion_text,
+)
 from tools.registry import registry, tool_error
 
 logger = logging.getLogger(__name__)
@@ -463,6 +467,17 @@ def _handle_complete(args: dict, **kw) -> str:
     if metadata is not None and not isinstance(metadata, dict):
         return tool_error(
             f"metadata must be an object/dict, got {type(metadata).__name__}"
+        )
+    evidence_errors = read_before_conclude_errors(
+        render_completion_text(summary, result, metadata)
+    )
+    if evidence_errors:
+        return tool_error(
+            "kanban_complete blocked: Read-before-conclude 证据门禁未通过。"
+            f" Failed checks: {'; '.join(evidence_errors)} "
+            "Retry kanban_complete only after listing/extracting every relevant "
+            "file, reading/OCRing actual contents, adding a File Evidence Ledger, "
+            "and tagging any gap as 已核实未提供 / 未核实 / 已提供但不完整."
         )
     metadata = _stamp_worker_session_metadata(tid, metadata)
     board = args.get("board")

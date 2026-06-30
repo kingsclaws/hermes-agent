@@ -26,6 +26,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
+from tools.legal_evidence_gate import (
+    read_before_conclude_errors as _read_before_conclude_errors,
+)
+
 # ── Constants ──────────────────────────────────────────────────────────────────
 
 VALID_TASK_STATUSES = {"todo", "in_progress", "in_review", "approved", "rejected", "done"}
@@ -126,8 +130,14 @@ the Worker must:
 Forbidden: concluding from file name, file path, extension, or keyword matching
 alone. If a file name suggests one thing but content may answer another legal
 question, read the content first.
-"""
 
+Completion is invalid unless the final report includes a File Evidence Ledger
+or equivalent evidence coverage table. Any conclusion that materials are
+"missing" must be tagged as one of:
+- verified_not_provided / 已核实未提供
+- unverified / 未核实
+- provided_but_incomplete / 已提供但不完整
+"""
 
 # ── DB helpers ─────────────────────────────────────────────────────────────────
 
@@ -2006,6 +2016,19 @@ def kanban_task_handoff_handler(args: dict, **kwargs) -> str:
         conn.close()
         return json.dumps({"success": False, "error": f"任务状态为 '{row['status']}'，无法移交。"})
 
+    evidence_errors = _read_before_conclude_errors(note)
+    if evidence_errors:
+        conn.close()
+        return json.dumps({
+            "success": False,
+            "error": "Read-before-conclude 证据门禁未通过，禁止移交。",
+            "failed_checks": evidence_errors,
+            "fix_hint": (
+                "请逐一列出、解压、读取/OCR 全部相关文件，补充 File Evidence Ledger，"
+                "并将缺口标为“已核实未提供 / 未核实 / 已提供但不完整”之一后再 handoff。"
+            ),
+        }, ensure_ascii=False)
+
     # ── DELIVERY_SPEC gate check (hard gate) ──
     # Validate exit criteria for the current delivery phase before allowing handoff.
     # This makes delivery validation non-bypassable — like Claude Code's plan/todo system.
@@ -2168,6 +2191,19 @@ def kanban_task_approve_handler(args: dict, **kwargs) -> str:
     if row["status"] != "in_review":
         conn.close()
         return json.dumps({"success": False, "error": f"任务状态为 '{row['status']}'，无法批准。只有 in_review 状态的任务可以批准。"})
+
+    evidence_errors = _read_before_conclude_errors(note)
+    if evidence_errors:
+        conn.close()
+        return json.dumps({
+            "success": False,
+            "error": "Read-before-conclude 证据门禁未通过，禁止批准。",
+            "failed_checks": evidence_errors,
+            "fix_hint": (
+                "Reviewer approve note 必须包含证据覆盖表，且不能把“未核实”表述为“未提供”。"
+                "请 reject 退回补查，或在 approve note 中补充完整证据台账和三态缺口标签。"
+            ),
+        }, ensure_ascii=False)
 
     # ── DELIVERY_SPEC legal_scorecard gate (hard gate) ──
     # Before approving, validate quality via legal_scorecard.
