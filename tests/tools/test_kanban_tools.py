@@ -311,6 +311,95 @@ def test_complete_happy_path(worker_env):
         conn.close()
 
 
+def test_complete_routes_swarm_gate_to_review(worker_env):
+    """swarm-created tasks with review gates must not go directly done."""
+    from hermes_cli import kanban_db as kb
+    from tools import kanban_tools as kt
+
+    gates = [{"type": "review", "target_pool": "hpswarm-reviewer-content"}]
+    body = (
+        "draft this file\n\n"
+        "## Review / gate hints\n"
+        + json.dumps(gates)
+        + "\n\nThese gates are coordination hints."
+    )
+    conn = kb.connect()
+    try:
+        conn.execute("UPDATE tasks SET body = ? WHERE id = ?", (body, worker_env))
+        conn.commit()
+    finally:
+        conn.close()
+
+    out = kt._handle_complete({
+        "summary": "draft ready for review",
+        "metadata": {"changed_files": ["draft.docx"]},
+    })
+    d = json.loads(out)
+    assert d["ok"] is True
+    assert d["status"] == "review"
+    assert d["assignee"] == "hpswarm-reviewer-content"
+
+    conn = kb.connect()
+    try:
+        task = kb.get_task(conn, worker_env)
+        assert task.status == "review"
+        assert task.assignee == "hpswarm-reviewer-content"
+        run = kb.latest_run(conn, worker_env)
+        assert run.outcome == "handoff_review"
+        events = kb.list_events(conn, worker_env)
+        assert any(e.kind == "review_requested" for e in events)
+        assert not any(e.kind == "completed" for e in events)
+    finally:
+        conn.close()
+
+
+def test_reviewer_complete_final_gate_marks_done(worker_env):
+    """Reviewer completion after the final gate is the only path to done."""
+    from hermes_cli import kanban_db as kb
+    from tools import kanban_tools as kt
+
+    gates = [{"type": "review", "target_pool": "hpswarm-reviewer-content"}]
+    body = (
+        "draft this file\n\n"
+        "<LEX_REVIEW_GATES_JSON>\n"
+        + json.dumps(gates)
+        + "\n</LEX_REVIEW_GATES_JSON>\n"
+    )
+    conn = kb.connect()
+    try:
+        conn.execute("UPDATE tasks SET body = ? WHERE id = ?", (body, worker_env))
+        conn.commit()
+    finally:
+        conn.close()
+
+    routed = json.loads(kt._handle_complete({"summary": "ready for review"}))
+    assert routed["status"] == "review"
+
+    conn = kb.connect()
+    try:
+        claimed = kb.claim_review_task(conn, worker_env)
+        assert claimed is not None
+    finally:
+        conn.close()
+
+    out = kt._handle_complete({
+        "summary": "review passed",
+        "metadata": {"review": "passed"},
+    })
+    d = json.loads(out)
+    assert d["ok"] is True
+
+    conn = kb.connect()
+    try:
+        task = kb.get_task(conn, worker_env)
+        assert task.status == "done"
+        events = kb.list_events(conn, worker_env)
+        assert any(e.kind == "review_gate_approved" for e in events)
+        assert any(e.kind == "completed" for e in events)
+    finally:
+        conn.close()
+
+
 def test_complete_metadata_round_trips_through_show(worker_env):
     """Structured completion metadata should be visible to downstream agents."""
     from tools import kanban_tools as kt

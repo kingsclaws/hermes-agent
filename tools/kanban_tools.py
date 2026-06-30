@@ -31,6 +31,8 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
+import time
 from typing import Any, Optional
 
 from tools.legal_evidence_gate import (
@@ -41,6 +43,15 @@ from tools.registry import registry, tool_error
 
 logger = logging.getLogger(__name__)
 
+_LEX_REVIEW_GATES_RE = re.compile(
+    r"<LEX_REVIEW_GATES_JSON>\s*(\[.*?\])\s*</LEX_REVIEW_GATES_JSON>",
+    re.DOTALL,
+)
+_LEGACY_REVIEW_GATES_RE = re.compile(
+    r"## Review / gate hints\s*(\[.*?\])\s*(?:\n\n|$)",
+    re.DOTALL,
+)
+
 
 # ---------------------------------------------------------------------------
 # Gating
@@ -48,6 +59,216 @@ logger = logging.getLogger(__name__)
 
 KANBAN_LIST_DEFAULT_LIMIT = 50
 KANBAN_LIST_MAX_LIMIT = 200
+
+
+def _parse_review_gates_from_body(body: str | None) -> list[dict]:
+    """Extract lex review gates from a task body.
+
+    `swarm_task_create` historically stored gates only in the task body while
+    creating official Hermes kanban tasks. New tasks use an explicit XML-ish
+    marker; legacy tasks are parsed from the old markdown section.
+    """
+    if not body:
+        return []
+    match = _LEX_REVIEW_GATES_RE.search(body)
+    if not match:
+        match = _LEGACY_REVIEW_GATES_RE.search(body)
+    if not match:
+        return []
+    try:
+        parsed = json.loads(match.group(1))
+    except Exception:
+        return []
+    if not isinstance(parsed, list):
+        return []
+    gates: list[dict] = []
+    for gate in parsed:
+        if isinstance(gate, dict) and gate.get("target_pool"):
+            gates.append(gate)
+    return gates
+
+
+def _same_assignee(a: Any, b: Any) -> bool:
+    return str(a or "").strip().casefold() == str(b or "").strip().casefold()
+
+
+def _route_completion_through_review_gates(
+    kb: Any,
+    conn: Any,
+    task_id: str,
+    *,
+    summary: Optional[str],
+    result: Optional[str],
+    metadata: Optional[dict],
+    expected_run_id: Optional[int],
+) -> Optional[dict]:
+    """Route `kanban_complete` through swarm review gates when configured.
+
+    Returns a dict when the completion was consumed by gate routing. Returns
+    None when there are no gates, all gates have already passed, or the caller
+    should fall through to normal `complete_task`.
+    """
+    row = conn.execute(
+        "SELECT id, body, assignee, status, current_run_id FROM tasks WHERE id = ?",
+        (task_id,),
+    ).fetchone()
+    if row is None:
+        return None
+
+    gates = _parse_review_gates_from_body(row["body"])
+    if not gates:
+        return None
+
+    approved_row = conn.execute(
+        "SELECT COUNT(*) AS n FROM task_events WHERE task_id = ? AND kind = 'review_gate_approved'",
+        (task_id,),
+    ).fetchone()
+    gate_index = int(approved_row["n"] if approved_row else 0)
+    if gate_index >= len(gates):
+        return None
+
+    current_gate = gates[gate_index]
+    current_reviewer = str(current_gate.get("target_pool") or "").strip()
+    if not current_reviewer:
+        return None
+
+    task_assignee = row["assignee"]
+    is_reviewer_completion = _same_assignee(task_assignee, current_reviewer)
+    now = int(time.time())
+    handoff_summary = summary if summary is not None else result
+    payload = {
+        "gate_index": gate_index,
+        "gate": current_gate,
+        "summary": (handoff_summary or "").strip().splitlines()[0][:400] if handoff_summary else None,
+    }
+
+    with kb.write_txn(conn):
+        if expected_run_id is not None:
+            current_run_id = row["current_run_id"]
+            if current_run_id is not None and int(current_run_id) != int(expected_run_id):
+                return None
+
+        if is_reviewer_completion:
+            kb._append_event(  # noqa: SLF001 - no public review-gate API exists yet
+                conn,
+                task_id,
+                "review_gate_approved",
+                payload,
+                run_id=expected_run_id,
+            )
+            next_index = gate_index + 1
+            if next_index >= len(gates):
+                return None
+
+            next_gate = gates[next_index]
+            next_reviewer = str(next_gate.get("target_pool") or "").strip()
+            if not next_reviewer:
+                return None
+            run_id = kb._end_run(  # noqa: SLF001
+                conn,
+                task_id,
+                outcome="approved",
+                status="review",
+                summary=handoff_summary,
+                metadata=metadata,
+            )
+            if run_id is None and (handoff_summary or metadata):
+                run_id = kb._synthesize_ended_run(  # noqa: SLF001
+                    conn,
+                    task_id,
+                    outcome="approved",
+                    summary=handoff_summary,
+                    metadata=metadata,
+                )
+            cur = conn.execute(
+                """
+                UPDATE tasks
+                   SET status = 'review',
+                       assignee = ?,
+                       claim_lock = NULL,
+                       claim_expires = NULL,
+                       worker_pid = NULL,
+                       current_run_id = NULL
+                 WHERE id = ?
+                   AND status IN ('running', 'ready', 'blocked', 'review')
+                """,
+                (next_reviewer, task_id),
+            )
+            if cur.rowcount != 1:
+                return None
+            kb._append_event(  # noqa: SLF001
+                conn,
+                task_id,
+                "review_requested",
+                {
+                    "gate_index": next_index,
+                    "gate": next_gate,
+                    "assignee": next_reviewer,
+                    "source": "kanban_complete",
+                },
+                run_id=run_id,
+            )
+            return {
+                "ok": True,
+                "task_id": task_id,
+                "status": "review",
+                "assignee": next_reviewer,
+                "gate_index": next_index,
+                "message": "Review gate approved; routed to next reviewer.",
+            }
+
+        run_id = kb._end_run(  # noqa: SLF001
+            conn,
+            task_id,
+            outcome="handoff_review",
+            status="review",
+            summary=handoff_summary,
+            metadata=metadata,
+        )
+        if run_id is None and (handoff_summary or metadata):
+            run_id = kb._synthesize_ended_run(  # noqa: SLF001
+                conn,
+                task_id,
+                outcome="handoff_review",
+                summary=handoff_summary,
+                metadata=metadata,
+            )
+        cur = conn.execute(
+            """
+            UPDATE tasks
+               SET status = 'review',
+                   assignee = ?,
+                   claim_lock = NULL,
+                   claim_expires = NULL,
+                   worker_pid = NULL,
+                   current_run_id = NULL
+             WHERE id = ?
+               AND status IN ('running', 'ready', 'blocked')
+            """,
+            (current_reviewer, task_id),
+        )
+        if cur.rowcount != 1:
+            return None
+        kb._append_event(  # noqa: SLF001
+            conn,
+            task_id,
+            "review_requested",
+            {
+                "gate_index": gate_index,
+                "gate": current_gate,
+                "assignee": current_reviewer,
+                "source": "kanban_complete",
+            },
+            run_id=run_id,
+        )
+        return {
+            "ok": True,
+            "task_id": task_id,
+            "status": "review",
+            "assignee": current_reviewer,
+            "gate_index": gate_index,
+            "message": "Completion routed to review gate instead of done.",
+        }
 
 
 def _profile_has_kanban_toolset() -> bool:
@@ -495,6 +716,18 @@ def _handle_complete(args: dict, **kw) -> str:
                     f"{handoff_result.get('hint', '')}"
                 )
             # --- end handoff validation ---
+
+            routed = _route_completion_through_review_gates(
+                kb,
+                conn,
+                tid,
+                summary=summary,
+                result=result,
+                metadata=metadata,
+                expected_run_id=_worker_run_id(tid),
+            )
+            if routed is not None:
+                return json.dumps(routed, ensure_ascii=False)
 
             try:
                 ok = kb.complete_task(

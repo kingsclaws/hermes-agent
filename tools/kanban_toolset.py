@@ -896,8 +896,10 @@ def kanban_task_create_handler(args: dict, **kwargs) -> str:
         if gates:
             gates_text = (
                 "\n\n## Review / gate hints\n"
+                "<LEX_REVIEW_GATES_JSON>\n"
                 + json.dumps(gates, ensure_ascii=False, indent=2)
-                + "\n\nThese gates are coordination hints. Complete this assigned task with the canonical kanban tools (`kanban_complete` or `kanban_block`)."
+                + "\n</LEX_REVIEW_GATES_JSON>\n\n"
+                + "These gates are hard workflow gates. `kanban_complete` will route the task to review before final done."
             )
         body = (
             description_with_protocol
