@@ -3395,6 +3395,90 @@ async def upload_project_files(
     return {"uploaded": uploaded, "errors": errors}
 
 
+@app.post("/api/chat/attachments")
+async def upload_chat_attachments(request: Request):
+    """Upload chat attachments for the native Web chat.
+
+    Files are cached under Hermes' existing media cache roots and referenced
+    by absolute local path in the following ``prompt.submit`` call. Images use
+    the normal image cache so tui_gateway can route them through native vision;
+    all other files use the document cache and are injected as readable paths.
+    """
+    try:
+        form = await request.form()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid multipart form data")
+
+    upload_fields = form.getlist("files")
+    MAX_FILES = 10
+    MAX_SIZE = 50 * 1024 * 1024
+    if len(upload_fields) > MAX_FILES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Too many files — maximum {MAX_FILES} per request",
+        )
+
+    image_mimes = {
+        "image/jpeg",
+        "image/png",
+        "image/webp",
+        "image/gif",
+        "image/bmp",
+    }
+    attachments: list[dict] = []
+    errors: list[dict] = []
+
+    for field in upload_fields:
+        if not hasattr(field, "filename"):
+            errors.append({"filename": "(unknown)", "error": "Not a file"})
+            continue
+
+        raw_filename = field.filename or "attachment"
+        filename = Path(raw_filename).name
+        if (
+            not filename
+            or filename in {".", ".."}
+            or "/" in raw_filename
+            or "\\" in raw_filename
+            or "\x00" in raw_filename
+        ):
+            errors.append({"filename": raw_filename, "error": "Invalid filename"})
+            continue
+
+        content = await field.read()
+        if len(content) > MAX_SIZE:
+            errors.append({
+                "filename": raw_filename,
+                "error": f"File exceeds {MAX_SIZE // (1024 * 1024)} MB limit",
+            })
+            continue
+
+        mime = str(getattr(field, "content_type", "") or "")
+        suffix = Path(filename).suffix.lower() or ".bin"
+        try:
+            if mime in image_mimes or suffix in {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"}:
+                from gateway.platforms.base import cache_image_from_bytes
+
+                path = cache_image_from_bytes(content, suffix)
+                kind = "image"
+            else:
+                from gateway.platforms.base import cache_document_from_bytes
+
+                path = cache_document_from_bytes(content, filename)
+                kind = "file"
+            attachments.append({
+                "kind": kind,
+                "name": filename,
+                "path": path,
+                "size": len(content),
+                "mime": mime,
+            })
+        except Exception as exc:
+            errors.append({"filename": filename, "error": str(exc)})
+
+    return {"attachments": attachments, "errors": errors}
+
+
 @app.get("/api/projects/{project_id}/files/download")
 async def download_project_file(project_id: str, path: str = ""):
     """Download a file from a project directory."""

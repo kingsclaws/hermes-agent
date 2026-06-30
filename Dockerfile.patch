@@ -63,6 +63,7 @@ RUN set -e; \
     cp hermes_cli/kanban.py /opt/hermes/hermes_cli/kanban.py; \
     cp hermes_cli/kanban_db.py /opt/hermes/hermes_cli/kanban_db.py; \
     cp hermes_cli/web_server.py /opt/hermes/hermes_cli/web_server.py; \
+    cp tui_gateway/server.py /opt/hermes/tui_gateway/server.py; \
     cp hermes_cli/container_boot.py /opt/hermes/hermes_cli/container_boot.py; \
     cp hermes_cli/service_manager.py /opt/hermes/hermes_cli/service_manager.py; \
     cp hermes_cli/project_commands.py /opt/hermes/hermes_cli/project_commands.py; \
@@ -94,6 +95,7 @@ RUN set -e; \
     cp web/src/components/ToolCall.tsx /opt/hermes/web/src/components/ToolCall.tsx; \
     cp web/src/contexts/ChatTabContext.tsx /opt/hermes/web/src/contexts/ChatTabContext.tsx; \
     cp web/src/hooks/useChatSessionBinding.ts /opt/hermes/web/src/hooks/useChatSessionBinding.ts; \
+    cp web/src/lib/api.ts /opt/hermes/web/src/lib/api.ts; \
     cp web/src/lib/dashboard-flags.ts /opt/hermes/web/src/lib/dashboard-flags.ts; \
     cp web/src/pages/ChatPage.tsx /opt/hermes/web/src/pages/ChatPage.tsx; \
     \
@@ -112,6 +114,7 @@ RUN set -e; \
     cp hermes_cli/kanban.py /opt/lex-hermes/hermes_cli/kanban.py; \
     cp hermes_cli/kanban_db.py /opt/lex-hermes/hermes_cli/kanban_db.py; \
     cp hermes_cli/web_server.py /opt/lex-hermes/hermes_cli/web_server.py; \
+    cp tui_gateway/server.py /opt/lex-hermes/tui_gateway/server.py; \
     cp hermes_cli/container_boot.py /opt/lex-hermes/hermes_cli/container_boot.py; \
     cp hermes_cli/service_manager.py /opt/lex-hermes/hermes_cli/service_manager.py; \
     cp hermes_cli/project_commands.py /opt/lex-hermes/hermes_cli/project_commands.py; \
@@ -143,6 +146,7 @@ RUN set -e; \
     cp web/src/components/ToolCall.tsx /opt/lex-hermes/web/src/components/ToolCall.tsx; \
     cp web/src/contexts/ChatTabContext.tsx /opt/lex-hermes/web/src/contexts/ChatTabContext.tsx; \
     cp web/src/hooks/useChatSessionBinding.ts /opt/lex-hermes/web/src/hooks/useChatSessionBinding.ts; \
+    cp web/src/lib/api.ts /opt/lex-hermes/web/src/lib/api.ts; \
     cp web/src/lib/dashboard-flags.ts /opt/lex-hermes/web/src/lib/dashboard-flags.ts; \
     cp web/src/pages/ChatPage.tsx /opt/lex-hermes/web/src/pages/ChatPage.tsx; \
     \
@@ -186,6 +190,7 @@ RUN set -e; \
       /opt/hermes/hermes_cli/kanban.py /opt/lex-hermes/hermes_cli/kanban.py \
       /opt/hermes/hermes_cli/kanban_db.py /opt/lex-hermes/hermes_cli/kanban_db.py \
       /opt/hermes/hermes_cli/web_server.py /opt/lex-hermes/hermes_cli/web_server.py \
+      /opt/hermes/tui_gateway/server.py /opt/lex-hermes/tui_gateway/server.py \
       /opt/hermes/cli.py /opt/lex-hermes/cli.py \
       /opt/hermes/hermes_cli/service_manager.py /opt/lex-hermes/hermes_cli/service_manager.py \
       /opt/hermes/hermes_cli/project_commands.py /opt/lex-hermes/hermes_cli/project_commands.py \
@@ -217,6 +222,7 @@ RUN set -e; \
       hermes_cli/kanban.py \
       hermes_cli/kanban_db.py \
       hermes_cli/web_server.py \
+      tui_gateway/server.py \
       hermes_cli/container_boot.py \
       hermes_cli/service_manager.py \
       hermes_cli/project_commands.py \

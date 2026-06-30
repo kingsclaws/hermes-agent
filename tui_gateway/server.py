@@ -2108,6 +2108,7 @@ def _reset_session_agent(sid: str, session: dict) -> dict:
         _clear_session_context(tokens)
     session["agent"] = new_agent
     session["attached_images"] = []
+    session["attached_files"] = []
     session["edit_snapshots"] = {}
     session["image_counter"] = 0
     session["running"] = False
@@ -2193,6 +2194,7 @@ def _init_session(sid: str, key: str, agent, history: list, cols: int = 80):
         "last_active": now,
         "running": False,
         "attached_images": [],
+        "attached_files": [],
         "image_counter": 0,
         "cols": cols,
         "slash_worker": None,
@@ -2291,6 +2293,50 @@ def _enrich_with_attached_images(user_text: str, image_paths: list[str]) -> str:
     if prefix:
         return f"{prefix}\n\n{text}" if text else prefix
     return text or "What do you see in this image?"
+
+
+def _normalise_prompt_attachments(raw: Any) -> tuple[list[str], list[dict[str, str]]]:
+    images: list[str] = []
+    files: list[dict[str, str]] = []
+    if not isinstance(raw, list):
+        return images, files
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        path = str(item.get("path") or "").strip()
+        if not path:
+            continue
+        try:
+            p = Path(path).expanduser().resolve()
+        except Exception:
+            continue
+        if not p.is_file():
+            continue
+        kind = str(item.get("kind") or "").lower()
+        name = str(item.get("name") or p.name)
+        mime = str(item.get("mime") or "")
+        suffix = p.suffix.lower()
+        if kind == "image" or mime.startswith("image/") or suffix in {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"}:
+            images.append(str(p))
+        else:
+            files.append({"path": str(p), "name": name, "mime": mime})
+    return images, files
+
+
+def _enrich_with_attached_files(user_text: str, files: list[dict[str, str]]) -> str:
+    if not files:
+        return user_text
+    lines = [
+        "[The user attached the following file(s). Use read_file, lex_read, lex_ocr, or terminal tools as appropriate; do not ignore them.]",
+    ]
+    for idx, item in enumerate(files, 1):
+        name = item.get("name") or Path(item.get("path", "")).name
+        path = item.get("path", "")
+        mime = item.get("mime") or "unknown"
+        lines.append(f"{idx}. {name} ({mime}) — {path}")
+    prefix = "\n".join(lines)
+    text = user_text or ""
+    return f"{prefix}\n\n{text}" if text else prefix
 
 
 def _content_display_text(content: Any) -> str:
@@ -3518,6 +3564,7 @@ def _(rid, params: dict) -> dict:
     session, err = _sess_nowait(params, rid)
     if err:
         return err
+    images, files = _normalise_prompt_attachments(params.get("attachments"))
     project_context = _project_context_from_params(
         params,
         fallback_session_id=str(session.get("session_key") or ""),
@@ -3532,9 +3579,18 @@ def _(rid, params: dict) -> dict:
     with session["history_lock"]:
         if session.get("running"):
             return _err(rid, 4009, "session busy")
+        if images:
+            session.setdefault("attached_images", []).extend(images)
+        if files:
+            session.setdefault("attached_files", []).extend(files)
         session["running"] = True
         session["last_active"] = time.time()
-        _start_inflight_turn(session, text)
+        display_text = _enrich_with_attached_files(str(text or ""), files)
+        if images:
+            names = "\n".join(f"- {Path(p).name}: {p}" for p in images)
+            image_note = f"[Attached image(s)]\n{names}"
+            display_text = f"{image_note}\n\n{display_text}" if display_text else image_note
+        _start_inflight_turn(session, display_text)
 
     _start_agent_build(sid, session)
 
@@ -3664,7 +3720,9 @@ def _run_prompt_submit(rid, sid: str, session: dict, text: Any) -> None:
         history = list(session["history"])
         history_version = int(session.get("history_version", 0))
         images = list(session.get("attached_images", []))
+        files = list(session.get("attached_files", []))
         session["attached_images"] = []
+        session["attached_files"] = []
         if not isinstance(session.get("inflight_turn"), dict):
             _start_inflight_turn(session, text)
         project_context = session.get("project_context")
@@ -3691,7 +3749,7 @@ def _run_prompt_submit(rid, sid: str, session: dict, text: Any) -> None:
             session_tokens = _set_session_context(session["session_key"])
             cols = session.get("cols", 80)
             streamer = make_stream_renderer(cols)
-            prompt = text
+            prompt = _enrich_with_attached_files(str(text or ""), files)
 
             if isinstance(prompt, str) and "@" in prompt:
                 from agent.context_references import preprocess_context_references

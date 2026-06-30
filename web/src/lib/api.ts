@@ -192,6 +192,43 @@ export async function buildWsAuthParam(): Promise<[string, string]> {
   return ["token", token];
 }
 
+export interface ChatAttachmentUpload {
+  kind: "image" | "file";
+  name: string;
+  path: string;
+  size: number;
+  mime?: string;
+}
+
+export async function uploadChatAttachments(files: File[]): Promise<ChatAttachmentUpload[]> {
+  if (!files.length) return [];
+  const headers = new Headers();
+  const token = window.__HERMES_SESSION_TOKEN__;
+  if (token) setSessionHeader(headers, token);
+
+  const form = new FormData();
+  for (const file of files) {
+    form.append("files", file, file.name);
+  }
+
+  const res = await fetch(`${BASE}/api/chat/attachments`, {
+    method: "POST",
+    body: form,
+    headers,
+    credentials: "include",
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => res.statusText);
+    throw new Error(`${res.status}: ${text}`);
+  }
+  const data = await res.json();
+  if (Array.isArray(data.errors) && data.errors.length) {
+    const first = data.errors[0];
+    throw new Error(first?.error ? `${first.filename ?? "attachment"}: ${first.error}` : "Attachment upload failed");
+  }
+  return Array.isArray(data.attachments) ? data.attachments : [];
+}
+
 export const api = {
   getStatus: () => fetchJSON<StatusResponse>("/api/status"),
   /**

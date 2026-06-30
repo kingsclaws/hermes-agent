@@ -7,9 +7,10 @@ import { ContextIndicator } from "@/components/ContextIndicator";
 import { CommandPalette } from "@/components/CommandPalette";
 import { NotificationFeed } from "@/components/NotificationFeed";
 import { GatewayClient, type ConnectionState } from "@/lib/gatewayClient";
+import { uploadChatAttachments, type ChatAttachmentUpload } from "@/lib/api";
 import { executeSlash, parseSlash } from "@/lib/slashExec";
 import { cn } from "@/lib/utils";
-import { ListPlus, LoaderCircle, Send, Square } from "lucide-react";
+import { FileText, Image as ImageIcon, ListPlus, LoaderCircle, Paperclip, Send, Square, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReasoningEffort } from "@/components/ReasoningEffortPicker";
 import { getSwarmProfile, SWARM_PROFILES } from "@/lib/swarmProfiles";
@@ -45,8 +46,31 @@ export type { SubagentLine };
 
 const WORKFLOW_PROMPT_EVENT = "lex-workflow-prompt";
 
+type DraftAttachment = {
+  id: string;
+  file: File;
+  previewUrl?: string;
+};
+
+type QueuedPrompt = {
+  text: string;
+  attachments: DraftAttachment[];
+};
+
 export function dispatchWorkflowPrompt(prompt: string) {
   window.dispatchEvent(new CustomEvent(WORKFLOW_PROMPT_EVENT, { detail: prompt }));
+}
+
+function formatBytes(size: number): string {
+  if (!Number.isFinite(size) || size <= 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB"];
+  let value = size;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  return `${value >= 10 || unit === 0 ? value.toFixed(0) : value.toFixed(1)} ${units[unit]}`;
 }
 
 type ResumeResult = {
@@ -154,10 +178,13 @@ export function NativeChatSurface({
   onSessionCreatedRef.current = onSessionCreated;
   const assistantIdRef = useRef<string | null>(null);
   const thinkingIdRef = useRef<string | null>(null);
-  const queuedRef = useRef<string | null>(null);
+  const queuedRef = useRef<QueuedPrompt | null>(null);
   const [hasQueued, setHasQueued] = useState(false);
-  const submitRef = useRef<(text: string) => Promise<void>>(async () => {});
+  const submitRef = useRef<(text: string, draftAttachments?: DraftAttachment[]) => Promise<void>>(async () => {});
   const toolNamesRef = useRef<Map<string, string>>(new Map());
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const [draftAttachments, setDraftAttachments] = useState<DraftAttachment[]>([]);
+  const [uploading, setUploading] = useState(false);
   const onSwarmLaunchedRef = useRef(onSwarmLaunched);
   onSwarmLaunchedRef.current = onSwarmLaunched;
   const projectContextKey = useMemo(() => {
@@ -171,6 +198,12 @@ export function NativeChatSurface({
 
   useEffect(() => {
     let cancelled = false;
+    setDraftAttachments((prev) => {
+      prev.forEach((item) => {
+        if (item.previewUrl) URL.revokeObjectURL(item.previewUrl);
+      });
+      return [];
+    });
     setSessionId(null);
     setMessages([]);
     setTools([]);
@@ -492,19 +525,20 @@ export function NativeChatSurface({
   // Auto-submit queued message when the current turn finishes.
   useEffect(() => {
     if (!running && queuedRef.current) {
-      const text = queuedRef.current;
+      const queued = queuedRef.current;
       queuedRef.current = null;
       setHasQueued(false);
-      setTimeout(() => submitRef.current(text), 0);
+      setTimeout(() => submitRef.current(queued.text, queued.attachments), 0);
     }
   }, [running]);
 
   // Auto-scroll is handled by ChatMessageList internally
 
   const submit = useCallback(
-    async (text: string) => {
+    async (text: string, explicitAttachments?: DraftAttachment[]) => {
       const trimmed = text.trim();
-      if (!trimmed) return;
+      const attachmentsToSend = explicitAttachments ?? draftAttachments;
+      if (!trimmed && attachmentsToSend.length === 0) return;
       if (!sessionId) {
         setInput(trimmed);
         setError(
@@ -514,7 +548,8 @@ export function NativeChatSurface({
       }
       if (running) {
         setInput(trimmed);
-        queuedRef.current = trimmed;
+        queuedRef.current = { text: trimmed, attachments: attachmentsToSend };
+        if (!explicitAttachments) setDraftAttachments([]);
         setHasQueued(true);
         setError(null);
         return;
@@ -560,7 +595,7 @@ export function NativeChatSurface({
 
         if (name === "queue" && arg) {
           setInput("");
-          queuedRef.current = arg;
+          queuedRef.current = { text: arg, attachments: [] };
           setHasQueued(true);
           setMessages((prev) => [
             ...prev,
@@ -591,16 +626,34 @@ export function NativeChatSurface({
       }
 
       setError(null);
+      setUploading(attachmentsToSend.length > 0);
+      let uploaded: ChatAttachmentUpload[] = [];
+      try {
+        uploaded = await uploadChatAttachments(attachmentsToSend.map((item) => item.file));
+      } catch (e) {
+        setUploading(false);
+        setError(e instanceof Error ? e.message : String(e));
+        return;
+      }
+      setUploading(false);
+      if (!explicitAttachments) setDraftAttachments([]);
+      attachmentsToSend.forEach((item) => {
+        if (item.previewUrl) URL.revokeObjectURL(item.previewUrl);
+      });
+      const attachmentSummary = uploaded.length
+        ? `\n\n[附件]\n${uploaded.map((item) => `- ${item.kind === "image" ? "图片" : "文件"} ${item.name} (${formatBytes(item.size)})`).join("\n")}`
+        : "";
       setMessages((prev) => [
         ...prev,
-        { id: `user-${Date.now()}`, role: "user", text: trimmed, timestamp: Date.now() },
+        { id: `user-${Date.now()}`, role: "user", text: `${trimmed || "请处理附件。"}${attachmentSummary}`, timestamp: Date.now() },
       ]);
       setInput("");
       setRunning(true);
       try {
         await gw.request("prompt.submit", {
           session_id: sessionId,
-          text: trimmed,
+          text: trimmed || "请处理附件。",
+          attachments: uploaded,
           project_context: projectContext,
           ...(reasoningEffort !== "auto" && { reasoning_effort: reasoningEffort }),
         });
@@ -609,7 +662,7 @@ export function NativeChatSurface({
         setError(e instanceof Error ? e.message : String(e));
       }
     },
-    [gw, projectContext, running, sessionId, reasoningEffort],
+    [draftAttachments, gw, projectContext, running, sessionId, reasoningEffort],
   );
   submitRef.current = submit;
 
@@ -639,9 +692,10 @@ export function NativeChatSurface({
 
   const queueCurrentInput = useCallback(() => {
     const trimmed = input.trim();
-    if (!trimmed || !running) return;
-    queuedRef.current = trimmed;
+    if ((!trimmed && draftAttachments.length === 0) || !running) return;
+    queuedRef.current = { text: trimmed, attachments: draftAttachments };
     setInput("");
+    setDraftAttachments([]);
     setHasQueued(true);
     setError(null);
     setMessages((prev) => [
@@ -649,11 +703,36 @@ export function NativeChatSurface({
       {
         id: `queued-${Date.now()}`,
         role: "status",
-        text: `已排队消息，当前轮次完成后自动提交：${trimmed.slice(0, 80)}${trimmed.length > 80 ? "…" : ""}`,
+        text: `已排队消息，当前轮次完成后自动提交：${trimmed.slice(0, 80)}${trimmed.length > 80 ? "…" : ""}${draftAttachments.length ? `（含 ${draftAttachments.length} 个附件）` : ""}`,
         timestamp: Date.now(),
       },
     ]);
-  }, [input, running]);
+  }, [draftAttachments, input, running]);
+
+  const addFiles = useCallback((files: FileList | File[]) => {
+    const incoming = Array.from(files).slice(0, 10);
+    if (!incoming.length) return;
+    setDraftAttachments((prev) => {
+      const next = [...prev];
+      for (const file of incoming) {
+        if (next.length >= 10) break;
+        next.push({
+          id: `${file.name}-${file.size}-${file.lastModified}-${crypto.randomUUID?.() ?? Math.random()}`,
+          file,
+          previewUrl: file.type.startsWith("image/") ? URL.createObjectURL(file) : undefined,
+        });
+      }
+      return next;
+    });
+  }, []);
+
+  const removeDraftAttachment = useCallback((id: string) => {
+    setDraftAttachments((prev) => {
+      const found = prev.find((item) => item.id === id);
+      if (found?.previewUrl) URL.revokeObjectURL(found.previewUrl);
+      return prev.filter((item) => item.id !== id);
+    });
+  }, []);
 
   const handleCommandPalette = useCallback(
     (command: string) => {
@@ -738,8 +817,9 @@ export function NativeChatSurface({
             Message queued — will submit when current turn completes.{" "}
             {queuedRef.current && (
               <span className="text-muted-foreground/60">
-                ({queuedRef.current.slice(0, 50)}
-                {queuedRef.current.length > 50 ? "…" : ""})
+                ({queuedRef.current.text.slice(0, 50)}
+                {queuedRef.current.text.length > 50 ? "…" : ""}
+                {queuedRef.current.attachments.length ? ` · ${queuedRef.current.attachments.length} attachment(s)` : ""})
               </span>
             )}
           </span>
@@ -759,15 +839,72 @@ export function NativeChatSurface({
       {/* Composer */}
       <form
         className="flex shrink-0 flex-col gap-1 border-t border-current/10 p-3"
+        onDragOver={(ev) => {
+          if (ev.dataTransfer?.types.includes("Files")) {
+            ev.preventDefault();
+          }
+        }}
+        onDrop={(ev) => {
+          if (ev.dataTransfer?.files?.length) {
+            ev.preventDefault();
+            addFiles(ev.dataTransfer.files);
+          }
+        }}
         onSubmit={(ev) => {
           ev.preventDefault();
           void submit(input);
         }}
       >
+        {draftAttachments.length > 0 && (
+          <div className="lex-panel-reveal flex max-h-28 flex-wrap gap-2 overflow-y-auto rounded border border-current/10 bg-black/10 p-2">
+            {draftAttachments.map((item) => {
+              const isImage = item.file.type.startsWith("image/");
+              return (
+                <div
+                  key={item.id}
+                  className="group flex max-w-[16rem] items-center gap-2 rounded border border-current/15 bg-muted/10 px-2 py-1 text-xs"
+                  title={`${item.file.name} · ${formatBytes(item.file.size)}`}
+                >
+                  {isImage && item.previewUrl ? (
+                    <img
+                      src={item.previewUrl}
+                      alt=""
+                      className="h-8 w-8 shrink-0 rounded object-cover"
+                    />
+                  ) : isImage ? (
+                    <ImageIcon className="h-4 w-4 shrink-0 text-primary/80" />
+                  ) : (
+                    <FileText className="h-4 w-4 shrink-0 text-muted-foreground" />
+                  )}
+                  <div className="min-w-0">
+                    <div className="truncate text-foreground/90">{item.file.name}</div>
+                    <div className="font-mono-ui text-[0.6rem] text-muted-foreground/70">
+                      {formatBytes(item.file.size)}
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => removeDraftAttachment(item.id)}
+                    className="ml-1 rounded p-0.5 text-muted-foreground/70 hover:bg-destructive/10 hover:text-destructive"
+                    aria-label={`Remove ${item.file.name}`}
+                  >
+                    <X className="h-3.5 w-3.5" />
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+        )}
         <div className="flex gap-2">
           <textarea
             value={input}
             onChange={(ev) => setInput(ev.target.value)}
+            onPaste={(ev) => {
+              const files = Array.from(ev.clipboardData.files || []);
+              if (files.length) {
+                addFiles(files);
+              }
+            }}
             onKeyDown={(ev) => {
               if (ev.key === "Enter" && !ev.shiftKey) {
                 ev.preventDefault();
@@ -780,12 +917,33 @@ export function NativeChatSurface({
             className="min-h-12 flex-1 resize-none rounded border border-current/15 bg-black/10 px-3 py-2 text-sm outline-none focus:border-primary/60"
           />
           <div className="flex shrink-0 items-end gap-2">
+            <input
+              ref={fileInputRef}
+              type="file"
+              multiple
+              className="hidden"
+              onChange={(ev) => {
+                if (ev.currentTarget.files) addFiles(ev.currentTarget.files);
+                ev.currentTarget.value = "";
+              }}
+            />
+            <Button
+              type="button"
+              ghost
+              onClick={() => fileInputRef.current?.click()}
+              disabled={!sessionId || conn !== "open" || uploading}
+              title="Attach images or files"
+              aria-label="Attach images or files"
+              className="px-3"
+            >
+              <Paperclip className="h-4 w-4" />
+            </Button>
             {running && (
               <Button
                 type="button"
                 ghost
                 onClick={queueCurrentInput}
-                disabled={!sessionId || !input.trim() || hasQueued}
+                disabled={!sessionId || (!input.trim() && draftAttachments.length === 0) || hasQueued}
                 title={hasQueued ? "A message is already queued" : "Queue message after current turn"}
                 aria-label="Queue message after current turn"
                 className="px-3"
@@ -796,12 +954,14 @@ export function NativeChatSurface({
             <Button
               type={running ? "button" : "submit"}
               onClick={running ? interrupt : undefined}
-              disabled={!sessionId || stopping || (!running && !input.trim())}
-              title={running ? "Stop current turn" : "Send"}
-              aria-label={running ? "Stop current turn" : "Send"}
+              disabled={!sessionId || stopping || uploading || (!running && !input.trim() && draftAttachments.length === 0)}
+              title={running ? "Stop current turn" : uploading ? "Uploading attachments" : "Send"}
+              aria-label={running ? "Stop current turn" : uploading ? "Uploading attachments" : "Send"}
               className="px-3"
             >
-              {running ? (
+              {uploading ? (
+                <LoaderCircle className="h-4 w-4 animate-spin" />
+              ) : running ? (
                 <Square className="h-4 w-4" />
               ) : (
                 <Send className="h-4 w-4" />
