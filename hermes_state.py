@@ -14,6 +14,7 @@ Key design decisions:
 - Session source tagging ('cli', 'telegram', 'discord', etc.) for filtering
 """
 
+import hashlib
 import json
 import logging
 import random
@@ -3141,6 +3142,143 @@ class SessionDB:
             query += " AND priority = ?"
             params.append(priority)
         query += " ORDER BY must_read_before_init DESC, priority ASC, rel_path ASC"
+        with self._lock:
+            rows = self._conn.execute(query, params).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_project_source(
+        self,
+        *,
+        project_id: str | None = None,
+        source_id: str | None = None,
+        rel_path: str | None = None,
+        path: str | None = None,
+    ) -> Optional[dict]:
+        """Look up one project source by id, relative path, or absolute path."""
+        clauses: list[str] = []
+        params: list[Any] = []
+        if project_id:
+            clauses.append("project_id = ?")
+            params.append(project_id)
+        if source_id:
+            clauses.append("id = ?")
+            params.append(source_id)
+        elif rel_path:
+            clauses.append("rel_path = ?")
+            params.append(rel_path)
+        elif path:
+            clauses.append("path = ?")
+            params.append(path)
+        else:
+            return None
+        query = "SELECT * FROM project_sources WHERE " + " AND ".join(clauses)
+        query += " ORDER BY updated_at DESC LIMIT 1"
+        with self._lock:
+            row = self._conn.execute(query, params).fetchone()
+        return dict(row) if row is not None else None
+
+    def upsert_project_source_digest(
+        self,
+        *,
+        project_id: str,
+        source_id: str,
+        run_id: str | None = None,
+        read_method: str = "",
+        read_coverage: str = "partial",
+        confidence: str = "medium",
+        digest: dict | None = None,
+        created_by: str = "",
+    ) -> str:
+        """Persist a source digest and mark the source read status."""
+        digest_key = f"{project_id}:{source_id}:{run_id or ''}"
+        digest_id = f"sdig_{hashlib.sha1(digest_key.encode()).hexdigest()[:16]}"
+        now = time.time()
+        digest_json = json.dumps(digest or {}, ensure_ascii=False, sort_keys=True)
+        status = "read_failed" if read_coverage == "failed" else "digested"
+
+        def _do(conn):
+            conn.execute(
+                """INSERT INTO project_source_digests
+                   (id, project_id, source_id, run_id, read_method,
+                    read_coverage, confidence, digest_json, created_by,
+                    created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(id) DO UPDATE SET
+                     read_method=excluded.read_method,
+                     read_coverage=excluded.read_coverage,
+                     confidence=excluded.confidence,
+                     digest_json=excluded.digest_json,
+                     created_by=excluded.created_by,
+                     updated_at=excluded.updated_at""",
+                (
+                    digest_id,
+                    project_id,
+                    source_id,
+                    run_id,
+                    read_method,
+                    read_coverage,
+                    confidence,
+                    digest_json,
+                    created_by,
+                    now,
+                    now,
+                ),
+            )
+            conn.execute(
+                """UPDATE project_sources
+                   SET read_status = ?, read_method = COALESCE(NULLIF(?, ''), read_method),
+                       updated_at = ?
+                   WHERE id = ?""",
+                (status, read_method, now, source_id),
+            )
+
+        self._execute_write(_do)
+        return digest_id
+
+    def get_project_source_digest(
+        self,
+        *,
+        project_id: str | None = None,
+        source_id: str | None = None,
+        run_id: str | None = None,
+        digest_id: str | None = None,
+    ) -> Optional[dict]:
+        """Look up the latest source digest matching the supplied keys."""
+        clauses: list[str] = []
+        params: list[Any] = []
+        if digest_id:
+            clauses.append("id = ?")
+            params.append(digest_id)
+        if project_id:
+            clauses.append("project_id = ?")
+            params.append(project_id)
+        if source_id:
+            clauses.append("source_id = ?")
+            params.append(source_id)
+        if run_id:
+            clauses.append("run_id = ?")
+            params.append(run_id)
+        if not clauses:
+            return None
+        query = "SELECT * FROM project_source_digests WHERE " + " AND ".join(clauses)
+        query += " ORDER BY updated_at DESC LIMIT 1"
+        with self._lock:
+            row = self._conn.execute(query, params).fetchone()
+        return dict(row) if row is not None else None
+
+    def list_project_source_digests(
+        self,
+        project_id: str,
+        *,
+        run_id: str | None = None,
+    ) -> list[dict]:
+        """List source digests for a project/init run."""
+        query = "SELECT * FROM project_source_digests WHERE project_id = ?"
+        params: list[Any] = [project_id]
+        if run_id:
+            query += " AND run_id = ?"
+            params.append(run_id)
+        query += " ORDER BY updated_at DESC"
         with self._lock:
             rows = self._conn.execute(query, params).fetchall()
         return [dict(r) for r in rows]

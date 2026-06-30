@@ -127,7 +127,7 @@ _HERMES_CORE_TOOLS = [
     # Computer use (macOS, gated on cua-driver being installed via check_fn)
     "computer_use",
     # Project management (always available for legal project lifecycle)
-    "project_create", "project_register", "project_init_start",
+    "project_create", "project_register", "project_init_start", "project_source_digest",
     "project_init", "project_list", "project_select",
     "project_context", "project_status", "lex_master_route",
 ]
@@ -364,7 +364,7 @@ TOOLSETS = {
             "and update projects with status tracking and context persistence."
         ),
         "tools": [
-            "project_create", "project_register", "project_init_start",
+            "project_create", "project_register", "project_init_start", "project_source_digest",
             "project_init", "project_list", "project_select",
             "project_context", "project_status", "lex_master_route",
         ],

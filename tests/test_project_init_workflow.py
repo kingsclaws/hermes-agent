@@ -54,7 +54,57 @@ def test_project_management_toolset_exposes_init_tools():
     from toolsets import TOOLSETS
 
     registered = set(registry.get_all_tool_names())
-    assert {"project_create", "project_register", "project_init_start"} <= registered
-    assert {"project_create", "project_register", "project_init_start"} <= set(
+    assert {"project_create", "project_register", "project_init_start", "project_source_digest"} <= registered
+    assert {"project_create", "project_register", "project_init_start", "project_source_digest"} <= set(
         TOOLSETS["project_management"]["tools"]
     )
+
+
+def test_project_source_digest_records_db_and_mirror(tmp_path, monkeypatch):
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("HERMES_PROFILE", "default")
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+    project_dir = tmp_path / "Digest Matter"
+    project_dir.mkdir()
+    (project_dir / "Term Sheet.md").write_text("贷款金额 2亿元\n", encoding="utf-8")
+
+    import hermes_state
+
+    hermes_state.DEFAULT_DB_PATH = home / "state.db"
+
+    from hermes_state import SessionDB
+    from tools import project_management_tool as pm
+
+    db = SessionDB(db_path=home / "state.db")
+    project_id = db.create_project("Digest Matter", str(project_dir), cwd=str(project_dir))
+    run_id = db.create_project_init_run(project_id)
+    sources = pm._scan_project_sources(project_id, str(project_dir), run_id)
+    db.upsert_project_sources(project_id, run_id, sources)
+    source = next(src for src in sources if src["priority"] == "core")
+
+    out = json.loads(pm.project_source_digest_handler({
+        "project_name": project_id,
+        "run_id": run_id,
+        "source_id": source["id"],
+        "read_method": "read_file",
+        "read_coverage": "full",
+        "confidence": "high",
+        "summary": "Term Sheet records a RMB 200m loan.",
+        "evidence_ledger": ["Term Sheet.md full file read via read_file"],
+        "key_facts": ["贷款金额：人民币2亿元"],
+    }))
+
+    assert out["success"] is True
+    digest = db.get_project_source_digest(
+        project_id=project_id,
+        source_id=source["id"],
+        run_id=run_id,
+    )
+    assert digest is not None
+    assert digest["read_coverage"] == "full"
+    updated_source = db.get_project_source(project_id=project_id, source_id=source["id"])
+    assert updated_source["read_status"] == "digested"
+    assert Path(out["mirror_path"]).is_file()

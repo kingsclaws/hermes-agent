@@ -147,6 +147,58 @@ PROJECT_INIT_START_SCHEMA = {
     },
 }
 
+PROJECT_SOURCE_DIGEST_SCHEMA = {
+    "name": "project_source_digest",
+    "description": (
+        "Submit a structured digest for one project-init source file after "
+        "reading/OCRing it. This is the required write-back step for "
+        "init.source_digest Kanban tasks before kanban_complete is allowed."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "project_name": {"type": "string", "description": "Project name or ID. Optional when source_id is globally unique."},
+            "project_path": {"type": "string", "description": "Project path, if project_name is unavailable."},
+            "run_id": {"type": "string", "description": "Project init run id."},
+            "source_id": {"type": "string", "description": "Source id from the init task body/source inventory."},
+            "source_path": {"type": "string", "description": "Absolute or project-relative source path."},
+            "read_method": {"type": "string", "description": "Actual tool/method used, e.g. lex_read, lex_ocr, spreadsheet_inspection."},
+            "read_coverage": {
+                "type": "string",
+                "enum": ["full", "partial", "failed"],
+                "description": "Whether the source was read completely. Use failed only after trying the correct native tool.",
+            },
+            "confidence": {
+                "type": "string",
+                "enum": ["high", "medium", "low"],
+                "description": "Confidence in the extracted content.",
+            },
+            "summary": {"type": "string", "description": "Concise digest of the source's substantive content."},
+            "evidence_ledger": {
+                "type": "array",
+                "description": "Concrete pages/paragraphs/sheets/sections read and relied on.",
+                "items": {"type": "string"},
+            },
+            "key_facts": {
+                "type": "array",
+                "description": "Candidate project facts discovered in this source.",
+                "items": {"type": "string"},
+            },
+            "open_questions": {
+                "type": "array",
+                "description": "Questions or missing information raised by this source.",
+                "items": {"type": "string"},
+            },
+            "issues": {
+                "type": "array",
+                "description": "Read failures, conflicts, outdated material flags, or drafting risks.",
+                "items": {"type": "string"},
+            },
+        },
+        "required": ["read_coverage", "summary", "evidence_ledger"],
+    },
+}
+
 PROJECT_LIST_SCHEMA = {
     "name": "project_list",
     "description": (
@@ -719,36 +771,7 @@ def _write_project_init_mirrors(project: dict, run_id: str, sources: list[dict])
             encoding="utf-8",
         )
 
-    priority_order = {"core": 0, "supporting": 1, "backlog": 2, "ignored": 3}
-    sorted_sources = sorted(
-        sources,
-        key=lambda s: (priority_order.get(s.get("priority"), 9), s.get("rel_path", "")),
-    )
-    lines = [
-        "# Source Inventory",
-        "",
-        f"- Init run: `{run_id}`",
-        f"- Updated: {now}",
-        f"- Total files: {len(sorted_sources)}",
-        f"- Core files: {sum(1 for s in sorted_sources if s.get('priority') == 'core')}",
-        "",
-        "| Priority | Must Read | Type | Read Method | Status | File | Reason |",
-        "|----------|-----------|------|-------------|--------|------|--------|",
-    ]
-    for src in sorted_sources:
-        lines.append(
-            "| {priority} | {must} | {typ} | {method} | {status} | `{file}` | {reason} |".format(
-                priority=src.get("priority", ""),
-                must="yes" if src.get("must_read_before_init") else "no",
-                typ=src.get("file_type", ""),
-                method=src.get("read_method", ""),
-                status=src.get("read_status", ""),
-                file=src.get("rel_path", "").replace("|", "\\|"),
-                reason=str(src.get("reason", "")).replace("|", "\\|"),
-            )
-        )
-    inventory_path = sidecar / "source-inventory.md"
-    inventory_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    inventory_path = Path(_write_project_source_inventory_mirror(project, run_id, sources))
 
     impression_path = sidecar / "init-impression.md"
     if not impression_path.is_file():
@@ -813,8 +836,8 @@ def _write_project_init_mirrors(project: dict, run_id: str, sources: list[dict])
         f"# Init Run {run_id}\n\n"
         f"- Started: {now}\n"
         f"- Project: {project.get('name')} ({project.get('id')})\n"
-        f"- Source count: {len(sorted_sources)}\n"
-        f"- Core count: {sum(1 for s in sorted_sources if s.get('priority') == 'core')}\n",
+        f"- Source count: {len(sources)}\n"
+        f"- Core count: {sum(1 for s in sources if s.get('priority') == 'core')}\n",
         encoding="utf-8",
     )
     return {
@@ -824,6 +847,151 @@ def _write_project_init_mirrors(project: dict, run_id: str, sources: list[dict])
         "missing_info_list": str(missing_path),
         "run_log": str(run_log),
     }
+
+
+def _write_project_source_inventory_mirror(project: dict, run_id: str, sources: list[dict]) -> str:
+    root = Path(project.get("path") or project.get("cwd") or "").expanduser().resolve()
+    sidecar = root / ".hermes-project"
+    sidecar.mkdir(parents=True, exist_ok=True)
+    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    priority_order = {"core": 0, "supporting": 1, "backlog": 2, "ignored": 3}
+    sorted_sources = sorted(
+        sources,
+        key=lambda s: (priority_order.get(s.get("priority"), 9), s.get("rel_path", "")),
+    )
+    lines = [
+        "# Source Inventory",
+        "",
+        f"- Init run: `{run_id}`",
+        f"- Updated: {now}",
+        f"- Total files: {len(sorted_sources)}",
+        f"- Core files: {sum(1 for s in sorted_sources if s.get('priority') == 'core')}",
+        f"- Digested files: {sum(1 for s in sorted_sources if s.get('read_status') == 'digested')}",
+        "",
+        "| Priority | Must Read | Type | Read Method | Status | Source ID | File | Reason |",
+        "|----------|-----------|------|-------------|--------|-----------|------|--------|",
+    ]
+    for src in sorted_sources:
+        lines.append(
+            "| {priority} | {must} | {typ} | {method} | {status} | `{sid}` | `{file}` | {reason} |".format(
+                priority=src.get("priority", ""),
+                must="yes" if src.get("must_read_before_init") else "no",
+                typ=src.get("file_type", ""),
+                method=src.get("read_method", ""),
+                status=src.get("read_status", ""),
+                sid=src.get("id", ""),
+                file=src.get("rel_path", "").replace("|", "\\|"),
+                reason=str(src.get("reason", "")).replace("|", "\\|"),
+            )
+        )
+    inventory_path = sidecar / "source-inventory.md"
+    inventory_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return str(inventory_path)
+
+
+def _safe_digest_filename(rel_path: str, source_id: str) -> str:
+    stem = "".join(ch if ch.isalnum() or ch in "._- " else "_" for ch in rel_path)
+    stem = stem.strip(" ._") or source_id
+    if len(stem) > 120:
+        stem = stem[:100].rstrip(" ._-") + "-" + hashlib.sha1(rel_path.encode()).hexdigest()[:10]
+    return f"{stem}.source-digest.md"
+
+
+def _write_project_source_digest_mirror(
+    project: dict,
+    source: dict,
+    digest_id: str,
+    digest: dict,
+) -> str:
+    root = Path(project.get("path") or project.get("cwd") or "").expanduser().resolve()
+    digests_dir = root / ".hermes-project" / "source-digests"
+    digests_dir.mkdir(parents=True, exist_ok=True)
+    out_path = digests_dir / _safe_digest_filename(source.get("rel_path", ""), source.get("id", "source"))
+    evidence = digest.get("evidence_ledger") or []
+    facts = digest.get("key_facts") or []
+    questions = digest.get("open_questions") or []
+    issues = digest.get("issues") or []
+    lines = [
+        f"# Source Digest: {source.get('rel_path')}",
+        "",
+        f"- Digest ID: `{digest_id}`",
+        f"- Source ID: `{source.get('id')}`",
+        f"- Init run: `{source.get('run_id') or digest.get('run_id') or ''}`",
+        f"- Read method: {digest.get('read_method') or source.get('read_method') or ''}",
+        f"- Coverage: {digest.get('read_coverage') or ''}",
+        f"- Confidence: {digest.get('confidence') or ''}",
+        "",
+        "## Summary",
+        "",
+        str(digest.get("summary") or "").strip(),
+        "",
+        "## File Evidence Ledger",
+        "",
+    ]
+    lines.extend([f"- {item}" for item in evidence] or ["- TBD"])
+    lines.extend(["", "## Candidate Project Facts", ""])
+    lines.extend([f"- {item}" for item in facts] or ["- None recorded"])
+    lines.extend(["", "## Open Questions", ""])
+    lines.extend([f"- {item}" for item in questions] or ["- None recorded"])
+    lines.extend(["", "## Issues / Conflicts", ""])
+    lines.extend([f"- {item}" for item in issues] or ["- None recorded"])
+    lines.extend(["", "## Raw Digest JSON", "", "```json", json.dumps(digest, ensure_ascii=False, indent=2), "```", ""])
+    out_path.write_text("\n".join(lines), encoding="utf-8")
+    return str(out_path)
+
+
+def _resolve_project_for_digest(args: dict, db) -> tuple[dict | None, dict | None, str]:
+    project = None
+    project_name = str(args.get("project_name") or "").strip()
+    project_path = str(args.get("project_path") or "").strip()
+    source_id = str(args.get("source_id") or "").strip()
+    source_path = str(args.get("source_path") or "").strip()
+    run_id = str(args.get("run_id") or "").strip()
+
+    if project_name:
+        project = db.get_project(project_name)
+    if project is None and project_path:
+        project = db.get_project_by_path(project_path)
+    if project is None and source_path and Path(source_path).is_absolute():
+        # Prefer the longest registered project path containing the source.
+        src_real = Path(source_path).expanduser().resolve()
+        candidates = []
+        for candidate in db.list_projects():
+            root = Path(candidate.get("path") or candidate.get("cwd") or "").expanduser()
+            try:
+                root_real = root.resolve()
+                src_real.relative_to(root_real)
+            except Exception:
+                continue
+            candidates.append((len(str(root_real)), candidate))
+        if candidates:
+            project = sorted(candidates, key=lambda item: item[0], reverse=True)[0][1]
+    if project is None:
+        project = resolve_selected_project(None, os.environ.get("HERMES_SESSION_ID"))
+    if project is None:
+        return None, None, "No project resolved. Pass project_name/project_path/source_path."
+
+    source = None
+    if source_id:
+        source = db.get_project_source(project_id=project["id"], source_id=source_id)
+    if source is None and source_path:
+        root = Path(project.get("path") or project.get("cwd") or "").expanduser().resolve()
+        p = Path(source_path).expanduser()
+        rel_path = None
+        if p.is_absolute():
+            try:
+                rel_path = p.resolve().relative_to(root).as_posix()
+            except Exception:
+                source = db.get_project_source(project_id=project["id"], path=str(p.resolve()))
+        else:
+            rel_path = p.as_posix()
+        if source is None and rel_path:
+            source = db.get_project_source(project_id=project["id"], rel_path=rel_path)
+    if source is None:
+        return project, None, "No source resolved. Pass source_id or source_path from source-inventory."
+    if run_id and source.get("run_id") and source.get("run_id") != run_id:
+        return project, None, f"Source belongs to run {source.get('run_id')}, not {run_id}."
+    return project, source, ""
 
 
 def _create_project_init_kanban_graph(
@@ -849,19 +1017,31 @@ def _create_project_init_kanban_graph(
         ][: max(1, int(max_core_tasks or 50))]
         digest_task_ids: list[str] = []
         for src in core_sources:
+            marker = {
+                "project_id": project.get("id"),
+                "run_id": run_id,
+                "source_id": src.get("id"),
+                "source_path": src.get("path"),
+                "rel_path": src.get("rel_path"),
+            }
             body = (
                 "## Project Init Source Digest Task\n\n"
                 f"Project: {project.get('name')} ({project.get('id')})\n"
                 f"Init run: {run_id}\n"
+                f"Source id: {src.get('id')}\n"
                 f"Project path: {project_path}\n"
                 f"File: {src.get('path')}\n"
                 f"File type: {src.get('file_type')}\n"
                 f"Required read method: {src.get('read_method')}\n\n"
                 "Read this file completely using the required native legal tools. "
                 "For scanned PDFs/images, use lex_ocr. Do not infer from filename. "
-                "Write a structured source_digest markdown file under "
-                f"`{project_path}/.hermes-project/source-digests/` and complete "
-                "with a File Evidence Ledger plus suggested_project_facts."
+                "Then call `project_source_digest` with source_id, read_coverage, "
+                "summary, evidence_ledger, key_facts, open_questions, and issues. "
+                "`kanban_complete` is blocked until that native digest record exists. "
+                "Your final completion summary must include a File Evidence Ledger.\n\n"
+                "<LEX_PROJECT_INIT_SOURCE_JSON>\n"
+                + json.dumps(marker, ensure_ascii=False)
+                + "\n</LEX_PROJECT_INIT_SOURCE_JSON>"
             )
             tid = kb.create_task(
                 conn,
@@ -1120,6 +1300,91 @@ def project_init_start_handler(args: dict, **kwargs) -> str:
             "until explicit user authorization."
         ),
     }, ensure_ascii=False)
+
+
+def project_source_digest_handler(args: dict, **kwargs) -> str:
+    db = _project_session_db()
+    project, source, error = _resolve_project_for_digest(args, db)
+    if error:
+        return json.dumps({"success": False, "error": error}, ensure_ascii=False)
+    assert project is not None and source is not None
+
+    coverage = str(args.get("read_coverage") or "").strip().lower()
+    if coverage not in {"full", "partial", "failed"}:
+        return json.dumps({
+            "success": False,
+            "error": "read_coverage must be one of: full, partial, failed",
+        }, ensure_ascii=False)
+    confidence = str(args.get("confidence") or "medium").strip().lower()
+    if confidence not in {"high", "medium", "low"}:
+        confidence = "medium"
+    summary = str(args.get("summary") or "").strip()
+    if not summary:
+        return json.dumps({"success": False, "error": "summary is required"}, ensure_ascii=False)
+    evidence = args.get("evidence_ledger") or []
+    if isinstance(evidence, str):
+        evidence = [evidence]
+    if not isinstance(evidence, list) or not any(str(item).strip() for item in evidence):
+        return json.dumps({
+            "success": False,
+            "error": "evidence_ledger must contain at least one concrete read/OCR evidence item",
+        }, ensure_ascii=False)
+
+    def _list_field(name: str) -> list[str]:
+        value = args.get(name) or []
+        if isinstance(value, str):
+            value = [value]
+        if not isinstance(value, list):
+            return [str(value)]
+        return [str(item).strip() for item in value if str(item).strip()]
+
+    read_method = str(args.get("read_method") or source.get("read_method") or "").strip()
+    run_id = str(args.get("run_id") or source.get("run_id") or "").strip()
+    digest = {
+        "project_id": project["id"],
+        "project_name": project.get("name"),
+        "run_id": run_id,
+        "source_id": source["id"],
+        "source_path": source.get("path"),
+        "rel_path": source.get("rel_path"),
+        "read_method": read_method,
+        "read_coverage": coverage,
+        "confidence": confidence,
+        "summary": summary,
+        "evidence_ledger": _list_field("evidence_ledger"),
+        "key_facts": _list_field("key_facts"),
+        "open_questions": _list_field("open_questions"),
+        "issues": _list_field("issues"),
+        "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+    try:
+        digest_id = db.upsert_project_source_digest(
+            project_id=project["id"],
+            source_id=source["id"],
+            run_id=run_id or None,
+            read_method=read_method,
+            read_coverage=coverage,
+            confidence=confidence,
+            digest=digest,
+            created_by=os.environ.get("HERMES_PROFILE") or os.environ.get("USER") or "agent",
+        )
+        mirror_path = _write_project_source_digest_mirror(project, source, digest_id, digest)
+        # Refresh source inventory status without touching other init mirrors.
+        sources = db.list_project_sources(project["id"], run_id=run_id or None)
+        if sources:
+            _write_project_source_inventory_mirror(project, run_id or source.get("run_id") or "", sources)
+        return json.dumps({
+            "success": True,
+            "digest_id": digest_id,
+            "project_id": project["id"],
+            "source_id": source["id"],
+            "run_id": run_id,
+            "read_coverage": coverage,
+            "mirror_path": mirror_path,
+            "message": "Source digest recorded. kanban_complete may now close this init.source_digest task if evidence gate also passes.",
+        }, ensure_ascii=False)
+    except Exception as exc:
+        return json.dumps({"success": False, "error": str(exc)}, ensure_ascii=False)
 
 
 def project_init_handler(args: dict, **kwargs) -> str:
@@ -1646,6 +1911,14 @@ registry.register(
     schema=PROJECT_INIT_START_SCHEMA,
     handler=lambda args, **kw: project_init_start_handler(args, **kw),
     emoji="🚦",
+)
+
+registry.register(
+    name="project_source_digest",
+    toolset="project_management",
+    schema=PROJECT_SOURCE_DIGEST_SCHEMA,
+    handler=lambda args, **kw: project_source_digest_handler(args, **kw),
+    emoji="📑",
 )
 
 registry.register(

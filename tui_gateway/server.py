@@ -618,6 +618,40 @@ def _project_system_context(project: dict | None) -> str | None:
     status = str(project.get("status") or "").strip()
     path = _project_path(project)
     notes = str(project.get("notes") or "").strip()
+    init_context: list[str] = []
+    if path:
+        sidecar = Path(path) / ".hermes-project"
+        init_files = {
+            "source_inventory": sidecar / "source-inventory.md",
+            "init_impression": sidecar / "init-impression.md",
+            "missing_info_list": sidecar / "missing-info-list.md",
+            "project_facts": sidecar / "memories" / "project_facts.md",
+            "source_digests": sidecar / "source-digests",
+        }
+        existing = [f"{key}={value}" for key, value in init_files.items() if value.exists()]
+        if existing:
+            init_context.extend([
+                "",
+                "Project init/facts artifacts:",
+                *existing,
+            ])
+        db = _get_db()
+        project_id = str(project.get("id") or "").strip()
+        if db is not None and project_id:
+            try:
+                sources = db.list_project_sources(project_id)
+                if sources:
+                    total = len(sources)
+                    digested = sum(1 for src in sources if src.get("read_status") == "digested")
+                    pending_core = sum(
+                        1 for src in sources
+                        if src.get("priority") == "core" and src.get("read_status") == "pending"
+                    )
+                    init_context.append(
+                        f"Init source progress: {digested}/{total} digested; pending core={pending_core}."
+                    )
+            except Exception:
+                logger.debug("failed to build project init context", exc_info=True)
     parts = [
         "[Lex legal project context]",
         f"Project: {name}" if name else "",
@@ -633,6 +667,9 @@ def _project_system_context(project: dict | None) -> str | None:
         "3. For Word/DOCX edits, prefer native lexitool tools and precise run-level track changes; avoid broad paragraph replacement unless the user asks for wholesale redrafting.",
         "4. Maintain project facts and project status when new reliable information emerges; do not rely on chat memory alone.",
         "5. When a requested legal revision is under-specified, surface the issue and propose a concrete revision plan before making irreversible broad edits.",
+        "6. During project init, every material source must be read/OCRed and written back through project_source_digest before the init source task can be completed.",
+        "7. Treat .hermes-project/source-inventory.md, source-digests/, init-impression.md, missing-info-list.md, and memories/project_facts.md as the live matter file; update them through native tools when facts or status change.",
+        *init_context,
     ]
     return "\n".join(part for part in parts if part is not None).strip()
 

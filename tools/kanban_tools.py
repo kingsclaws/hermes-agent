@@ -51,6 +51,10 @@ _LEGACY_REVIEW_GATES_RE = re.compile(
     r"## Review / gate hints\s*(\[.*?\])\s*(?:\n\n|$)",
     re.DOTALL,
 )
+_PROJECT_INIT_SOURCE_RE = re.compile(
+    r"<LEX_PROJECT_INIT_SOURCE_JSON>\s*(\{.*?\})\s*</LEX_PROJECT_INIT_SOURCE_JSON>",
+    re.DOTALL,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -269,6 +273,66 @@ def _route_completion_through_review_gates(
             "gate_index": gate_index,
             "message": "Completion routed to review gate instead of done.",
         }
+
+
+def _parse_project_init_source_from_body(body: str | None) -> dict:
+    if not body:
+        return {}
+    match = _PROJECT_INIT_SOURCE_RE.search(body)
+    if not match:
+        return {}
+    try:
+        parsed = json.loads(match.group(1))
+    except Exception:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _project_init_digest_gate(conn: Any, task_id: str) -> Optional[str]:
+    """Require native project_source_digest write-back for init digest tasks."""
+    row = conn.execute(
+        "SELECT id, title, body FROM tasks WHERE id = ?",
+        (task_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    marker = _parse_project_init_source_from_body(row["body"])
+    if not marker:
+        return None
+    project_id = str(marker.get("project_id") or "").strip()
+    source_id = str(marker.get("source_id") or "").strip()
+    run_id = str(marker.get("run_id") or "").strip()
+    if not project_id or not source_id:
+        return (
+            "kanban_complete blocked: this init.source_digest task is missing "
+            "machine-readable project/source metadata. Ask the coordinator to "
+            "restart project_init_start for this project."
+        )
+    try:
+        from tools.project_management_tool import _project_session_db
+
+        db = _project_session_db()
+        digest = db.get_project_source_digest(
+            project_id=project_id,
+            source_id=source_id,
+            run_id=run_id or None,
+        )
+    except Exception as exc:
+        return f"kanban_complete blocked: could not verify project source digest: {exc}"
+    if digest is None:
+        return (
+            "kanban_complete blocked: missing native project_source_digest "
+            f"for source_id={source_id}, run_id={run_id or '(none)'}. "
+            "Read/OCR the source file, call project_source_digest with a "
+            "File Evidence Ledger and candidate facts, then retry kanban_complete."
+        )
+    if str(digest.get("read_coverage") or "").strip() == "failed":
+        return (
+            "kanban_complete blocked: project_source_digest was submitted as "
+            "read_coverage=failed. Use kanban_block with the concrete read/OCR "
+            "failure and needed human input instead of marking this task done."
+        )
+    return None
 
 
 def _profile_has_kanban_toolset() -> bool:
@@ -716,6 +780,10 @@ def _handle_complete(args: dict, **kw) -> str:
                     f"{handoff_result.get('hint', '')}"
                 )
             # --- end handoff validation ---
+
+            init_digest_error = _project_init_digest_gate(conn, tid)
+            if init_digest_error:
+                return tool_error(init_digest_error)
 
             routed = _route_completion_through_review_gates(
                 kb,

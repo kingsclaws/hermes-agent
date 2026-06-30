@@ -72,7 +72,7 @@ CONFIGURABLE_TOOLSETS = [
     ("session_search",  "🔎 Session Search",            "search past conversations"),
     ("clarify",         "❓ Clarifying Questions",      "clarify"),
     ("delegation",      "👥 Task Delegation",           "delegate_task"),
-    ("project_management", "⚖️  Legal Projects",        "project_create, register, init_start, status"),
+    ("project_management", "⚖️  Legal Projects",        "project_create, register, init_start, source_digest, status"),
     ("legal_orchestration", "⚖️  Legal Orchestration",  "legal_workflow, profiles"),
     ("lexitool",        "📄 Lex DOCX Tools",            "lex_read, lex_edit, lex_ocr, lex_ref"),
     ("cronjob",         "⏰ Cron Jobs",                 "create/list/update/pause/resume/run, with optional attached skills"),
@@ -83,7 +83,7 @@ CONFIGURABLE_TOOLSETS = [
     ("discord_admin",   "🛡️  Discord Server Admin",    "list channels/roles, pin, assign roles"),
     ("yuanbao",          "🤖 Yuanbao",                  "group info, member queries, DM"),
     ("computer_use",     "🖱️  Computer Use (macOS)",     "background desktop control via cua-driver"),
-    ("project_management", "📁 Project Management",     "project_create, project_register, project_init_start, project_list, project_select"),
+    ("project_management", "📁 Project Management",     "project_create, project_register, project_init_start, project_source_digest, project_list, project_select"),
     ("lexitool",         "📝 Legal Document Tools v2",   "read, edit, format, list, ref, section, doc"),
     ("lex-docx",         "📝 Legal Document Tools",      "inspect, edit, review, format, finalize .docx"),
 ]

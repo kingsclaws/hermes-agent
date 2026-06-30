@@ -400,6 +400,83 @@ def test_reviewer_complete_final_gate_marks_done(worker_env):
         conn.close()
 
 
+def test_project_init_source_task_requires_native_digest(worker_env, monkeypatch, tmp_path):
+    from hermes_cli import kanban_db as kb
+    from hermes_state import SessionDB
+    from tools import kanban_tools as kt
+
+    home = tmp_path / ".hermes"
+    import hermes_state
+
+    hermes_state.DEFAULT_DB_PATH = home / "state.db"
+    db = SessionDB(db_path=home / "state.db")
+    project_dir = tmp_path / "Init Matter"
+    project_dir.mkdir()
+    project_id = db.create_project("Init Matter", str(project_dir), cwd=str(project_dir))
+    run_id = db.create_project_init_run(project_id)
+    source = {
+        "id": "src_test",
+        "path": str(project_dir / "Term Sheet.md"),
+        "rel_path": "Term Sheet.md",
+        "file_name": "Term Sheet.md",
+        "ext": ".md",
+        "file_type": "commercial_terms_or_approval",
+        "priority": "core",
+        "reason": "test",
+        "must_read_before_init": True,
+        "read_status": "pending",
+        "read_method": "read_file",
+        "size_bytes": 10,
+        "mtime": 1,
+        "sha1": "",
+    }
+    db.upsert_project_sources(project_id, run_id, [source])
+
+    marker = {
+        "project_id": project_id,
+        "run_id": run_id,
+        "source_id": source["id"],
+        "source_path": source["path"],
+        "rel_path": source["rel_path"],
+    }
+    body = (
+        "## Project Init Source Digest Task\n\n"
+        "<LEX_PROJECT_INIT_SOURCE_JSON>\n"
+        + json.dumps(marker)
+        + "\n</LEX_PROJECT_INIT_SOURCE_JSON>\n"
+    )
+    conn = kb.connect()
+    try:
+        conn.execute(
+            "UPDATE tasks SET title = ?, body = ? WHERE id = ?",
+            ("init.source_digest: Term Sheet.md", body, worker_env),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    blocked = json.loads(kt._handle_complete({
+        "summary": "File Evidence Ledger\n- read Term Sheet.md fully",
+    }))
+    assert blocked["error"]
+    assert "project_source_digest" in blocked["error"]
+
+    db.upsert_project_source_digest(
+        project_id=project_id,
+        source_id=source["id"],
+        run_id=run_id,
+        read_method="read_file",
+        read_coverage="full",
+        confidence="high",
+        digest={"summary": "read", "evidence_ledger": ["read Term Sheet.md fully"]},
+        created_by="test",
+    )
+    out = json.loads(kt._handle_complete({
+        "summary": "File Evidence Ledger\n- read Term Sheet.md fully",
+    }))
+    assert out["ok"] is True
+
+
 def test_complete_metadata_round_trips_through_show(worker_env):
     """Structured completion metadata should be visible to downstream agents."""
     from tools import kanban_tools as kt
