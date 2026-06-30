@@ -579,6 +579,34 @@ def test_history_to_messages_preserves_tool_calls_for_resume_display():
     ]
 
 
+def test_history_to_messages_hides_tool_call_preamble_text():
+    history = [
+        {"role": "user", "content": "汇报了吗？"},
+        {
+            "role": "assistant",
+            "content": "还在跑，再等一下。",
+            "finish_reason": "tool_calls",
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "function": {
+                        "name": "swarm_task_poll",
+                        "arguments": json.dumps({}),
+                    },
+                }
+            ],
+        },
+        {"role": "tool", "content": "{}", "tool_call_id": "call_1"},
+        {"role": "assistant", "content": "还在跑，没有 progress 更新。"},
+    ]
+
+    assert server._history_to_messages(history) == [
+        {"role": "user", "text": "汇报了吗？"},
+        {"context": "", "name": "swarm_task_poll", "role": "tool"},
+        {"role": "assistant", "text": "还在跑，没有 progress 更新。"},
+    ]
+
+
 def test_history_to_messages_renders_multimodal_content():
     history = [
         {

@@ -1405,6 +1405,26 @@ def test_interim_commentary_preserves_assistant_content(monkeypatch):
     assert "I'll inspect the repo structure first." in observed["text"]
 
 
+def test_interim_commentary_skips_tool_call_preamble(monkeypatch):
+    agent = _build_agent(monkeypatch)
+    observed = []
+    agent.interim_assistant_callback = lambda text, *, already_streamed=False: observed.append(text)
+
+    agent._emit_interim_assistant_message({
+        "role": "assistant",
+        "content": "还在跑，再等一下。",
+        "tool_calls": [
+            {
+                "id": "call_1",
+                "type": "function",
+                "function": {"name": "swarm_task_poll", "arguments": "{}"},
+            }
+        ],
+    })
+
+    assert observed == []
+
+
 def test_stream_delta_strips_leaked_memory_context(monkeypatch):
     agent = _build_agent(monkeypatch)
     observed = []

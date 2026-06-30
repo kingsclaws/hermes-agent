@@ -5270,6 +5270,8 @@ class HermesCLI:
                 text = _strip_reasoning_tags(text)
                 parts = []
                 full_parts = []  # un-truncated version
+                if tool_calls:
+                    text = ""
                 if text:
                     full_parts.append(text)
                     lines = text.splitlines()
