@@ -694,6 +694,10 @@ class APIServerAdapter(BasePlatformAdapter):
             raw_port = os.getenv("API_SERVER_PORT", str(DEFAULT_PORT))
         self._port: int = _coerce_port(raw_port, DEFAULT_PORT)
         self._api_key: str = extra.get("key", os.getenv("API_SERVER_KEY", ""))
+        self._allow_weak_key: bool = _coerce_request_bool(
+            extra.get("allow_weak_key", os.getenv("API_SERVER_ALLOW_WEAK_KEY", "")),
+            default=False,
+        )
         self._cors_origins: tuple[str, ...] = self._parse_cors_origins(
             extra.get("cors_origins", os.getenv("API_SERVER_CORS_ORIGINS", "")),
         )
@@ -4100,20 +4104,20 @@ class APIServerAdapter(BasePlatformAdapter):
             if hasattr(sweep_task, "add_done_callback"):
                 sweep_task.add_done_callback(self._background_tasks.discard)
 
-            # Refuse to start without authentication. The API server can
-            # dispatch terminal-capable agent work, so every deployment needs
-            # an explicit API_SERVER_KEY regardless of bind address.
-            if not self._api_key:
+            # Refuse to start network-accessible without authentication.
+            # Loopback-only binds are allowed for local automation, but any
+            # address reachable off-host still needs an explicit API key.
+            if not self._api_key and is_network_accessible(self._host):
                 logger.error(
-                    "[%s] Refusing to start: API_SERVER_KEY is required for the API server, "
-                    "including loopback-only binds on %s.",
+                    "[%s] Refusing to start: API_SERVER_KEY is required for the API server "
+                    "when bound to network-accessible host %s.",
                     self.name, self._host,
                 )
                 return False
 
             # Refuse to start network-accessible with a placeholder key.
             # Ported from openclaw/openclaw#64586.
-            if is_network_accessible(self._host) and self._api_key:
+            if is_network_accessible(self._host) and self._api_key and not self._allow_weak_key:
                 try:
                     from hermes_cli.auth import has_usable_secret
                     if not has_usable_secret(self._api_key, min_length=8):

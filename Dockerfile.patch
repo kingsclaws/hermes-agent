@@ -76,6 +76,7 @@ RUN set -e; \
     cp gateway/kanban_runner.py /opt/hermes/gateway/kanban_runner.py; \
     cp gateway/slash_commands.py /opt/hermes/gateway/slash_commands.py; \
     cp gateway/status.py /opt/hermes/gateway/status.py; \
+    cp gateway/platforms/api_server.py /opt/hermes/gateway/platforms/api_server.py; \
     mkdir -p /opt/hermes/plugins/backoffice-issue-relay; \
     cp plugins/backoffice-issue-relay/plugin.yaml /opt/hermes/plugins/backoffice-issue-relay/plugin.yaml; \
     cp plugins/backoffice-issue-relay/__init__.py /opt/hermes/plugins/backoffice-issue-relay/__init__.py; \
@@ -130,6 +131,7 @@ RUN set -e; \
     cp gateway/kanban_runner.py /opt/lex-hermes/gateway/kanban_runner.py; \
     cp gateway/slash_commands.py /opt/lex-hermes/gateway/slash_commands.py; \
     cp gateway/status.py /opt/lex-hermes/gateway/status.py; \
+    cp gateway/platforms/api_server.py /opt/lex-hermes/gateway/platforms/api_server.py; \
     mkdir -p /opt/lex-hermes/plugins/backoffice-issue-relay; \
     cp plugins/backoffice-issue-relay/plugin.yaml /opt/lex-hermes/plugins/backoffice-issue-relay/plugin.yaml; \
     cp plugins/backoffice-issue-relay/__init__.py /opt/lex-hermes/plugins/backoffice-issue-relay/__init__.py; \
@@ -217,7 +219,8 @@ RUN set -e; \
       /opt/hermes/gateway/message_handler.py /opt/lex-hermes/gateway/message_handler.py \
       /opt/hermes/gateway/kanban_runner.py /opt/lex-hermes/gateway/kanban_runner.py \
       /opt/hermes/gateway/slash_commands.py /opt/lex-hermes/gateway/slash_commands.py \
-      /opt/hermes/gateway/status.py /opt/lex-hermes/gateway/status.py; \
+      /opt/hermes/gateway/status.py /opt/lex-hermes/gateway/status.py \
+      /opt/hermes/gateway/platforms/api_server.py /opt/lex-hermes/gateway/platforms/api_server.py; \
     /opt/hermes/.venv/bin/python -c "import lexitool.edit_ops, lexitool.markup, lexitool.ocr, lexitool.ocr_cli, lexitool.openxml_opc, lexitool.review_detailed; print('All modules import OK')"; \
     /opt/hermes/.venv/bin/python -c "import lexitool.ocr; print(lexitool.ocr.__file__)"; \
     cd /opt/lex-hermes; \
@@ -251,6 +254,7 @@ RUN set -e; \
       gateway/message_handler.py \
       gateway/slash_commands.py \
       gateway/status.py \
+      gateway/platforms/api_server.py \
       tests/test_lexitool_ocr_fallback.py \
       tests/test_legal_harness_toolsets.py \
       tests/test_lex_master_route.py \
