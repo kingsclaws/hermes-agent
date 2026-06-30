@@ -91,15 +91,21 @@ export function useChatSessionBinding({
       setSelectedProjectId(nextProjectId);
     }
     const active = tabs.find((t) => t.id === activeTabId);
-    if (
-      active &&
-      ((active.projectId ?? null) !== (projectParam ?? null) ||
-        (active.sessionId ?? null) !== (resumeParam ?? null))
-    ) {
-      updateTab(active.id, {
-        projectId: projectParam ?? null,
-        sessionId: resumeParam ?? null,
-      });
+    if (active) {
+      const patch: Partial<typeof active> = {};
+      if ((active.projectId ?? null) !== (projectParam ?? null)) {
+        patch.projectId = projectParam ?? null;
+      }
+      // Absence of `resume` in a project-scoped URL means "new/current
+      // session for this project"; it must not clear a tab session that was
+      // just selected by the user. Only an explicit resume param owns the tab
+      // session id.
+      if (resumeParam && (active.sessionId ?? null) !== resumeParam) {
+        patch.sessionId = resumeParam;
+      }
+      if (Object.keys(patch).length > 0) {
+        updateTab(active.id, patch);
+      }
     }
   }, [activeTabId, isActive, projectParam, resumeParam, selectedProjectId, tabs, updateTab]);
 

@@ -150,6 +150,8 @@ export function NativeChatSurface({
   const [error, setError] = useState<string | null>(null);
   const projectContextRef = useRef(projectContext);
   projectContextRef.current = projectContext;
+  const onSessionCreatedRef = useRef(onSessionCreated);
+  onSessionCreatedRef.current = onSessionCreated;
   const assistantIdRef = useRef<string | null>(null);
   const thinkingIdRef = useRef<string | null>(null);
   const queuedRef = useRef<string | null>(null);
@@ -476,10 +478,16 @@ export function NativeChatSurface({
     };
   }, [gw, resumeTarget, projectContextKey]);
 
-  // Propagate sessionId to parent (for per-tab persistence).
+  // Propagate only durable resume targets to parent tab state.
   useEffect(() => {
-    if (sessionId && onSessionCreated) onSessionCreated(sessionId);
-  }, [sessionId, onSessionCreated]);
+    // `sessionId` is the live tui_gateway session handle returned by
+    // session.create/session.resume. It is not a durable SessionDB id and must
+    // not be written into the tab URL as a resume target; doing so makes the
+    // parent feed it back as `resumeTarget`, which tears down the live socket
+    // and loops through session.create forever. Persist only the durable DB
+    // target the user explicitly resumed.
+    if (resumeTarget) onSessionCreatedRef.current?.(resumeTarget);
+  }, [resumeTarget]);
 
   // Auto-submit queued message when the current turn finishes.
   useEffect(() => {
@@ -533,6 +541,7 @@ export function NativeChatSurface({
             });
             setSessionId(resumed.session_id);
             setMessages(messagesFromResume(resumed, arg));
+            onSessionCreatedRef.current?.(resumed.resumed ?? arg);
             return;
           } catch (e) {
             setMessages((prev) => [

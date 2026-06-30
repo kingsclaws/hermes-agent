@@ -2743,12 +2743,23 @@ def _list_projects() -> list[dict]:
     return projects
 
 
-def _session_title_matches(title: str | None, tokens: set[str]) -> bool:
-    """Check if session title contains any of the project name tokens."""
-    if not title or not tokens:
+def _session_text_matches(session: dict, tokens: set[str], paths: tuple[str, ...]) -> bool:
+    """Best-effort project match for legacy sessions created before project binding.
+
+    Older sessions may have no ``project_id`` or ``project_cwd``. In practice,
+    their title or first user-message preview often contains either the project
+    name or the working directory path, so include those fields when populating
+    project session pickers.
+    """
+    haystack = " ".join(
+        str(session.get(key) or "")
+        for key in ("title", "preview", "project_cwd", "id")
+    ).lower()
+    if not haystack:
         return False
-    title_lower = title.lower()
-    return any(tok in title_lower for tok in tokens if len(tok) >= 2)
+    if any(path and path.lower() in haystack for path in paths):
+        return True
+    return any(tok in haystack for tok in tokens if len(tok) >= 2)
 
 
 
@@ -2840,9 +2851,16 @@ async def get_project_detail(project_id: str):
     try:
         db = SessionDB()
         try:
-            all_sessions = db.list_sessions_rich(limit=500, offset=0)
+            explicit_sessions = db.list_project_sessions(str(project.get("id") or project_id), limit=1000)
+            all_sessions = db.list_sessions_rich(
+                limit=10000,
+                offset=0,
+                include_children=False,
+                order_by_last_active=True,
+            )
             cwd = str(project.get("cwd") or project.get("directory") or "")
             mgmt_dir = str(project.get("management_dir") or "")
+            project_paths = tuple(p for p in (cwd, mgmt_dir) if p)
             project_name = str(project.get("name") or "")
             # Tokenise project name for heuristic title matching (e.g. "五冶邯郸纾困项目" → ["五冶","邯郸","纾困","项目"])
             name_tokens: set[str] = set()
@@ -2855,14 +2873,34 @@ async def get_project_detail(project_id: str):
                 cjk_chars = re.findall(r'[一-鿿]{2,}', project_name)
                 name_tokens.update(t.lower() for t in cjk_chars)
 
-            linked = [
-                s for s in all_sessions
-                if s.get("project_id") == project.get("id")
-                or (cwd and (s.get("project_cwd") or "").startswith(cwd))
-                or (mgmt_dir and (s.get("project_cwd") or "").startswith(mgmt_dir))
-                # Heuristic: session title contains project name tokens
-                or (name_tokens and _session_title_matches(s.get("title"), name_tokens))
-            ]
+            linked_by_id: dict[str, dict] = {}
+
+            def add_session(session: dict) -> None:
+                sid = str(session.get("id") or "")
+                if sid and sid not in linked_by_id:
+                    linked_by_id[sid] = session
+
+            for session in explicit_sessions:
+                add_session(session)
+
+            for session in all_sessions:
+                session_project_cwd = str(session.get("project_cwd") or "")
+                if (
+                    session.get("project_id") == project.get("id")
+                    or (cwd and session_project_cwd.startswith(cwd))
+                    or (mgmt_dir and session_project_cwd.startswith(mgmt_dir))
+                    # Heuristic: legacy sessions often have only title/preview.
+                    or _session_text_matches(session, name_tokens, project_paths)
+                ):
+                    add_session(session)
+
+            def sort_key(session: dict) -> float:
+                try:
+                    return float(session.get("last_active") or session.get("started_at") or 0)
+                except Exception:
+                    return 0.0
+
+            linked = sorted(linked_by_id.values(), key=sort_key, reverse=True)
             project["sessions"] = linked
             project["session_count"] = len(linked)
         finally:
@@ -2978,6 +3016,39 @@ async def list_swarm_runs(board: str = ""):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/api/kanban/swarm/runs/all")
+async def list_all_swarm_runs():
+    """List legal-swarm runs across ALL kanban boards (no board param needed)."""
+    try:
+        from hermes_cli import kanban_db as kb
+        from hermes_cli.kanban_legal_swarm import list_runs
+
+        all_runs: list[dict] = []
+        boards = kb.list_boards()
+
+        for bm in boards:
+            slug = bm.get("slug", "")
+            if not slug:
+                continue
+            try:
+                conn = kb.connect(board=slug)
+                try:
+                    runs = list_runs(conn)
+                    for r in runs:
+                        r["board"] = r.get("board") or slug
+                    all_runs.extend(runs)
+                finally:
+                    conn.close()
+            except Exception:
+                _log.warning("Failed to list runs for board %s", slug, exc_info=True)
+
+        all_runs.sort(key=lambda r: r.get("created_at") or 0, reverse=True)
+        return {"ok": True, "runs": all_runs}
+    except Exception as e:
+        _log.exception("GET /api/kanban/swarm/runs/all failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/api/kanban/swarm/runs/{run_id}")
 async def get_swarm_run_status(run_id: str, board: str = ""):
     """Get per-node status for a single swarm run on a kanban board."""
@@ -3023,39 +3094,6 @@ async def get_swarm_run_status(run_id: str, board: str = ""):
         raise
     except Exception as e:
         _log.exception("GET /api/kanban/swarm/runs/%s failed", run_id)
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.get("/api/kanban/swarm/runs/all")
-async def list_all_swarm_runs():
-    """List legal-swarm runs across ALL kanban boards (no board param needed)."""
-    try:
-        from hermes_cli import kanban_db as kb
-        from hermes_cli.kanban_legal_swarm import list_runs
-
-        all_runs: list[dict] = []
-        boards = kb.list_boards()
-
-        for bm in boards:
-            slug = bm.get("slug", "")
-            if not slug:
-                continue
-            try:
-                conn = kb.connect(board=slug)
-                try:
-                    runs = list_runs(conn)
-                    for r in runs:
-                        r["board"] = r.get("board") or slug
-                    all_runs.extend(runs)
-                finally:
-                    conn.close()
-            except Exception:
-                _log.warning("Failed to list runs for board %s", slug, exc_info=True)
-
-        all_runs.sort(key=lambda r: r.get("created_at") or 0, reverse=True)
-        return {"ok": True, "runs": all_runs}
-    except Exception as e:
-        _log.exception("GET /api/kanban/swarm/runs/all failed")
         raise HTTPException(status_code=500, detail=str(e))
 
 
