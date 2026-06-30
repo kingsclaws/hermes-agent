@@ -1778,10 +1778,9 @@ def _on_tool_complete(sid: str, tool_call_id: str, name: str, args: dict, result
     summary = _tool_summary(name, result, duration_s)
     if summary:
         payload["summary"] = summary
-    if _session_verbose(sid):
-        result_text = _tool_result_text(result)
-        if result_text:
-            payload["result_text"] = result_text
+    result_text = _tool_result_text(result)
+    if result_text:
+        payload["result_text"] = result_text
     if name == "todo":
         try:
             data = json.loads(result)

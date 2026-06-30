@@ -1,10 +1,9 @@
 import { useEffect, useLayoutEffect, useRef } from "react";
-import { LoaderCircle, Wrench } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { ChatBubble } from "@/components/ChatBubble";
 import { ThinkingStream, type ThinkingBlockData } from "@/components/ThinkingBlock";
 import { SwarmInlineView } from "@/components/SwarmInlineView";
-import type { ToolEntry } from "@/components/ToolCall";
+import { ToolCall, type ToolEntry } from "@/components/ToolCall";
 import type { ChatMessage, SubagentLine } from "@/components/NativeChatSurface";
 
 export interface ChatMessageListProps {
@@ -131,7 +130,7 @@ export function ChatMessageList({
                   .slice()
                   .reverse()
                   .map((tool) => (
-                    <InlineToolCall key={tool.id} tool={tool} />
+                    <ToolCall key={tool.id} tool={tool} />
                   ))}
               </div>
             )}
@@ -170,57 +169,6 @@ export function ChatMessageList({
         </div>
       )}
       <div ref={bottomRef} aria-hidden className="h-px" />
-    </div>
-  );
-}
-
-function InlineToolCall({ tool }: { tool: ToolEntry }) {
-  return (
-    <div
-      className={cn(
-        "lex-tool-enter rounded border px-2.5 py-1.5 text-xs",
-        tool.status === "running"
-          ? "lex-running-surface border-primary/30 bg-primary/[0.04]"
-          : tool.status === "error"
-            ? "border-destructive/40 bg-destructive/[0.04]"
-            : "border-current/10 bg-muted/10",
-      )}
-    >
-      <div className="flex items-center gap-2">
-        {tool.status === "running" ? (
-          <LoaderCircle className="h-3 w-3 shrink-0 animate-spin text-primary" />
-        ) : (
-          <Wrench className="h-3 w-3 shrink-0 text-muted-foreground" />
-        )}
-        <span className="font-medium truncate">{tool.name}</span>
-        <span
-          className={cn(
-            "shrink-0 text-[0.6rem] uppercase",
-            tool.status === "running"
-              ? "text-primary"
-              : tool.status === "error"
-                ? "text-destructive"
-                : "text-muted-foreground",
-          )}
-        >
-          {tool.status}
-        </span>
-      </div>
-      {tool.context && (
-        <div className="mt-1 text-muted-foreground/70 truncate max-w-prose">
-          {tool.context}
-        </div>
-      )}
-      {(tool.summary || tool.error) && (
-        <div className="lex-panel-reveal mt-1 max-h-24 overflow-y-auto whitespace-pre-wrap rounded bg-black/10 p-1.5 font-mono text-[0.65rem] text-muted-foreground">
-          {tool.error ?? tool.summary}
-        </div>
-      )}
-      {tool.inline_diff && (
-        <div className="lex-panel-reveal mt-1 max-h-32 overflow-y-auto whitespace-pre-wrap rounded bg-black/10 p-1.5 font-mono text-[0.65rem] text-muted-foreground">
-          {tool.inline_diff}
-        </div>
-      )}
     </div>
   );
 }

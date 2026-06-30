@@ -1,12 +1,15 @@
-import { ListItem } from "@nous-research/ui/ui/components/list-item";
 import {
   AlertCircle,
   Check,
   ChevronDown,
   ChevronRight,
+  Clipboard,
+  ClipboardCheck,
   Zap,
 } from "lucide-react";
 import { useEffect, useState } from "react";
+import { Markdown } from "@/components/Markdown";
+import { cn } from "@/lib/utils";
 
 /**
  * Expandable tool call row — the web equivalent of Ink's ToolTrail node.
@@ -29,6 +32,7 @@ export interface ToolEntry {
   context?: string;
   preview?: string;
   summary?: string;
+  result_text?: string;
   error?: string;
   inline_diff?: string;
   status: "running" | "done" | "error";
@@ -78,6 +82,7 @@ export function ToolCall({ tool }: { tool: ToolEntry }) {
     tool.context ||
     tool.preview ||
     tool.summary ||
+    tool.result_text ||
     tool.error ||
     tool.inline_diff
   );
@@ -90,11 +95,12 @@ export function ToolCall({ tool }: { tool: ToolEntry }) {
         tool.status === "running" ? "lex-running-surface lex-soft-glow" : ""
       }`}
     >
-      <ListItem
+      <button
+        type="button"
         onClick={() => setUserOverride(!open)}
         disabled={!hasBody}
         aria-expanded={open}
-        className="px-2.5 py-1.5 text-xs hover:bg-foreground/2 disabled:cursor-default"
+        className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-xs hover:bg-foreground/2 disabled:cursor-default"
       >
         {hasBody ? (
           <Chevron className="h-3 w-3 shrink-0 text-muted-foreground" />
@@ -116,6 +122,11 @@ export function ToolCall({ tool }: { tool: ToolEntry }) {
             title="running"
           />
         )}
+        {tool.status === "done" && tool.result_text && (
+          <span className="shrink-0 rounded border border-primary/20 bg-primary/[0.04] px-1.5 py-0.5 font-mono text-[0.6rem] uppercase text-primary/80">
+            output
+          </span>
+        )}
         {tool.status === "error" && (
           <AlertCircle
             className="h-3 w-3 shrink-0 text-destructive"
@@ -134,21 +145,25 @@ export function ToolCall({ tool }: { tool: ToolEntry }) {
             {elapsed}
           </span>
         )}
-      </ListItem>
+      </button>
 
       {open && hasBody && (
-        <div className="lex-panel-reveal border-t border-border/60 px-3 py-2 space-y-2 text-xs font-mono">
-          {tool.context && <Section label="context">{tool.context}</Section>}
+        <div className="lex-panel-reveal border-t border-border/60 px-3 py-2 space-y-2 text-xs">
+          {tool.context && (
+            <Section label="context" monospace>
+              {tool.context}
+            </Section>
+          )}
 
           {tool.preview && tool.status === "running" && (
-            <Section label="streaming">
+            <Section label="streaming" monospace>
               {tool.preview}
               <span className="lex-stream-caret" />
             </Section>
           )}
 
           {tool.inline_diff && (
-            <Section label="diff">
+            <Section label="diff" monospace copyText={tool.inline_diff}>
               <pre className="whitespace-pre overflow-x-auto text-[0.7rem] leading-snug">
                 {colorizeDiff(tool.inline_diff)}
               </pre>
@@ -156,15 +171,21 @@ export function ToolCall({ tool }: { tool: ToolEntry }) {
           )}
 
           {tool.summary && (
-            <Section label="result">
-              <span className="text-foreground/90 whitespace-pre-wrap">
-                {tool.summary}
-              </span>
+            <Section label="summary" monospace copyText={tool.summary}>
+              <span className="text-foreground/90 whitespace-pre-wrap">{tool.summary}</span>
+            </Section>
+          )}
+
+          {tool.result_text && (
+            <Section label="output" copyText={tool.result_text}>
+              <div className="max-h-[28rem] overflow-y-auto rounded border border-current/10 bg-black/10 p-2.5">
+                <Markdown content={tool.result_text} />
+              </div>
             </Section>
           )}
 
           {tool.error && (
-            <Section label="error" tone="error">
+            <Section label="error" tone="error" monospace copyText={tool.error}>
               <span className="text-destructive whitespace-pre-wrap">
                 {tool.error}
               </span>
@@ -180,23 +201,52 @@ function Section({
   label,
   children,
   tone,
+  copyText,
+  monospace,
 }: {
   label: string;
   children: React.ReactNode;
   tone?: "error";
+  copyText?: string;
+  monospace?: boolean;
 }) {
   return (
     <div className="flex gap-3">
-      <span
-        className={`text-display font-mondwest tracking-wider text-xs shrink-0 w-20 pt-0.5 ${
-          tone === "error" ? "text-destructive" : "text-text-tertiary"
-        }`}
+      <div
+        className={cn(
+          "flex w-20 shrink-0 items-start gap-1 pt-0.5 text-xs",
+          tone === "error" ? "text-destructive" : "text-text-tertiary",
+        )}
       >
-        {label}
-      </span>
+        <span className="text-display font-mondwest tracking-wider">{label}</span>
+        {copyText && <CopyButton text={copyText} />}
+      </div>
 
-      <div className="flex-1 min-w-0 text-muted-foreground">{children}</div>
+      <div className={cn("flex-1 min-w-0 text-muted-foreground", monospace && "font-mono")}>
+        {children}
+      </div>
     </div>
+  );
+}
+
+function CopyButton({ text }: { text: string }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <button
+      type="button"
+      className="rounded p-0.5 text-text-tertiary hover:bg-muted/20 hover:text-foreground"
+      title="Copy"
+      aria-label="Copy tool output"
+      onClick={(ev) => {
+        ev.stopPropagation();
+        void navigator.clipboard.writeText(text).then(() => {
+          setCopied(true);
+          window.setTimeout(() => setCopied(false), 1200);
+        });
+      }}
+    >
+      {copied ? <ClipboardCheck className="h-3 w-3" /> : <Clipboard className="h-3 w-3" />}
+    </button>
   );
 }
 

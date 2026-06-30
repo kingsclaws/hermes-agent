@@ -313,6 +313,7 @@ export function NativeChatSurface({
     const offToolComplete = gw.on<{
       tool_id?: string;
       summary?: string;
+      result_text?: string;
       error?: string;
       inline_diff?: string;
     }>("tool.complete", (ev) => {
@@ -325,6 +326,7 @@ export function NativeChatSurface({
                 ...tool,
                 status: ev.payload?.error ? "error" : "done",
                 summary: ev.payload?.summary,
+                result_text: ev.payload?.result_text,
                 error: ev.payload?.error,
                 inline_diff: ev.payload?.inline_diff,
                 completedAt: Date.now(),
