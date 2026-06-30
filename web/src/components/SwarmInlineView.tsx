@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import type { CSSProperties } from "react";
 import { CheckCircle, ChevronDown, ChevronRight, LoaderCircle, XCircle } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { getSwarmProfile } from "@/lib/swarmProfiles";
@@ -29,7 +30,7 @@ function statusBadge(status: SubagentLine["status"]) {
   }
 }
 
-function AgentColumn({ agent }: { agent: SubagentLine }) {
+function AgentColumn({ agent, index }: { agent: SubagentLine; index: number }) {
   const profile = getSwarmProfile(agent.profile ?? "");
   const Icon = profile.icon;
   const duration =
@@ -39,10 +40,11 @@ function AgentColumn({ agent }: { agent: SubagentLine }) {
 
   return (
     <div
+      style={{ "--lex-stagger-index": index } as CSSProperties}
       className={cn(
-        "flex flex-col min-w-0 rounded-lg border text-xs transition-colors",
+        "lex-tool-enter lex-agent-card flex flex-col min-w-0 rounded-lg border text-xs transition-colors",
         agent.status === "running"
-          ? "border-amber-500/40 bg-amber-500/[0.04]"
+          ? "lex-running-surface lex-soft-glow border-amber-500/40 bg-amber-500/[0.04]"
           : agent.status === "error"
             ? "border-red-500/40 bg-red-500/[0.04]"
             : "border-emerald-500/30 bg-emerald-500/[0.03]",
@@ -126,7 +128,13 @@ export function SwarmInlineView({ subagents, swarmState, className }: SwarmInlin
   const summary = summaryLine(subagents);
 
   return (
-    <div className={cn("mt-2 rounded-lg border border-current/10 bg-muted/5", className)}>
+    <div
+      className={cn(
+        "lex-swarm-enter mt-2 rounded-lg border border-current/10 bg-muted/5",
+        active && "lex-running-surface",
+        className,
+      )}
+    >
       {/* Collapsed summary bar */}
       {collapsed && (
         <button
@@ -175,14 +183,14 @@ export function SwarmInlineView({ subagents, swarmState, className }: SwarmInlin
           {/* Agent grid — 2 cols default, 3 cols on lg+ */}
           <div
             className={cn(
-              "grid gap-2 p-2 pt-0",
+              "lex-stagger grid gap-2 p-2 pt-0",
               "grid-cols-1",
               subagents.length >= 2 && "sm:grid-cols-2",
               subagents.length >= 3 && "lg:grid-cols-3",
             )}
           >
-            {subagents.map((agent) => (
-              <AgentColumn key={agent.id} agent={agent} />
+            {subagents.map((agent, index) => (
+              <AgentColumn key={agent.id} agent={agent} index={index} />
             ))}
           </div>
         </div>

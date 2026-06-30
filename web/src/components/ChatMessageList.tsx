@@ -87,7 +87,7 @@ export function ChatMessageList({
   if (messages.length === 0) {
     return (
       <div className={cn("flex items-center justify-center", className)}>
-        <div className="rounded border border-dashed border-current/15 p-4 text-sm text-muted-foreground text-center max-w-md">
+        <div className="lex-message-enter rounded border border-dashed border-current/15 p-4 text-sm text-muted-foreground text-center max-w-md">
           Legal workspace ready. Submit a message or use Cmd+K for commands.
         </div>
       </div>
@@ -151,7 +151,7 @@ export function ChatMessageList({
         <div className="mt-2 pl-10">
           <div
             className={cn(
-              "rounded border px-3 py-2 text-xs",
+              "lex-tool-enter rounded border px-3 py-2 text-xs",
               kanbanBatchSummary.failed > 0
                 ? "border-destructive/30 bg-destructive/[0.04]"
                 : "border-green-500/30 bg-green-500/[0.04]",
@@ -178,9 +178,9 @@ function InlineToolCall({ tool }: { tool: ToolEntry }) {
   return (
     <div
       className={cn(
-        "rounded border px-2.5 py-1.5 text-xs",
+        "lex-tool-enter rounded border px-2.5 py-1.5 text-xs",
         tool.status === "running"
-          ? "border-primary/30 bg-primary/[0.04]"
+          ? "lex-running-surface border-primary/30 bg-primary/[0.04]"
           : tool.status === "error"
             ? "border-destructive/40 bg-destructive/[0.04]"
             : "border-current/10 bg-muted/10",
@@ -212,12 +212,12 @@ function InlineToolCall({ tool }: { tool: ToolEntry }) {
         </div>
       )}
       {(tool.summary || tool.error) && (
-        <div className="mt-1 max-h-24 overflow-y-auto whitespace-pre-wrap rounded bg-black/10 p-1.5 font-mono text-[0.65rem] text-muted-foreground">
+        <div className="lex-panel-reveal mt-1 max-h-24 overflow-y-auto whitespace-pre-wrap rounded bg-black/10 p-1.5 font-mono text-[0.65rem] text-muted-foreground">
           {tool.error ?? tool.summary}
         </div>
       )}
       {tool.inline_diff && (
-        <div className="mt-1 max-h-32 overflow-y-auto whitespace-pre-wrap rounded bg-black/10 p-1.5 font-mono text-[0.65rem] text-muted-foreground">
+        <div className="lex-panel-reveal mt-1 max-h-32 overflow-y-auto whitespace-pre-wrap rounded bg-black/10 p-1.5 font-mono text-[0.65rem] text-muted-foreground">
           {tool.inline_diff}
         </div>
       )}

@@ -82,11 +82,16 @@ RUN set -e; \
     cp profiles/*.soul.md /opt/hermes/profiles/; \
     mkdir -p /opt/hermes/web/src/components /opt/hermes/web/src/contexts /opt/hermes/web/src/hooks /opt/hermes/web/src/lib /opt/hermes/web/src/pages; \
     cp -a hermes_cli/web_dist /opt/hermes/hermes_cli/; \
+    cp web/src/index.css /opt/hermes/web/src/index.css; \
     cp web/src/App.tsx /opt/hermes/web/src/App.tsx; \
+    cp web/src/components/ChatBubble.tsx /opt/hermes/web/src/components/ChatBubble.tsx; \
     cp web/src/components/ChatMessageList.tsx /opt/hermes/web/src/components/ChatMessageList.tsx; \
     cp web/src/components/ChatTopBar.tsx /opt/hermes/web/src/components/ChatTopBar.tsx; \
     cp web/src/components/Markdown.tsx /opt/hermes/web/src/components/Markdown.tsx; \
     cp web/src/components/NativeChatSurface.tsx /opt/hermes/web/src/components/NativeChatSurface.tsx; \
+    cp web/src/components/SwarmInlineView.tsx /opt/hermes/web/src/components/SwarmInlineView.tsx; \
+    cp web/src/components/ThinkingBlock.tsx /opt/hermes/web/src/components/ThinkingBlock.tsx; \
+    cp web/src/components/ToolCall.tsx /opt/hermes/web/src/components/ToolCall.tsx; \
     cp web/src/contexts/ChatTabContext.tsx /opt/hermes/web/src/contexts/ChatTabContext.tsx; \
     cp web/src/hooks/useChatSessionBinding.ts /opt/hermes/web/src/hooks/useChatSessionBinding.ts; \
     cp web/src/lib/dashboard-flags.ts /opt/hermes/web/src/lib/dashboard-flags.ts; \
@@ -126,11 +131,16 @@ RUN set -e; \
     cp profiles/*.soul.md /opt/lex-hermes/profiles/; \
     mkdir -p /opt/lex-hermes/web/src/components /opt/lex-hermes/web/src/contexts /opt/lex-hermes/web/src/hooks /opt/lex-hermes/web/src/lib /opt/lex-hermes/web/src/pages; \
     cp -a hermes_cli/web_dist /opt/lex-hermes/hermes_cli/; \
+    cp web/src/index.css /opt/lex-hermes/web/src/index.css; \
     cp web/src/App.tsx /opt/lex-hermes/web/src/App.tsx; \
+    cp web/src/components/ChatBubble.tsx /opt/lex-hermes/web/src/components/ChatBubble.tsx; \
     cp web/src/components/ChatMessageList.tsx /opt/lex-hermes/web/src/components/ChatMessageList.tsx; \
     cp web/src/components/ChatTopBar.tsx /opt/lex-hermes/web/src/components/ChatTopBar.tsx; \
     cp web/src/components/Markdown.tsx /opt/lex-hermes/web/src/components/Markdown.tsx; \
     cp web/src/components/NativeChatSurface.tsx /opt/lex-hermes/web/src/components/NativeChatSurface.tsx; \
+    cp web/src/components/SwarmInlineView.tsx /opt/lex-hermes/web/src/components/SwarmInlineView.tsx; \
+    cp web/src/components/ThinkingBlock.tsx /opt/lex-hermes/web/src/components/ThinkingBlock.tsx; \
+    cp web/src/components/ToolCall.tsx /opt/lex-hermes/web/src/components/ToolCall.tsx; \
     cp web/src/contexts/ChatTabContext.tsx /opt/lex-hermes/web/src/contexts/ChatTabContext.tsx; \
     cp web/src/hooks/useChatSessionBinding.ts /opt/lex-hermes/web/src/hooks/useChatSessionBinding.ts; \
     cp web/src/lib/dashboard-flags.ts /opt/lex-hermes/web/src/lib/dashboard-flags.ts; \

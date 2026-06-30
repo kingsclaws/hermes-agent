@@ -732,7 +732,7 @@ export function NativeChatSurface({
 
       {/* Queue indicator */}
       {hasQueued && (
-        <div className="flex items-center gap-2 border-t border-amber-500/30 bg-amber-500/[0.06] px-3 py-2 text-xs">
+        <div className="lex-panel-reveal lex-queue-ribbon flex items-center gap-2 border-t border-amber-500/30 bg-amber-500/[0.06] px-3 py-2 text-xs">
           <LoaderCircle className="h-3 w-3 shrink-0 animate-spin text-amber-400" />
           <span className="flex-1 text-amber-300/80">
             Message queued — will submit when current turn completes.{" "}

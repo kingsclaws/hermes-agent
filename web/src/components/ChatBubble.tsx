@@ -26,7 +26,7 @@ export function ChatBubble({
 }: ChatBubbleProps) {
   if (role === "status") {
     return (
-      <div className={cn("flex justify-center", className)}>
+      <div className={cn("lex-status-enter flex justify-center", className)}>
         <div className="rounded border border-current/10 bg-muted/10 px-3 py-1.5 text-xs text-muted-foreground max-w-[85%] text-center">
           {text}
         </div>
@@ -37,7 +37,13 @@ export function ChatBubble({
   const isUser = role === "user";
 
   return (
-    <div className={cn("flex gap-2.5", isUser ? "flex-row-reverse" : "flex-row", className)}>
+    <div
+      className={cn(
+        "lex-message-enter flex gap-2.5",
+        isUser ? "flex-row-reverse" : "flex-row",
+        className,
+      )}
+    >
       {/* Avatar */}
       <div
         className={cn(
@@ -45,6 +51,7 @@ export function ChatBubble({
           isUser
             ? "bg-primary/15 text-primary"
             : "bg-muted/15 text-muted-foreground",
+          isStreaming && !isUser && "lex-soft-glow",
         )}
       >
         {isUser ? <User className="h-3.5 w-3.5" /> : <Bot className="h-3.5 w-3.5" />}
@@ -74,6 +81,7 @@ export function ChatBubble({
             isUser
               ? "border-primary/30 bg-primary/10 rounded-tr-sm"
               : "border-current/10 bg-black/10 rounded-tl-sm",
+            isStreaming && !isUser && "lex-running-surface border-primary/30 bg-primary/[0.04]",
           )}
         >
           {text ? (

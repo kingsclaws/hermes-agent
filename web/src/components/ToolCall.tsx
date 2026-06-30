@@ -86,7 +86,9 @@ export function ToolCall({ tool }: { tool: ToolEntry }) {
 
   return (
     <div
-      className={`rounded-md border overflow-hidden ${STATUS_TONE[tool.status]}`}
+      className={`lex-tool-enter rounded-md border overflow-hidden ${STATUS_TONE[tool.status]} ${
+        tool.status === "running" ? "lex-running-surface lex-soft-glow" : ""
+      }`}
     >
       <ListItem
         onClick={() => setUserOverride(!open)}
@@ -110,7 +112,7 @@ export function ToolCall({ tool }: { tool: ToolEntry }) {
 
         {tool.status === "running" && (
           <span
-            className="inline-block h-2 w-2 rounded-full bg-primary animate-pulse shrink-0"
+            className="lex-live-dot inline-block h-2 w-2 rounded-full bg-primary shrink-0"
             title="running"
           />
         )}
@@ -135,13 +137,13 @@ export function ToolCall({ tool }: { tool: ToolEntry }) {
       </ListItem>
 
       {open && hasBody && (
-        <div className="border-t border-border/60 px-3 py-2 space-y-2 text-xs font-mono">
+        <div className="lex-panel-reveal border-t border-border/60 px-3 py-2 space-y-2 text-xs font-mono">
           {tool.context && <Section label="context">{tool.context}</Section>}
 
           {tool.preview && tool.status === "running" && (
             <Section label="streaming">
               {tool.preview}
-              <span className="inline-block w-1.5 h-3 align-middle bg-foreground/40 ml-0.5 animate-pulse" />
+              <span className="lex-stream-caret" />
             </Section>
           )}
 

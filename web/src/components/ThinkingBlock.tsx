@@ -19,7 +19,12 @@ export function ThinkingBlock({ text, defaultOpen = false }: ThinkingBlockProps)
   if (!text) return null;
 
   return (
-    <div className="rounded-md border border-primary/20 bg-primary/[0.03] overflow-hidden my-2">
+    <div
+      className={cn(
+        "lex-thinking-enter rounded-md border border-primary/20 bg-primary/[0.03] overflow-hidden my-2",
+        !open && "lex-running-surface",
+      )}
+    >
       <button
         type="button"
         onClick={() => setOpen(!open)}
@@ -39,7 +44,7 @@ export function ThinkingBlock({ text, defaultOpen = false }: ThinkingBlockProps)
         )}
       </button>
       {open && (
-        <div className="border-t border-primary/10 px-3 py-2">
+        <div className="lex-panel-reveal border-t border-primary/10 px-3 py-2">
           <pre className="whitespace-pre-wrap text-xs text-muted-foreground leading-relaxed font-sans">
             {text}
           </pre>
