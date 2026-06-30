@@ -33,7 +33,7 @@ T = TypeVar("T")
 
 DEFAULT_DB_PATH = get_hermes_home() / "state.db"
 
-SCHEMA_VERSION = 17
+SCHEMA_VERSION = 18
 
 # ---------------------------------------------------------------------------
 # WAL-compatibility fallback
@@ -305,6 +305,101 @@ CREATE TABLE IF NOT EXISTS projects (
 
 CREATE INDEX IF NOT EXISTS idx_projects_name ON projects(name);
 CREATE INDEX IF NOT EXISTS idx_projects_status ON projects(status);
+
+CREATE TABLE IF NOT EXISTS project_init_runs (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'INIT_READING',
+    started_at REAL NOT NULL,
+    updated_at REAL NOT NULL,
+    completed_at REAL,
+    summary TEXT DEFAULT '',
+    config_json TEXT DEFAULT '{}',
+    FOREIGN KEY (project_id) REFERENCES projects(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_project_init_runs_project
+    ON project_init_runs(project_id, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS project_sources (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    run_id TEXT,
+    path TEXT NOT NULL,
+    rel_path TEXT NOT NULL,
+    file_name TEXT NOT NULL,
+    ext TEXT DEFAULT '',
+    file_type TEXT DEFAULT '',
+    priority TEXT NOT NULL DEFAULT 'supporting',
+    reason TEXT DEFAULT '',
+    must_read_before_init INTEGER DEFAULT 0,
+    read_status TEXT NOT NULL DEFAULT 'pending',
+    read_method TEXT DEFAULT '',
+    size_bytes INTEGER DEFAULT 0,
+    mtime REAL DEFAULT 0,
+    sha1 TEXT DEFAULT '',
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL,
+    UNIQUE(project_id, rel_path),
+    FOREIGN KEY (project_id) REFERENCES projects(id),
+    FOREIGN KEY (run_id) REFERENCES project_init_runs(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_project_sources_project
+    ON project_sources(project_id, priority, read_status);
+
+CREATE TABLE IF NOT EXISTS project_source_digests (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    source_id TEXT NOT NULL,
+    run_id TEXT,
+    read_method TEXT DEFAULT '',
+    read_coverage TEXT NOT NULL DEFAULT 'partial',
+    confidence TEXT NOT NULL DEFAULT 'medium',
+    digest_json TEXT NOT NULL DEFAULT '{}',
+    created_by TEXT DEFAULT '',
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL,
+    FOREIGN KEY (project_id) REFERENCES projects(id),
+    FOREIGN KEY (source_id) REFERENCES project_sources(id),
+    FOREIGN KEY (run_id) REFERENCES project_init_runs(id)
+);
+
+CREATE TABLE IF NOT EXISTS project_external_facts (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    subject TEXT NOT NULL,
+    fact_key TEXT NOT NULL,
+    fact_value TEXT,
+    source_json TEXT DEFAULT '{}',
+    queried_at REAL NOT NULL,
+    expires_at REAL,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL,
+    FOREIGN KEY (project_id) REFERENCES projects(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_project_external_facts_project
+    ON project_external_facts(project_id, provider, subject);
+
+CREATE TABLE IF NOT EXISTS project_fact_conflicts (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    conflict_type TEXT NOT NULL,
+    subject TEXT DEFAULT '',
+    field TEXT DEFAULT '',
+    source_value TEXT,
+    external_value TEXT,
+    severity TEXT NOT NULL DEFAULT 'medium',
+    recommended_action TEXT DEFAULT '',
+    blocks_init INTEGER DEFAULT 0,
+    blocks_drafting INTEGER DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'open',
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL,
+    FOREIGN KEY (project_id) REFERENCES projects(id)
+);
 
 CREATE TABLE IF NOT EXISTS legal_workflow_runs (
     id TEXT PRIMARY KEY,
@@ -2918,6 +3013,136 @@ class SessionDB:
                 "ORDER BY started_at DESC LIMIT ?",
                 (project_id, limit),
             ).fetchall()
+        return [dict(r) for r in rows]
+
+    def create_project_init_run(
+        self,
+        project_id: str,
+        *,
+        status: str = "INIT_READING",
+        config: Optional[dict] = None,
+    ) -> str:
+        """Create a project initialization run and return its ID."""
+        import uuid as _uuid
+
+        run_id = f"init_{_uuid.uuid4().hex[:12]}"
+        now = time.time()
+
+        def _do(conn):
+            conn.execute(
+                """INSERT INTO project_init_runs
+                   (id, project_id, status, started_at, updated_at, config_json)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (
+                    run_id,
+                    project_id,
+                    status,
+                    now,
+                    now,
+                    json.dumps(config or {}, ensure_ascii=False),
+                ),
+            )
+
+        self._execute_write(_do)
+        return run_id
+
+    def update_project_init_run(self, run_id: str, **fields) -> bool:
+        """Update a project initialization run."""
+        allowed = {"status", "summary", "completed_at", "config_json"}
+        updates = {k: v for k, v in fields.items() if k in allowed}
+        if not updates:
+            return False
+        updates["updated_at"] = time.time()
+
+        set_clause = ", ".join(f"{k} = ?" for k in updates)
+        values = list(updates.values()) + [run_id]
+
+        def _do(conn):
+            conn.execute(
+                f"UPDATE project_init_runs SET {set_clause} WHERE id = ?",
+                values,
+            )
+
+        self._execute_write(_do)
+        return True
+
+    def upsert_project_sources(
+        self,
+        project_id: str,
+        run_id: str,
+        sources: list[dict],
+    ) -> int:
+        """Upsert project source inventory rows. Returns number processed."""
+        now = time.time()
+
+        def _do(conn):
+            for src in sources:
+                conn.execute(
+                    """INSERT INTO project_sources
+                       (id, project_id, run_id, path, rel_path, file_name, ext,
+                        file_type, priority, reason, must_read_before_init,
+                        read_status, read_method, size_bytes, mtime, sha1,
+                        created_at, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                       ON CONFLICT(project_id, rel_path) DO UPDATE SET
+                         run_id=excluded.run_id,
+                         path=excluded.path,
+                         file_name=excluded.file_name,
+                         ext=excluded.ext,
+                         file_type=excluded.file_type,
+                         priority=excluded.priority,
+                         reason=excluded.reason,
+                         must_read_before_init=excluded.must_read_before_init,
+                         read_status=excluded.read_status,
+                         read_method=excluded.read_method,
+                         size_bytes=excluded.size_bytes,
+                         mtime=excluded.mtime,
+                         sha1=excluded.sha1,
+                         updated_at=excluded.updated_at""",
+                    (
+                        src["id"],
+                        project_id,
+                        run_id,
+                        src["path"],
+                        src["rel_path"],
+                        src.get("file_name", ""),
+                        src.get("ext", ""),
+                        src.get("file_type", ""),
+                        src.get("priority", "supporting"),
+                        src.get("reason", ""),
+                        1 if src.get("must_read_before_init") else 0,
+                        src.get("read_status", "pending"),
+                        src.get("read_method", ""),
+                        int(src.get("size_bytes") or 0),
+                        float(src.get("mtime") or 0),
+                        src.get("sha1", ""),
+                        now,
+                        now,
+                    ),
+                )
+
+        self._execute_write(_do)
+        return len(sources)
+
+    def list_project_sources(
+        self,
+        project_id: str,
+        *,
+        run_id: str | None = None,
+        priority: str | None = None,
+    ) -> list:
+        """List project source inventory rows."""
+        query = "SELECT * FROM project_sources WHERE project_id = ?"
+        params: list[Any] = [project_id]
+        if run_id:
+            query += " AND run_id = ?"
+            params.append(run_id)
+        if priority:
+            query += " AND priority = ?"
+            params.append(priority)
+        query += " ORDER BY must_read_before_init DESC, priority ASC, rel_path ASC"
+        with self._lock:
+            rows = self._conn.execute(query, params).fetchall()
         return [dict(r) for r in rows]
 
     # ── Legal workflow management ──

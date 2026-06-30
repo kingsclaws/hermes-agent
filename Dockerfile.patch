@@ -183,7 +183,10 @@ RUN set -e; \
     cp tests/gateway/test_status.py /opt/lex-hermes/tests/gateway/test_status.py; \
     cp tests/gateway/test_kanban_notifier.py /opt/hermes/tests/gateway/test_kanban_notifier.py; \
     cp tests/gateway/test_kanban_notifier.py /opt/lex-hermes/tests/gateway/test_kanban_notifier.py; \
+    cp tests/test_project_init_workflow.py /opt/hermes/tests/test_project_init_workflow.py; \
+    cp tests/test_project_init_workflow.py /opt/lex-hermes/tests/test_project_init_workflow.py; \
     cp hermes_state.py /opt/hermes/hermes_state.py; \
+    cp hermes_state.py /opt/lex-hermes/hermes_state.py; \
     \
     find /opt/lexitool/lexitool/__pycache__ -name '*.pyc' -delete 2>/dev/null; \
     find /opt/hermes/vendor/lexitool/lexitool/__pycache__ -name '*.pyc' -delete 2>/dev/null; \
@@ -199,6 +202,7 @@ RUN set -e; \
       /opt/hermes/tui_gateway/server.py /opt/lex-hermes/tui_gateway/server.py \
       /opt/hermes/run_agent.py /opt/lex-hermes/run_agent.py \
       /opt/hermes/cli.py /opt/lex-hermes/cli.py \
+      /opt/hermes/hermes_state.py /opt/lex-hermes/hermes_state.py \
       /opt/hermes/hermes_cli/service_manager.py /opt/lex-hermes/hermes_cli/service_manager.py \
       /opt/hermes/hermes_cli/project_commands.py /opt/lex-hermes/hermes_cli/project_commands.py \
       /opt/hermes/tools/kanban_toolset.py /opt/lex-hermes/tools/kanban_toolset.py \
@@ -219,6 +223,7 @@ RUN set -e; \
       cli.py \
       run_agent.py \
       toolsets.py \
+      hermes_state.py \
       hermes_cli/main.py \
       hermes_cli/backoffice.py \
       hermes_cli/plugins.py \
@@ -247,6 +252,7 @@ RUN set -e; \
       tests/test_lexitool_ocr_fallback.py \
       tests/test_legal_harness_toolsets.py \
       tests/test_lex_master_route.py \
+      tests/test_project_init_workflow.py \
       tests/tools/test_kanban_swarm_toolset.py \
       tests/plugins/test_backoffice_issue_relay.py \
       tests/plugins/test_legal_drafting_gate.py \
