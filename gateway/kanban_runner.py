@@ -21,8 +21,6 @@ from gateway.session import SessionSource
 
 logger = logging.getLogger(__name__)
 
-import gateway.run as _gw
-
 
 class KanbanMixin:
     """Kanban board management methods for GatewayRunner."""

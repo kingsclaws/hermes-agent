@@ -11,7 +11,9 @@ FROM ${BASE_IMAGE}
 ENV HERMES_AUTO_GATEWAY=1
 ENV HERMES_AUTO_GATEWAY_PROFILES=lex-master
 ENV HERMES_PROJECTS_DB_PATH=/root/.hermes/state.db
-ENV PATH=/opt/hermes/.venv/bin:/opt/hermes/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ENV HERMES_RUN_AS_ROOT=1
+ENV HERMES_DOCKER_EXEC_AS_ROOT=1
+ENV PATH=/command:/opt/hermes/bin:/opt/hermes/.venv/bin:/opt/data/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 ENV VIRTUAL_ENV=/opt/hermes/.venv
 ENV HERMES_WEB_DIST=/opt/hermes/hermes_cli/web_dist
 
@@ -59,6 +61,7 @@ RUN set -e; \
     cp hermes_cli/tools_config.py /opt/hermes/hermes_cli/tools_config.py; \
     cp hermes_cli/commands.py /opt/hermes/hermes_cli/commands.py; \
     cp hermes_cli/kanban.py /opt/hermes/hermes_cli/kanban.py; \
+    cp hermes_cli/kanban_db.py /opt/hermes/hermes_cli/kanban_db.py; \
     cp hermes_cli/web_server.py /opt/hermes/hermes_cli/web_server.py; \
     cp hermes_cli/container_boot.py /opt/hermes/hermes_cli/container_boot.py; \
     cp hermes_cli/service_manager.py /opt/hermes/hermes_cli/service_manager.py; \
@@ -66,6 +69,7 @@ RUN set -e; \
     cp gateway/agent_cache.py /opt/hermes/gateway/agent_cache.py; \
     cp gateway/agent_execution.py /opt/hermes/gateway/agent_execution.py; \
     cp gateway/message_handler.py /opt/hermes/gateway/message_handler.py; \
+    cp gateway/kanban_runner.py /opt/hermes/gateway/kanban_runner.py; \
     cp gateway/slash_commands.py /opt/hermes/gateway/slash_commands.py; \
     cp gateway/status.py /opt/hermes/gateway/status.py; \
     mkdir -p /opt/hermes/plugins/backoffice-issue-relay; \
@@ -99,6 +103,7 @@ RUN set -e; \
     cp hermes_cli/tools_config.py /opt/lex-hermes/hermes_cli/tools_config.py; \
     cp hermes_cli/commands.py /opt/lex-hermes/hermes_cli/commands.py; \
     cp hermes_cli/kanban.py /opt/lex-hermes/hermes_cli/kanban.py; \
+    cp hermes_cli/kanban_db.py /opt/lex-hermes/hermes_cli/kanban_db.py; \
     cp hermes_cli/web_server.py /opt/lex-hermes/hermes_cli/web_server.py; \
     cp hermes_cli/container_boot.py /opt/lex-hermes/hermes_cli/container_boot.py; \
     cp hermes_cli/service_manager.py /opt/lex-hermes/hermes_cli/service_manager.py; \
@@ -106,6 +111,7 @@ RUN set -e; \
     cp gateway/agent_cache.py /opt/lex-hermes/gateway/agent_cache.py; \
     cp gateway/agent_execution.py /opt/lex-hermes/gateway/agent_execution.py; \
     cp gateway/message_handler.py /opt/lex-hermes/gateway/message_handler.py; \
+    cp gateway/kanban_runner.py /opt/lex-hermes/gateway/kanban_runner.py; \
     cp gateway/slash_commands.py /opt/lex-hermes/gateway/slash_commands.py; \
     cp gateway/status.py /opt/lex-hermes/gateway/status.py; \
     mkdir -p /opt/lex-hermes/plugins/backoffice-issue-relay; \
@@ -126,7 +132,7 @@ RUN set -e; \
     cp web/src/lib/dashboard-flags.ts /opt/lex-hermes/web/src/lib/dashboard-flags.ts; \
     cp web/src/pages/ChatPage.tsx /opt/lex-hermes/web/src/pages/ChatPage.tsx; \
     \
-    mkdir -p /opt/hermes/.hermes-project/roles /opt/hermes/tests /opt/lex-hermes/tests; \
+    mkdir -p /opt/hermes/.hermes-project/roles /opt/hermes/tests /opt/hermes/tests/tools /opt/lex-hermes/tests /opt/lex-hermes/tests/tools; \
     cp .hermes-project/roles/hpswarm-coordinator.md /opt/hermes/.hermes-project/roles/hpswarm-coordinator.md; \
     cp .hermes-project/roles/hpswarm-drafter.md /opt/hermes/.hermes-project/roles/hpswarm-drafter.md; \
     cp .hermes-project/roles/hpswarm-reviewer-content.md /opt/hermes/.hermes-project/roles/hpswarm-reviewer-content.md; \
@@ -141,6 +147,8 @@ RUN set -e; \
     cp tests/test_lex_master_route.py /opt/lex-hermes/tests/test_lex_master_route.py; \
     cp tests/test_lexitool_ocr_fallback.py /opt/hermes/tests/test_lexitool_ocr_fallback.py; \
     cp tests/test_lexitool_ocr_fallback.py /opt/lex-hermes/tests/test_lexitool_ocr_fallback.py; \
+    cp tests/tools/test_kanban_swarm_toolset.py /opt/hermes/tests/tools/test_kanban_swarm_toolset.py; \
+    cp tests/tools/test_kanban_swarm_toolset.py /opt/lex-hermes/tests/tools/test_kanban_swarm_toolset.py; \
     mkdir -p /opt/hermes/tests/plugins /opt/lex-hermes/tests/plugins; \
     cp tests/plugins/test_backoffice_issue_relay.py /opt/hermes/tests/plugins/test_backoffice_issue_relay.py; \
     cp tests/plugins/test_backoffice_issue_relay.py /opt/lex-hermes/tests/plugins/test_backoffice_issue_relay.py; \
@@ -149,6 +157,8 @@ RUN set -e; \
     mkdir -p /opt/hermes/tests/gateway /opt/lex-hermes/tests/gateway; \
     cp tests/gateway/test_status.py /opt/hermes/tests/gateway/test_status.py; \
     cp tests/gateway/test_status.py /opt/lex-hermes/tests/gateway/test_status.py; \
+    cp tests/gateway/test_kanban_notifier.py /opt/hermes/tests/gateway/test_kanban_notifier.py; \
+    cp tests/gateway/test_kanban_notifier.py /opt/lex-hermes/tests/gateway/test_kanban_notifier.py; \
     cp hermes_state.py /opt/hermes/hermes_state.py; \
     \
     find /opt/lexitool/lexitool/__pycache__ -name '*.pyc' -delete 2>/dev/null; \
@@ -160,6 +170,7 @@ RUN set -e; \
       /opt/hermes/hermes_cli/container_boot.py /opt/lex-hermes/hermes_cli/container_boot.py \
       /opt/hermes/hermes_cli/commands.py /opt/lex-hermes/hermes_cli/commands.py \
       /opt/hermes/hermes_cli/kanban.py /opt/lex-hermes/hermes_cli/kanban.py \
+      /opt/hermes/hermes_cli/kanban_db.py /opt/lex-hermes/hermes_cli/kanban_db.py \
       /opt/hermes/hermes_cli/web_server.py /opt/lex-hermes/hermes_cli/web_server.py \
       /opt/hermes/cli.py /opt/lex-hermes/cli.py \
       /opt/hermes/hermes_cli/service_manager.py /opt/lex-hermes/hermes_cli/service_manager.py \
@@ -170,6 +181,7 @@ RUN set -e; \
       /opt/hermes/gateway/agent_cache.py /opt/lex-hermes/gateway/agent_cache.py \
       /opt/hermes/gateway/agent_execution.py /opt/lex-hermes/gateway/agent_execution.py \
       /opt/hermes/gateway/message_handler.py /opt/lex-hermes/gateway/message_handler.py \
+      /opt/hermes/gateway/kanban_runner.py /opt/lex-hermes/gateway/kanban_runner.py \
       /opt/hermes/gateway/slash_commands.py /opt/lex-hermes/gateway/slash_commands.py \
       /opt/hermes/gateway/status.py /opt/lex-hermes/gateway/status.py; \
     /opt/hermes/.venv/bin/python -c "import lexitool.edit_ops, lexitool.markup, lexitool.ocr, lexitool.ocr_cli, lexitool.openxml_opc, lexitool.review_detailed; print('All modules import OK')"; \
@@ -189,21 +201,25 @@ RUN set -e; \
       hermes_cli/commands.py \
       hermes_cli/tools_config.py \
       hermes_cli/kanban.py \
+      hermes_cli/kanban_db.py \
       hermes_cli/web_server.py \
       hermes_cli/container_boot.py \
       hermes_cli/service_manager.py \
       hermes_cli/project_commands.py \
       gateway/agent_cache.py \
       gateway/agent_execution.py \
+      gateway/kanban_runner.py \
       gateway/message_handler.py \
       gateway/slash_commands.py \
       gateway/status.py \
       tests/test_lexitool_ocr_fallback.py \
       tests/test_legal_harness_toolsets.py \
       tests/test_lex_master_route.py \
+      tests/tools/test_kanban_swarm_toolset.py \
       tests/plugins/test_backoffice_issue_relay.py \
       tests/plugins/test_legal_drafting_gate.py \
       plugins/backoffice-issue-relay/__init__.py \
       plugins/legal-drafting-gate/__init__.py \
-      tests/gateway/test_status.py; \
+      tests/gateway/test_status.py \
+      tests/gateway/test_kanban_notifier.py; \
     rm -rf /tmp/lex-hermes-patch

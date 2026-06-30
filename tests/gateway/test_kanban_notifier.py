@@ -1,4 +1,5 @@
 import asyncio
+import importlib
 import threading
 from types import SimpleNamespace
 from pathlib import Path
@@ -9,6 +10,11 @@ from gateway.config import Platform
 from gateway.run import GatewayRunner
 from gateway.session import SessionSource
 from hermes_cli import kanban_db as kb
+
+
+def test_kanban_runner_imports_without_gateway_run_cycle():
+    module = importlib.import_module("gateway.kanban_runner")
+    assert hasattr(module, "KanbanMixin")
 
 
 class RecordingAdapter:
