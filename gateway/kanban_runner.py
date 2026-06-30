@@ -617,25 +617,12 @@ class KanbanMixin:
         """Inject a synthetic Coordinator turn for an internal session subscription."""
         if not session_id:
             return
-        store = getattr(self, "session_store", None)
-        if store is None:
-            logger.debug("kanban session-wake: no session_store for %s", session_id)
-            return
-
-        source = None
-        try:
-            store._ensure_loaded()
-            with store._lock:  # noqa: SLF001 - same gateway-internal access as _inject_swarm_wake
-                for entry in store._entries.values():  # noqa: SLF001
-                    if getattr(entry, "session_id", None) == session_id:
-                        source = entry.origin
-                        break
-        except Exception as exc:
-            logger.debug("kanban session-wake: store lookup failed for %s: %s", session_id, exc)
-            return
+        source = self._resolve_coordinator_wake_source(
+            session_id,
+            prefix="kanban session-wake",
+        )
         if source is None:
-            logger.debug("kanban session-wake: session %s not hosted here", session_id)
-            return
+            raise RuntimeError(f"cannot resolve coordinator session {session_id}")
 
         kind = getattr(event, "kind", None) or (event.get("kind") if isinstance(event, dict) else "")
         payload = getattr(event, "payload", None) or (event.get("payload") if isinstance(event, dict) else {}) or {}
@@ -694,6 +681,62 @@ class KanbanMixin:
             task_id, kind, session_id,
         )
         await self._handle_message(synth_event)
+
+    def _resolve_coordinator_wake_source(
+        self,
+        session_id: str,
+        *,
+        prefix: str,
+    ) -> Optional[SessionSource]:
+        """Return a routing source bound to an existing coordinator session.
+
+        Gateway-hosted messaging sessions already have a SessionEntry whose
+        origin can be reused. CLI/TUI/WebUI coordinator sessions often are not
+        hosted by this gateway process, though their kanban task still records
+        ``session_id``. In that case create a private local wake channel and
+        switch it to the target session ID, mirroring `/resume`/handoff. The
+        synthetic turn is then persisted into the original coordinator
+        transcript instead of being silently dropped.
+        """
+        store = getattr(self, "session_store", None)
+        if store is None:
+            logger.debug("%s: no session_store for %s", prefix, session_id)
+            return None
+
+        try:
+            store._ensure_loaded()
+            with store._lock:  # noqa: SLF001 - gateway-internal session snapshot
+                for entry in store._entries.values():  # noqa: SLF001
+                    if getattr(entry, "session_id", None) == session_id:
+                        source = getattr(entry, "origin", None)
+                        if source is not None:
+                            return source
+                        break
+        except Exception as exc:
+            logger.debug("%s: store lookup failed for %s: %s", prefix, session_id, exc)
+            return None
+
+        source = SessionSource(
+            platform=Platform.LOCAL,
+            chat_id=f"kanban-wake:{session_id}",
+            chat_name="Kanban wake",
+            chat_type="dm",
+            user_id="kanban",
+            user_name="Kanban",
+        )
+        try:
+            entry = store.get_or_create_session(source)
+            session_key = getattr(entry, "session_key", None)
+            if not session_key:
+                session_key = store._generate_session_key(source)  # noqa: SLF001
+            switched = store.switch_session(session_key, session_id)
+        except Exception as exc:
+            logger.debug("%s: fallback bind failed for %s: %s", prefix, session_id, exc)
+            return None
+        if switched is None:
+            logger.debug("%s: fallback bind returned no entry for %s", prefix, session_id)
+            return None
+        return getattr(switched, "origin", None) or source
 
     async def _broadcast_to_dashboard(
         self, session_id: str, kind: str, ev_payload: dict, task_row: dict,
@@ -890,28 +933,13 @@ class KanbanMixin:
         session_id = wake.get("session_id") or ""
         if not session_id:
             return
-        store = getattr(self, "session_store", None)
-        if store is None:
-            return
-        source = None
-        try:
-            store._ensure_loaded()
-            with store._lock:  # noqa: SLF001 — snapshot under lock (mirrors run.py)
-                for entry in store._entries.values():  # noqa: SLF001
-                    if getattr(entry, "session_id", None) == session_id:
-                        # Routing source lives on entry.origin (Optional[SessionSource]),
-                        # NOT entry.source — SessionEntry has no `source` attribute, so
-                        # the old read raised AttributeError that the except below
-                        # swallowed as "store lookup failed", dropping every wake.
-                        # Mirrors run.py:2341 (source = entry.origin).
-                        source = entry.origin
-                        break
-        except Exception as exc:
-            logger.debug("swarm session-wake: store lookup failed for %s: %s", session_id, exc)
-            return
+        source = self._resolve_coordinator_wake_source(
+            session_id,
+            prefix="swarm session-wake",
+        )
         if source is None:
             logger.debug(
-                "swarm session-wake: session %s not hosted here; dropping wake for %s",
+                "swarm session-wake: cannot bind session %s; dropping wake for %s",
                 session_id, wake.get("task_id"),
             )
             return

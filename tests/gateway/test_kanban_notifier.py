@@ -71,6 +71,41 @@ class FakeSessionStore:
         return None
 
 
+class SwitchableSessionStore:
+    """Session store fake for coordinator sessions not hosted in memory yet."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._entries = {}
+        self.switched_to = None
+
+    def _ensure_loaded(self):
+        return None
+
+    def get_or_create_session(self, source):
+        session_key = f"agent:main:{source.platform.value}:dm:{source.chat_id}"
+        entry = SimpleNamespace(
+            session_key=session_key,
+            session_id="fresh-wake-session",
+            origin=source,
+        )
+        self._entries[session_key] = entry
+        return entry
+
+    def switch_session(self, session_key, target_session_id):
+        old = self._entries.get(session_key)
+        if old is None:
+            return None
+        entry = SimpleNamespace(
+            session_key=session_key,
+            session_id=target_session_id,
+            origin=old.origin,
+        )
+        self._entries[session_key] = entry
+        self.switched_to = target_session_id
+        return entry
+
+
 def _create_completed_subscription(summary="done once"):
     conn = kb.connect()
     try:
@@ -246,6 +281,54 @@ def test_kanban_notifier_wakes_internal_session_without_adapter(tmp_path, monkey
     assert "kanban 自动通知" in injected[0].text
     assert tid in injected[0].text
     assert "swarm_task_collect" in injected[0].text
+
+
+def test_kanban_notifier_binds_unhosted_internal_session(tmp_path, monkeypatch):
+    """A completed kanban task must wake old CLI/TUI/WebUI coordinator sessions.
+
+    The coordinator session may exist only in state.db, not in the gateway's
+    in-memory SessionStore. The notifier should create a local wake binding
+    and switch it to the recorded session_id instead of dropping the event.
+    """
+    db_path = tmp_path / "session-wake-unhosted.db"
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(db_path))
+    kb.init_db()
+
+    conn = kb.connect()
+    try:
+        tid = kb.create_task(
+            conn,
+            title="unhosted session wake",
+            assignee="worker",
+            workspace_kind="dir",
+            workspace_path=str(tmp_path),
+            session_id="coord-session-unhosted",
+        )
+        assert kb.subscribe_session("coord-session-unhosted", tid)
+        kb.complete_task(conn, tid, summary="worker finished")
+    finally:
+        conn.close()
+
+    runner = GatewayRunner.__new__(GatewayRunner)
+    runner._running = True
+    runner.adapters = {}
+    runner._kanban_sub_fail_counts = {}
+    runner.session_store = SwitchableSessionStore()
+    injected = []
+
+    async def fake_handle_message(event):
+        injected.append(event)
+        return "ok"
+
+    runner._handle_message = fake_handle_message
+
+    asyncio.run(_run_one_notifier_tick(monkeypatch, runner))
+
+    assert runner.session_store.switched_to == "coord-session-unhosted"
+    assert len(injected) == 1
+    assert injected[0].source.platform == Platform.LOCAL
+    assert "kanban 自动通知" in injected[0].text
+    assert tid in injected[0].text
 
 
 def test_notifier_redelivers_same_kind_on_dispatch_cycle(tmp_path, monkeypatch):
