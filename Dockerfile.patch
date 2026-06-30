@@ -83,6 +83,7 @@ RUN set -e; \
     mkdir -p /opt/hermes/web/src/components /opt/hermes/web/src/contexts /opt/hermes/web/src/hooks /opt/hermes/web/src/lib /opt/hermes/web/src/pages; \
     cp -a hermes_cli/web_dist /opt/hermes/hermes_cli/; \
     cp web/src/App.tsx /opt/hermes/web/src/App.tsx; \
+    cp web/src/components/ChatMessageList.tsx /opt/hermes/web/src/components/ChatMessageList.tsx; \
     cp web/src/components/ChatTopBar.tsx /opt/hermes/web/src/components/ChatTopBar.tsx; \
     cp web/src/components/Markdown.tsx /opt/hermes/web/src/components/Markdown.tsx; \
     cp web/src/components/NativeChatSurface.tsx /opt/hermes/web/src/components/NativeChatSurface.tsx; \
@@ -126,6 +127,7 @@ RUN set -e; \
     mkdir -p /opt/lex-hermes/web/src/components /opt/lex-hermes/web/src/contexts /opt/lex-hermes/web/src/hooks /opt/lex-hermes/web/src/lib /opt/lex-hermes/web/src/pages; \
     cp -a hermes_cli/web_dist /opt/lex-hermes/hermes_cli/; \
     cp web/src/App.tsx /opt/lex-hermes/web/src/App.tsx; \
+    cp web/src/components/ChatMessageList.tsx /opt/lex-hermes/web/src/components/ChatMessageList.tsx; \
     cp web/src/components/ChatTopBar.tsx /opt/lex-hermes/web/src/components/ChatTopBar.tsx; \
     cp web/src/components/Markdown.tsx /opt/lex-hermes/web/src/components/Markdown.tsx; \
     cp web/src/components/NativeChatSurface.tsx /opt/lex-hermes/web/src/components/NativeChatSurface.tsx; \

@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useLayoutEffect, useRef } from "react";
 import { LoaderCircle, Wrench } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { ChatBubble } from "@/components/ChatBubble";
@@ -31,14 +31,58 @@ export function ChatMessageList({
   kanbanBatchSummary,
 }: ChatMessageListProps) {
   const scrollRef = useRef<HTMLDivElement | null>(null);
+  const bottomRef = useRef<HTMLDivElement | null>(null);
+  const previousMessageCountRef = useRef(0);
 
-  // Auto-scroll on new content
-  useEffect(() => {
+  const scrollToBottom = (behavior: ScrollBehavior = "auto") => {
     const el = scrollRef.current;
-    if (el) {
-      el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
+    if (!el) return;
+    bottomRef.current?.scrollIntoView({ block: "end", behavior });
+    for (const target of scrollTargets(el)) {
+      target.scrollTo({ top: target.scrollHeight, behavior });
     }
-  }, [messages, tools, thinkingBlocks]);
+  };
+
+  const scrollTargets = (start: HTMLElement): HTMLElement[] => {
+    const targets: HTMLElement[] = [start];
+    let node = start.parentElement;
+    while (node && node !== document.body && node !== document.documentElement) {
+      const style = window.getComputedStyle(node);
+      if (
+        /(auto|scroll)/.test(style.overflowY) &&
+        node.scrollHeight > node.clientHeight + 8
+      ) {
+        targets.push(node);
+      }
+      node = node.parentElement;
+    }
+    return targets;
+  };
+
+  // Restored sessions can add hundreds of messages at once. Scroll before
+  // paint, then repeat across two frames after layout/fonts/iframes settle.
+  useLayoutEffect(() => {
+    if (messages.length === 0) return;
+    const previousCount = previousMessageCountRef.current;
+    const restoredHistory = messages.length > previousCount + 1;
+    previousMessageCountRef.current = messages.length;
+    const behavior: ScrollBehavior = restoredHistory ? "auto" : "smooth";
+    scrollToBottom(restoredHistory ? "auto" : behavior);
+    const raf1 = requestAnimationFrame(() => {
+      scrollToBottom(behavior);
+      requestAnimationFrame(() => scrollToBottom(behavior));
+    });
+    const timeout = window.setTimeout(() => scrollToBottom("auto"), 150);
+    return () => {
+      cancelAnimationFrame(raf1);
+      window.clearTimeout(timeout);
+    };
+  }, [messages.length]);
+
+  useEffect(() => {
+    if (messages.length === 0) return;
+    scrollToBottom(running ? "smooth" : "auto");
+  }, [messages, tools, thinkingBlocks, running]);
 
   if (messages.length === 0) {
     return (
@@ -125,6 +169,7 @@ export function ChatMessageList({
           </div>
         </div>
       )}
+      <div ref={bottomRef} aria-hidden className="h-px" />
     </div>
   );
 }
