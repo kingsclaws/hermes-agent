@@ -1,10 +1,13 @@
 import asyncio
+import threading
+from types import SimpleNamespace
 from pathlib import Path
 
 import pytest
 
 from gateway.config import Platform
 from gateway.run import GatewayRunner
+from gateway.session import SessionSource
 from hermes_cli import kanban_db as kb
 
 
@@ -42,6 +45,24 @@ def _make_runner(adapter):
     runner.adapters = {Platform.TELEGRAM: adapter}
     runner._kanban_sub_fail_counts = {}
     return runner
+
+
+class FakeSessionStore:
+    def __init__(self, session_id: str):
+        self._lock = threading.Lock()
+        self._entries = {
+            "entry-1": SimpleNamespace(
+                session_id=session_id,
+                origin=SessionSource(
+                    platform=Platform.LOCAL,
+                    chat_id="cli",
+                    user_id="tester",
+                ),
+            )
+        }
+
+    def _ensure_loaded(self):
+        return None
 
 
 def _create_completed_subscription(summary="done once"):
@@ -172,6 +193,53 @@ def test_kanban_notifier_rewinds_claim_on_send_exception(tmp_path, monkeypatch):
     # still returns the event for retry on the next tick.
     assert adapter.attempts >= 1, "send should have been attempted at least once"
     assert [ev.kind for ev in _unseen_terminal_events(tid)] == ["completed"]
+
+
+def test_kanban_notifier_wakes_internal_session_without_adapter(tmp_path, monkeypatch):
+    """Internal `platform=session` subscriptions wake CLI/TUI/WebUI sessions.
+
+    Swarm coordinators normally do not have a Telegram/Weixin adapter tied to
+    the active chat. The notifier must therefore process session subscriptions
+    even when no messaging adapter is connected.
+    """
+    db_path = tmp_path / "session-wake.db"
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(db_path))
+    kb.init_db()
+
+    conn = kb.connect()
+    try:
+        tid = kb.create_task(
+            conn,
+            title="session wake",
+            assignee="worker",
+            workspace_kind="dir",
+            workspace_path=str(tmp_path),
+            session_id="coord-session-1",
+        )
+        assert kb.subscribe_session("coord-session-1", tid)
+        kb.complete_task(conn, tid, summary="worker finished")
+    finally:
+        conn.close()
+
+    runner = GatewayRunner.__new__(GatewayRunner)
+    runner._running = True
+    runner.adapters = {}
+    runner._kanban_sub_fail_counts = {}
+    runner.session_store = FakeSessionStore("coord-session-1")
+    injected = []
+
+    async def fake_handle_message(event):
+        injected.append(event)
+        return "ok"
+
+    runner._handle_message = fake_handle_message
+
+    asyncio.run(_run_one_notifier_tick(monkeypatch, runner))
+
+    assert len(injected) == 1
+    assert "kanban 自动通知" in injected[0].text
+    assert tid in injected[0].text
+    assert "swarm_task_collect" in injected[0].text
 
 
 def test_notifier_redelivers_same_kind_on_dispatch_cycle(tmp_path, monkeypatch):

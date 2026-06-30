@@ -103,6 +103,31 @@ DEFAULT_COLUMNS = [
     ("col_done", "Done", 3, 0),
 ]
 
+LEGAL_FILE_READING_PROTOCOL = """
+
+## Mandatory Legal File-Reading Protocol
+This is a legal evidence/review task. Filename matching is not evidence.
+
+Before reaching any conclusion about whether a checklist item is answered,
+the Worker must:
+1. Enumerate every file in the relevant response/material directory, including
+   files extracted from archives and nested folders.
+2. Open and read each file's actual content with an appropriate tool:
+   - DOCX: lex_read
+   - PDF/scanned PDF/image: lex_ocr or the configured OCR fallback
+   - XLS/XLSX/CSV: terminal/python spreadsheet inspection
+   - TXT/MD/HTML: read_file or terminal
+3. Produce a File Evidence Ledger in the completion summary/metadata covering:
+   file path, tool used, content actually observed, related checklist/Q number,
+   and conclusion.
+4. Mark a file as unread only after recording the attempted tool and the
+   concrete failure reason.
+
+Forbidden: concluding from file name, file path, extension, or keyword matching
+alone. If a file name suggests one thing but content may answer another legal
+question, read the content first.
+"""
+
 
 # ── DB helpers ─────────────────────────────────────────────────────────────────
 
@@ -856,6 +881,7 @@ def kanban_task_create_handler(args: dict, **kwargs) -> str:
 
         priority = int(args.get("priority", 0) or 0)
         description = args.get("description", "").strip()
+        description_with_protocol = (description + LEGAL_FILE_READING_PROTOCOL).strip()
         gates_text = ""
         if gates:
             gates_text = (
@@ -864,7 +890,7 @@ def kanban_task_create_handler(args: dict, **kwargs) -> str:
                 + "\n\nThese gates are coordination hints. Complete this assigned task with the canonical kanban tools (`kanban_complete` or `kanban_block`)."
             )
         body = (
-            description
+            description_with_protocol
             + gates_text
             + f"\n\n## Project path\n{Path(project_path).resolve()}\n"
         ).strip()
@@ -888,6 +914,8 @@ def kanban_task_create_handler(args: dict, **kwargs) -> str:
                 session_id=session_id,
                 board=meta["slug"],
             )
+            if session_id:
+                kb.subscribe_session(session_id, task_id, board=meta["slug"])
             task = kb.get_task(conn, task_id)
         finally:
             conn.close()

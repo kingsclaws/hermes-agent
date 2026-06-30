@@ -8014,6 +8014,31 @@ def _discover_dashboard_plugins() -> list:
                 slots: List[str] = []
                 if isinstance(slots_src, list):
                     slots = [s for s in slots_src if isinstance(s, str) and s]
+                entry = data.get("entry", "dist/index.js")
+                css = data.get("css")
+                if isinstance(entry, str) and entry:
+                    entry_path = (child / "dashboard" / entry).resolve()
+                    dashboard_root = (child / "dashboard").resolve()
+                    try:
+                        entry_path.relative_to(dashboard_root)
+                    except ValueError:
+                        _log.warning("Plugin %s: refusing entry outside dashboard dir: %r", name, entry)
+                        continue
+                    if not entry_path.is_file():
+                        _log.warning("Plugin %s: dashboard entry missing: %s", name, entry_path)
+                        continue
+                if isinstance(css, str) and css:
+                    css_path = (child / "dashboard" / css).resolve()
+                    dashboard_root = (child / "dashboard").resolve()
+                    try:
+                        css_path.relative_to(dashboard_root)
+                    except ValueError:
+                        _log.warning("Plugin %s: refusing css outside dashboard dir: %r", name, css)
+                        css = None
+                    else:
+                        if not css_path.is_file():
+                            _log.warning("Plugin %s: dashboard css missing: %s", name, css_path)
+                            css = None
                 # Validate ``api`` at discovery time so the value cached
                 # on the plugin entry is already safe to feed into the
                 # importer.  An attacker-controlled manifest can name
@@ -8039,8 +8064,8 @@ def _discover_dashboard_plugins() -> list:
                     "version": data.get("version", "0.0.0"),
                     "tab": tab_info,
                     "slots": slots,
-                    "entry": data.get("entry", "dist/index.js"),
-                    "css": data.get("css"),
+                    "entry": entry,
+                    "css": css,
                     "has_api": bool(safe_api),
                     "source": source,
                     "_dir": str(dashboard_dir),

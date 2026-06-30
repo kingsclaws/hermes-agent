@@ -6508,7 +6508,7 @@ def subscribe_session(session_id: str, task_id: str, board: str = None) -> bool:
         conn.execute(
             """INSERT OR IGNORE INTO kanban_notify_subs
                (task_id, platform, chat_id, thread_id, created_at)
-               VALUES (?, 'session', ?, NULL, ?)""",
+               VALUES (?, 'session', ?, '', ?)""",
             (task_id, session_id, now),
         )
         conn.commit()

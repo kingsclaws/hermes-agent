@@ -91,9 +91,11 @@ class KanbanMixin:
                         getattr(platform, "value", str(platform)).lower()
                         for platform in self.adapters.keys()
                     }
-                    if not active_platforms:
-                        logger.debug("kanban notifier: no connected adapters; skipping tick")
-                        return deliveries
+                    # `platform=session` is an internal subscription used by
+                    # swarm_task_create to wake the originating CLI/TUI/WebUI
+                    # coordinator session. It does not require a messaging
+                    # adapter to be connected.
+                    active_platforms.add("session")
 
                     # Enumerate every board on disk, but poll each resolved DB
                     # path once. Multiple slugs can point at the same DB when
@@ -191,11 +193,45 @@ class KanbanMixin:
                     try:
                         plat = _Platform(platform_str)
                     except ValueError:
-                        # Unknown platform string; skip and advance cursor so
-                        # we don't replay forever.
-                        await asyncio.to_thread(
-                            self._kanban_advance, sub, d["cursor"], board_slug,
-                        )
+                        if platform_str != "session":
+                            # Unknown platform string; skip and advance cursor so
+                            # we don't replay forever.
+                            await asyncio.to_thread(
+                                self._kanban_advance, sub, d["cursor"], board_slug,
+                            )
+                            continue
+                        plat = None
+                    if platform_str == "session":
+                        for ev in d["events"]:
+                            try:
+                                await self._inject_kanban_session_wake(
+                                    event=ev,
+                                    task=task,
+                                    session_id=sub["chat_id"],
+                                    board=board_slug,
+                                )
+                            except Exception as exc:
+                                logger.debug(
+                                    "kanban notifier: session wake for %s failed: %s",
+                                    sub["task_id"], exc,
+                                )
+                                await asyncio.to_thread(
+                                    self._kanban_rewind,
+                                    sub,
+                                    d["cursor"],
+                                    d.get("old_cursor", 0),
+                                    board_slug,
+                                )
+                                break
+                        else:
+                            await asyncio.to_thread(
+                                self._kanban_advance, sub, d["cursor"], board_slug,
+                            )
+                            task_terminal = task and task.status in {"done", "archived"}
+                            if task_terminal:
+                                await asyncio.to_thread(
+                                    self._kanban_unsub, sub, board_slug,
+                                )
                         continue
                     adapter = self.adapters.get(plat)
                     if adapter is None:
@@ -571,6 +607,95 @@ class KanbanMixin:
             await self._broadcast_to_dashboard(session_id, kind, ev_payload, task_row)
         except Exception:
             logger.debug("kanban notifier: dashboard broadcast failed for %s", session_id)
+
+    async def _inject_kanban_session_wake(
+        self,
+        *,
+        event: Any,
+        task: Any,
+        session_id: str,
+        board: Optional[str] = None,
+    ) -> None:
+        """Inject a synthetic Coordinator turn for an internal session subscription."""
+        if not session_id:
+            return
+        store = getattr(self, "session_store", None)
+        if store is None:
+            logger.debug("kanban session-wake: no session_store for %s", session_id)
+            return
+
+        source = None
+        try:
+            store._ensure_loaded()
+            with store._lock:  # noqa: SLF001 - same gateway-internal access as _inject_swarm_wake
+                for entry in store._entries.values():  # noqa: SLF001
+                    if getattr(entry, "session_id", None) == session_id:
+                        source = entry.origin
+                        break
+        except Exception as exc:
+            logger.debug("kanban session-wake: store lookup failed for %s: %s", session_id, exc)
+            return
+        if source is None:
+            logger.debug("kanban session-wake: session %s not hosted here", session_id)
+            return
+
+        kind = getattr(event, "kind", None) or (event.get("kind") if isinstance(event, dict) else "")
+        payload = getattr(event, "payload", None) or (event.get("payload") if isinstance(event, dict) else {}) or {}
+        task_id = getattr(task, "id", "") or (task.get("id") if isinstance(task, dict) else "")
+        title = getattr(task, "title", "") or (task.get("title") if isinstance(task, dict) else "") or task_id
+        status = getattr(task, "status", "") or (task.get("status") if isinstance(task, dict) else "")
+        project_path = (
+            getattr(task, "workspace_path", "")
+            or (task.get("workspace_path") if isinstance(task, dict) else "")
+            or ""
+        )
+
+        if kind == "completed":
+            reason = "已完成（done）"
+            detail = str(payload.get("summary") or "").strip()
+            action = (
+                f'请运行 swarm_task_collect(task_id="{task_id}", project_path="{project_path}") '
+                "收集 Worker 产物、核对 File Evidence Ledger，并向用户汇报结果。"
+            )
+        elif kind == "blocked":
+            reason_text = str(payload.get("reason") or "").strip()
+            reason = f"被阻塞（blocked）{': ' + reason_text if reason_text else ''}"
+            detail = reason_text
+            action = (
+                f'请运行 swarm_task_collect(task_id="{task_id}", project_path="{project_path}") '
+                "查看阻塞原因，向用户汇报并给出下一步建议。"
+            )
+        elif kind in {"gave_up", "crashed", "timed_out"}:
+            reason = {
+                "gave_up": "多次启动失败后放弃（gave_up）",
+                "crashed": "worker 进程崩溃（crashed）",
+                "timed_out": "worker 超时（timed_out）",
+            }.get(kind, kind)
+            detail = str(payload.get("error") or payload.get("reason") or "").strip()
+            action = (
+                f'请运行 swarm_task_collect(task_id="{task_id}", project_path="{project_path}") '
+                "查看运行历史，决定是否重新分派、拆小任务或向用户请求人工处理。"
+            )
+        else:
+            return
+
+        synth_text = (
+            f"[kanban 自动通知] 你之前分派的任务 {task_id}（{title}）{reason}。\n"
+            f"Board: {board or ''}；当前状态: {status or kind}。\n"
+            + (f"摘要: {detail[:500]}\n" if detail else "")
+            + action
+        )
+        synth_event = MessageEvent(
+            text=synth_text,
+            message_type=MessageType.TEXT,
+            source=source,
+            internal=True,
+        )
+        logger.info(
+            "kanban session-wake: injecting Coordinator turn for task %s (%s) into session %s",
+            task_id, kind, session_id,
+        )
+        await self._handle_message(synth_event)
 
     async def _broadcast_to_dashboard(
         self, session_id: str, kind: str, ev_payload: dict, task_row: dict,
@@ -1324,4 +1449,3 @@ class KanbanMixin:
             while slept < interval and self._running:
                 await asyncio.sleep(min(1.0, interval - slept))
                 slept += 1.0
-
