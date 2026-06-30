@@ -191,6 +191,9 @@ function Block({
 }) {
   switch (block.type) {
     case "code": {
+      if (isHtmlPreview(block.lang)) {
+        return <HtmlPreview html={block.content} caret={caret} />;
+      }
       const isDiff = block.lang === "diff" || /^[+-] /.test(block.content);
       return (
         <pre className="bg-secondary/60 border border-border px-3 py-2.5 text-xs font-mono leading-relaxed overflow-x-auto">
@@ -293,6 +296,68 @@ function Block({
         </p>
       );
   }
+}
+
+function isHtmlPreview(lang: string): boolean {
+  return ["html", "htm", "xhtml"].includes(lang.trim().toLowerCase());
+}
+
+function HtmlPreview({ html, caret }: { html: string; caret?: ReactNode }) {
+  const srcDoc = useMemo(() => buildSandboxedHtml(html), [html]);
+
+  return (
+    <div className="space-y-2 rounded border border-border bg-secondary/30 p-2">
+      <div className="flex items-center justify-between gap-2">
+        <div className="text-[0.65rem] font-semibold uppercase tracking-wide text-muted-foreground">
+          HTML Preview
+        </div>
+        <details className="group">
+          <summary className="cursor-pointer select-none rounded border border-current/15 px-2 py-0.5 text-[0.65rem] text-muted-foreground hover:bg-muted/20">
+            source
+          </summary>
+          <pre className="mt-2 max-h-72 overflow-auto rounded border border-border bg-background/70 px-3 py-2 text-xs font-mono leading-relaxed">
+            <code>{html}</code>
+          </pre>
+        </details>
+      </div>
+      <iframe
+        title="HTML preview"
+        sandbox=""
+        srcDoc={srcDoc}
+        className="h-[28rem] w-full rounded border border-border bg-white"
+      />
+      {caret}
+    </div>
+  );
+}
+
+function buildSandboxedHtml(html: string): string {
+  return `<!doctype html>
+<html>
+<head>
+<meta charset="utf-8" />
+<base target="_blank" />
+<style>
+  :root { color-scheme: light; }
+  body {
+    margin: 0;
+    padding: 24px;
+    font: 14px/1.65 ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    color: #17201f;
+    background: #fffdf8;
+  }
+  table { border-collapse: collapse; width: 100%; margin: 1rem 0; }
+  th, td { border: 1px solid #d8d0c2; padding: 6px 8px; vertical-align: top; }
+  th { background: #f3eee4; }
+  h1, h2, h3 { line-height: 1.25; }
+  pre, code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  mark, .highlight { background: #fff2a8; }
+</style>
+</head>
+<body>
+${html}
+</body>
+</html>`;
 }
 
 /* ------------------------------------------------------------------ */

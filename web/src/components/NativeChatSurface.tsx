@@ -9,7 +9,7 @@ import { NotificationFeed } from "@/components/NotificationFeed";
 import { GatewayClient, type ConnectionState } from "@/lib/gatewayClient";
 import { executeSlash, parseSlash } from "@/lib/slashExec";
 import { cn } from "@/lib/utils";
-import { LoaderCircle, Send, Square } from "lucide-react";
+import { ListPlus, LoaderCircle, Send, Square } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReasoningEffort } from "@/components/ReasoningEffortPicker";
 import { getSwarmProfile, SWARM_PROFILES } from "@/lib/swarmProfiles";
@@ -637,6 +637,24 @@ export function NativeChatSurface({
     }
   }, [gw, running, sessionId, stopping]);
 
+  const queueCurrentInput = useCallback(() => {
+    const trimmed = input.trim();
+    if (!trimmed || !running) return;
+    queuedRef.current = trimmed;
+    setInput("");
+    setHasQueued(true);
+    setError(null);
+    setMessages((prev) => [
+      ...prev,
+      {
+        id: `queued-${Date.now()}`,
+        role: "status",
+        text: `已排队消息，当前轮次完成后自动提交：${trimmed.slice(0, 80)}${trimmed.length > 80 ? "…" : ""}`,
+        timestamp: Date.now(),
+      },
+    ]);
+  }, [input, running]);
+
   const handleCommandPalette = useCallback(
     (command: string) => {
       void submit(command);
@@ -761,20 +779,35 @@ export function NativeChatSurface({
             placeholder="输入任务，或使用 /resume、/swarm、/kanban 等命令。Shift+Enter 换行。Cmd+K 命令面板。"
             className="min-h-12 flex-1 resize-none rounded border border-current/15 bg-black/10 px-3 py-2 text-sm outline-none focus:border-primary/60"
           />
-          <Button
-            type={running ? "button" : "submit"}
-            onClick={running ? interrupt : undefined}
-            disabled={!sessionId || stopping || (!running && !input.trim())}
-            title={running ? "Stop current turn" : "Send"}
-            aria-label={running ? "Stop current turn" : "Send"}
-            className="self-end px-3"
-          >
-            {running ? (
-              <Square className="h-4 w-4" />
-            ) : (
-              <Send className="h-4 w-4" />
+          <div className="flex shrink-0 items-end gap-2">
+            {running && (
+              <Button
+                type="button"
+                ghost
+                onClick={queueCurrentInput}
+                disabled={!sessionId || !input.trim() || hasQueued}
+                title={hasQueued ? "A message is already queued" : "Queue message after current turn"}
+                aria-label="Queue message after current turn"
+                className="px-3"
+              >
+                <ListPlus className="h-4 w-4" />
+              </Button>
             )}
-          </Button>
+            <Button
+              type={running ? "button" : "submit"}
+              onClick={running ? interrupt : undefined}
+              disabled={!sessionId || stopping || (!running && !input.trim())}
+              title={running ? "Stop current turn" : "Send"}
+              aria-label={running ? "Stop current turn" : "Send"}
+              className="px-3"
+            >
+              {running ? (
+                <Square className="h-4 w-4" />
+              ) : (
+                <Send className="h-4 w-4" />
+              )}
+            </Button>
+          </div>
         </div>
         {/* reasoning effort moved to ChatTopBar */}
       </form>

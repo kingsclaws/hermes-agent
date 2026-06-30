@@ -84,6 +84,7 @@ RUN set -e; \
     cp -a hermes_cli/web_dist /opt/hermes/hermes_cli/; \
     cp web/src/App.tsx /opt/hermes/web/src/App.tsx; \
     cp web/src/components/ChatTopBar.tsx /opt/hermes/web/src/components/ChatTopBar.tsx; \
+    cp web/src/components/Markdown.tsx /opt/hermes/web/src/components/Markdown.tsx; \
     cp web/src/components/NativeChatSurface.tsx /opt/hermes/web/src/components/NativeChatSurface.tsx; \
     cp web/src/contexts/ChatTabContext.tsx /opt/hermes/web/src/contexts/ChatTabContext.tsx; \
     cp web/src/hooks/useChatSessionBinding.ts /opt/hermes/web/src/hooks/useChatSessionBinding.ts; \
@@ -126,6 +127,7 @@ RUN set -e; \
     cp -a hermes_cli/web_dist /opt/lex-hermes/hermes_cli/; \
     cp web/src/App.tsx /opt/lex-hermes/web/src/App.tsx; \
     cp web/src/components/ChatTopBar.tsx /opt/lex-hermes/web/src/components/ChatTopBar.tsx; \
+    cp web/src/components/Markdown.tsx /opt/lex-hermes/web/src/components/Markdown.tsx; \
     cp web/src/components/NativeChatSurface.tsx /opt/lex-hermes/web/src/components/NativeChatSurface.tsx; \
     cp web/src/contexts/ChatTabContext.tsx /opt/lex-hermes/web/src/contexts/ChatTabContext.tsx; \
     cp web/src/hooks/useChatSessionBinding.ts /opt/lex-hermes/web/src/hooks/useChatSessionBinding.ts; \
