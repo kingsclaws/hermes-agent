@@ -962,6 +962,81 @@ def test_list_tasks_assignee_filter_case_insensitive(kanban_home):
         assert len(found) == 1 and found[0].id == tid
 
 
+def test_create_task_with_session_id_auto_subscribes_session_notifications(kanban_home):
+    """Coordinator wake-up is a DB invariant, not a tool-wrapper convention."""
+    with kb.connect() as conn:
+        tid = kb.create_task(
+            conn,
+            title="notify coordinator",
+            assignee="worker",
+            session_id="coord-session-1",
+        )
+
+        subs = kb.list_notify_subs(conn, tid)
+
+    assert subs == [
+        {
+            "task_id": tid,
+            "platform": "session",
+            "chat_id": "coord-session-1",
+            "thread_id": "",
+            "user_id": None,
+            "notifier_profile": None,
+            "created_at": subs[0]["created_at"],
+            "last_event_id": 0,
+        }
+    ]
+
+
+def test_idempotent_create_task_backfills_session_notification(kanban_home):
+    """Retries with a session id must not return an unsubscribed existing task."""
+    with kb.connect() as conn:
+        tid = kb.create_task(
+            conn,
+            title="idempotent task",
+            assignee="worker",
+            idempotency_key="same-key",
+        )
+        assert kb.list_notify_subs(conn, tid) == []
+
+        same_tid = kb.create_task(
+            conn,
+            title="idempotent task",
+            assignee="worker",
+            idempotency_key="same-key",
+            session_id="coord-session-2",
+        )
+
+        subs = kb.list_notify_subs(conn, tid)
+
+    assert same_tid == tid
+    assert len(subs) == 1
+    assert subs[0]["platform"] == "session"
+    assert subs[0]["chat_id"] == "coord-session-2"
+
+
+def test_init_db_backfills_legacy_session_notification(kanban_home):
+    with kb.connect() as conn:
+        tid = kb.create_task(
+            conn,
+            title="legacy session task",
+            assignee="worker",
+            session_id="legacy-coord-session",
+        )
+        conn.execute("DELETE FROM kanban_notify_subs WHERE task_id = ?", (tid,))
+        conn.commit()
+        assert kb.list_notify_subs(conn, tid) == []
+
+    kb.init_db()
+
+    with kb.connect() as conn:
+        subs = kb.list_notify_subs(conn, tid)
+
+    assert len(subs) == 1
+    assert subs[0]["platform"] == "session"
+    assert subs[0]["chat_id"] == "legacy-coord-session"
+
+
 def test_archive_hides_from_default_list(kanban_home):
     with kb.connect() as conn:
         t = kb.create_task(conn, title="x")

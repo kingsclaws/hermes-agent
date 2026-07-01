@@ -1,24 +1,22 @@
 # Writing Agent Briefs
 
-An agent brief is a structured comment posted on a GitHub issue or PR when it moves to `ready-for-agent`. It is the authoritative specification that an AFK agent will work from. The original body and discussion are context — the agent brief is the contract.
-
-The brief states **what the agent should do**, which stretches to both surfaces: for an issue, that's building the change from nothing; for a PR, it's what's left to do *to the existing diff* — finish it, close gaps, address review points. Same principles either way; the PR example below shows the difference.
+Agent brief 是 issue 移动到 `ready-for-agent` 时发布在 GitHub issue 上的结构化 comment。它是 AFK agent 后续工作的权威 spec。原始 issue body 和讨论是 context；agent brief 是 contract。
 
 ## Principles
 
 ### Durability over precision
 
-The issue may sit in `ready-for-agent` for days or weeks. The codebase will change in the meantime. Write the brief so it stays useful even as files are renamed, moved, or refactored.
+Issue 可能会在 `ready-for-agent` 中停留数天或数周。期间 codebase 会变化。写 brief 时要让它在文件被重命名、移动或 refactor 后仍然有用。
 
-- **Do** describe interfaces, types, and behavioral contracts
-- **Do** name specific types, function signatures, or config shapes that the agent should look for or modify
-- **Don't** reference file paths — they go stale
-- **Don't** reference line numbers
-- **Don't** assume the current implementation structure will remain the same
+- **Do** 描述 interfaces、types 和 behavioral contracts
+- **Do** 命名 agent 应该查找或修改的具体 types、function signatures 或 config shapes
+- **Don't** 引用 file paths；它们会过期
+- **Don't** 引用 line numbers
+- **Don't** 假设当前 implementation structure 会保持不变
 
 ### Behavioral, not procedural
 
-Describe **what** the system should do, not **how** to implement it. The agent will explore the codebase fresh and make its own implementation decisions.
+描述系统应该做**什么**，而不是**如何**实现。Agent 会重新探索 codebase，并做出自己的 implementation decisions。
 
 - **Good:** "The `SkillConfig` type should accept an optional `schedule` field of type `CronExpression`"
 - **Bad:** "Open src/types/skill.ts and add a schedule field on line 42"
@@ -27,14 +25,14 @@ Describe **what** the system should do, not **how** to implement it. The agent w
 
 ### Complete acceptance criteria
 
-The agent needs to know when it's done. Every agent brief must have concrete, testable acceptance criteria. Each criterion should be independently verifiable.
+Agent 需要知道什么时候算完成。每个 agent brief 都必须有具体、可测试的 acceptance criteria。每条 criterion 都应该能独立验证。
 
 - **Good:** "Running `gh issue list --label needs-triage` returns issues that have been through initial classification"
 - **Bad:** "Triage should work correctly"
 
 ### Explicit scope boundaries
 
-State what is out of scope. This prevents the agent from gold-plating or making assumptions about adjacent features.
+说明什么不在范围内。这可以防止 agent gold-plating 或对相邻功能做假设。
 
 ## Template
 
@@ -145,43 +143,6 @@ checked for matches.
 - Bug reports (only enhancement rejections go to `.out-of-scope/`)
 ```
 
-### Good agent brief (PR)
-
-For a PR, "Current behavior" describes the state of the diff, and the brief asks the agent to finish or fix it rather than build from scratch.
-
-```markdown
-## Agent Brief
-
-**Category:** enhancement
-**Summary:** Finish the contributor's `--json` output flag for `triage list`
-
-**Current behavior:**
-The PR adds a `--json` flag that serializes the issue list to JSON. The happy
-path works and the diff matches the project's command structure. Two gaps
-remain: errors are still printed as human text (not JSON), and the new flag has
-no test coverage.
-
-**Desired behavior:**
-With `--json`, all output — including errors — is well-formed JSON on stdout,
-and the command's exit codes are unchanged. The existing human-readable output
-is untouched when the flag is absent.
-
-**Key interfaces:**
-- The command's error path should emit `{ "error": string }` under `--json`
-  instead of the plain-text error
-- Reuse the existing serializer the PR already added; don't introduce a second
-
-**Acceptance criteria:**
-- [ ] `triage list --json` emits valid JSON for both success and error cases
-- [ ] Exit codes match the non-JSON command
-- [ ] A test covers the `--json` success output and one error case
-- [ ] Default (non-JSON) output is byte-for-byte unchanged
-
-**Out of scope:**
-- Adding `--json` to any other command
-- Changing the JSON shape of the success payload the PR already defined
-```
-
 ### Bad agent brief
 
 ```markdown
@@ -198,10 +159,11 @@ The function around line 150 has the issue.
 - src/types.ts (line 42)
 ```
 
-This is bad because:
-- No category
-- Vague description ("the triage thing is broken")
-- References file paths and line numbers that will go stale
-- No acceptance criteria
-- No scope boundaries
-- No description of current vs desired behavior
+它不好，因为：
+
+- 没有 category
+- 描述含糊（“the triage thing is broken”）
+- 引用了会过期的 file paths 和 line numbers
+- 没有 acceptance criteria
+- 没有 scope boundaries
+- 没有说明 current vs desired behavior

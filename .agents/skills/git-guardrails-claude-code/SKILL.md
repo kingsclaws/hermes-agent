@@ -1,42 +1,42 @@
 ---
 name: git-guardrails-claude-code
-description: Set up Claude Code hooks to block dangerous git commands (push, reset --hard, clean, branch -D, etc.) before they execute. Use when user wants to prevent destructive git operations, add git safety hooks, or block git push/reset in Claude Code.
+description: 设置 Claude Code hooks，在危险 git commands（push, reset --hard, clean, branch -D 等）执行前阻止它们。Use when user wants to prevent destructive git operations, add git safety hooks, or block git push/reset in Claude Code.
 ---
 
 # Setup Git Guardrails
 
-Sets up a PreToolUse hook that intercepts and blocks dangerous git commands before Claude executes them.
+设置一个 PreToolUse hook，在 Claude 执行危险 git commands 前拦截并阻止它们。
 
 ## What Gets Blocked
 
-- `git push` (all variants including `--force`)
+- `git push`（包括 `--force` 在内的所有 variants）
 - `git reset --hard`
 - `git clean -f` / `git clean -fd`
 - `git branch -D`
 - `git checkout .` / `git restore .`
 
-When blocked, Claude sees a message telling it that it does not have authority to access these commands.
+被阻止时，Claude 会看到一条 message，说明它无权访问这些 commands。
 
 ## Steps
 
 ### 1. Ask scope
 
-Ask the user: install for **this project only** (`.claude/settings.json`) or **all projects** (`~/.claude/settings.json`)?
+询问用户：只为**当前 project** 安装（`.claude/settings.json`），还是为**所有 projects** 安装（`~/.claude/settings.json`）？
 
 ### 2. Copy the hook script
 
-The bundled script is at: [scripts/block-dangerous-git.sh](scripts/block-dangerous-git.sh)
+bundled script 位于：[scripts/block-dangerous-git.sh](scripts/block-dangerous-git.sh)
 
-Copy it to the target location based on scope:
+根据 scope 复制到目标位置：
 
 - **Project**: `.claude/hooks/block-dangerous-git.sh`
 - **Global**: `~/.claude/hooks/block-dangerous-git.sh`
 
-Make it executable with `chmod +x`.
+用 `chmod +x` 让它可执行。
 
 ### 3. Add hook to settings
 
-Add to the appropriate settings file:
+添加到对应 settings file：
 
 **Project** (`.claude/settings.json`):
 
@@ -78,18 +78,18 @@ Add to the appropriate settings file:
 }
 ```
 
-If the settings file already exists, merge the hook into existing `hooks.PreToolUse` array — don't overwrite other settings.
+如果 settings file 已存在，把 hook merge 到现有 `hooks.PreToolUse` array 中，不要覆盖其他 settings。
 
 ### 4. Ask about customization
 
-Ask if user wants to add or remove any patterns from the blocked list. Edit the copied script accordingly.
+询问用户是否要在 blocked list 中添加或移除 patterns。相应编辑复制后的 script。
 
 ### 5. Verify
 
-Run a quick test:
+运行快速测试：
 
 ```bash
 echo '{"tool_input":{"command":"git push origin main"}}' | <path-to-script>
 ```
 
-Should exit with code 2 and print a BLOCKED message to stderr.
+应以 code 2 退出，并向 stderr 打印 BLOCKED message。

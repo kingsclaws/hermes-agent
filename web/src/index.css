@@ -83,13 +83,17 @@
 
   /* Consumed by <Backdrop />; also theme-switchable. */
   --warm-glow: rgba(255, 189, 56, 0.35);
-  --noise-opacity-mul: 0.25;
+  /* --noise-opacity-mul is set by ThemeProvider via paletteToSeeds().
+     This static fallback ensures the noise layer works before JS mounts. */
+  --noise-opacity-mul: 1;
 
-  /* Improve DS text-secondary / text-tertiary contrast.  DS defaults
-     (80% / 65% midground) are hard to read on dark backgrounds. */
-  --text-secondary: color-mix(in srgb, var(--midground-base) 88%, transparent);
-  --text-tertiary: color-mix(in srgb, var(--midground-base) 78%, transparent);
-  --text-disabled: color-mix(in srgb, var(--midground-base) 55%, transparent);
+  /* Improve DS text-secondary / text-tertiary contrast.  These legacy
+     tokens feed the Nous DS `--color-text-*` cascade.  The parametric
+     `--text-high/medium/low/disabled` vars are the preferred API for new
+     code; these remain for backward compat with DS components. */
+  --text-secondary: var(--text-high);
+  --text-tertiary: var(--text-medium);
+  --text-disabled: var(--text-disabled);
 
   /* Typography tokens — rewritten by ThemeProvider. Defaults match the
      system stack so themes that don't override look native. */
@@ -106,19 +110,270 @@
   --theme-spacing-mul: 1.0;
   --theme-density: comfortable;
 
-  /* Desktop-aligned chrome tokens.  These mirror the desktop app's
-     pane/surface hierarchy without importing Electron-only runtime code. */
-  --dt-background: var(--background-base);
-  --dt-foreground: var(--midground);
-  --dt-sidebar: color-mix(in srgb, var(--background-base) 88%, #000);
-  --dt-panel: color-mix(in srgb, var(--midground-base) 6%, var(--background-base));
-  --dt-panel-strong: color-mix(in srgb, var(--midground-base) 10%, var(--background-base));
-  --dt-panel-border: color-mix(in srgb, var(--midground-base) 22%, transparent);
-  --dt-panel-border-strong: color-mix(in srgb, var(--midground-base) 32%, transparent);
-  --dt-hover: color-mix(in srgb, var(--midground-base) 12%, transparent);
-  --dt-active: color-mix(in srgb, var(--midground-base) 18%, transparent);
-  --dt-statusbar: color-mix(in srgb, var(--background-base) 94%, #000);
-  --dt-shadow: 0 24px 80px rgba(0, 0, 0, 0.28);
+  /* ══════════════════════════════════════════════════════════════════════
+     Parametric surface system — 5-surface hierarchy from seeds + knobs.
+     Mirrors the Desktop UI's surface model:
+       chrome < sidebar < card ≈ bubble < elevated
+
+     Each surface = color-mix(seed, neutral, mix-knob%).
+     Higher mix% = more seed visible = lighter surface (dark mode).
+     ThemeProvider writes the seed + knob vars as inline styles on :root;
+     the cascade below derives the final surfaces from them.
+     ══════════════════════════════════════════════════════════════════════ */
+
+  /* ── Neutral anchors (dark-mode) ─────────────────────────────────
+     Surfaces blend their seed toward these dark neutrals. Lighter
+     neutrals for card/elevated create the "rising" effect: card and
+     elevated push away from pure black, reading as distinct panels.
+     Calibrated for visible ΔL* between each surface level. */
+  --neutral-chrome:    #000000;
+  --neutral-sidebar:   #0a0a0d;
+  --neutral-card:      #0d0d0d;
+  --neutral-elevated:  #151515;
+  --neutral-bubble:    #0a0a0a;
+
+  /* ── Derived surface backgrounds ───────────────────────────────── */
+  --dt-background:     color-mix(in srgb,
+    var(--theme-background-seed, #041c1c)
+    var(--theme-mix-chrome, 92%),
+    var(--neutral-chrome));
+
+  --dt-sidebar:        color-mix(in srgb,
+    var(--theme-seed-sidebar, #041c1c)
+    var(--theme-mix-sidebar, 96%),
+    var(--neutral-sidebar));
+
+  --dt-panel:          color-mix(in srgb,
+    var(--theme-seed-card, #041c1c)
+    var(--theme-mix-card, 84%),
+    var(--neutral-card));
+
+  --dt-panel-strong:   color-mix(in srgb,
+    var(--theme-seed-elevated, #041c1c)
+    var(--theme-mix-elevated, 78%),
+    var(--neutral-elevated));
+
+  --dt-bubble:         color-mix(in srgb,
+    var(--theme-seed-bubble, #041c1c)
+    var(--theme-mix-bubble, 82%),
+    var(--neutral-bubble));
+
+  /* ── Foreground ────────────────────────────────────────────────── */
+  --dt-foreground:     var(--theme-foreground, #ffe6cb);
+
+  /* ── Border / divider tokens ───────────────────────────────────── */
+  --dt-panel-border:
+    color-mix(in srgb, var(--theme-foreground, #ffe6cb) 22%, transparent);
+  --dt-panel-border-strong:
+    color-mix(in srgb, var(--theme-foreground, #ffe6cb) 32%, transparent);
+  --dt-sidebar-border:
+    color-mix(in srgb, var(--theme-foreground, #ffe6cb) 14%, transparent);
+
+  /* ── Interactive states (hover / active) ───────────────────────── */
+  --dt-hover:
+    color-mix(in srgb, var(--theme-foreground, #ffe6cb) 12%, transparent);
+  --dt-active:
+    color-mix(in srgb, var(--theme-foreground, #ffe6cb) 18%, transparent);
+
+  /* ── Status bar / footer ───────────────────────────────────────── */
+  --dt-statusbar:      color-mix(in srgb,
+    var(--theme-background-seed, #041c1c) 94%, #000);
+
+  /* ── Shadows (Desktop-style multi-layer) ────────────────────────
+     Each tier adds depth with larger blur + more layers.
+     Lower tiers have a subtle border ring via foreground color-mix;
+     higher tiers use negative-spread layers that pool shadow below
+     the panel instead of bleeding out every side.  All adapt to
+     theme darkness via color-mix() over black. */
+
+  /* Subtle elevation — inputs, inline cards. */
+  --dt-shadow-xs:
+    0 1px 2px color-mix(in srgb, #000 5%, transparent);
+
+  /* Low elevation — cards, compact panels. Border ring + soft blur. */
+  --dt-shadow-sm:
+    0 0 0 1px color-mix(in srgb, var(--dt-foreground) 6%, transparent),
+    0 2px 8px color-mix(in srgb, #000 6%, transparent);
+
+  /* Moderate elevation — dropdowns, popovers. */
+  --dt-shadow-md:
+    0 0 0 1px color-mix(in srgb, var(--dt-foreground) 8%, transparent),
+    0 4px 16px color-mix(in srgb, #000 10%, transparent),
+    0 16px 32px -24px color-mix(in srgb, #000 20%, transparent);
+
+  /* Default panel shadow — pools below the panel (negative spread). */
+  --dt-shadow:
+    0 2px 4px -2px color-mix(in srgb, #000 7%, transparent),
+    0 8px 12px -6px color-mix(in srgb, #000 6%, transparent),
+    0 24px 80px color-mix(in srgb, #000 28%, transparent);
+
+  /* High elevation — modals, dialogs. Inner highlight + deep shadow. */
+  --dt-shadow-lg:
+    inset 0 1px 0 color-mix(in srgb, #fff 4%, transparent),
+    0 0 0 1px color-mix(in srgb, var(--dt-foreground) 6%, transparent),
+    0 24px 48px -12px color-mix(in srgb, #000 35%, transparent);
+
+  /* ── Text opacity tiers ──────────────────────────────────────────
+     94%/74%/54%/36% = high / medium / low / disabled.
+     Mirrors Desktop's text hierarchy. */
+  --text-high:         color-mix(in srgb, var(--theme-foreground, #ffe6cb) 94%, transparent);
+  --text-medium:       color-mix(in srgb, var(--theme-foreground, #ffe6cb) 74%, transparent);
+  --text-low:          color-mix(in srgb, var(--theme-foreground, #ffe6cb) 54%, transparent);
+  --text-disabled:     color-mix(in srgb, var(--theme-foreground, #ffe6cb) 36%, transparent);
+
+  /* ── Accent fill levels (5 tiers for bg-/hover-/active-/selected) ─ */
+  --accent-fill-1:     color-mix(in srgb, var(--theme-primary, #ffe6cb) 4%, transparent);
+  --accent-fill-2:     color-mix(in srgb, var(--theme-primary, #ffe6cb) 8%, transparent);
+  --accent-fill-3:     color-mix(in srgb, var(--theme-primary, #ffe6cb) 14%, transparent);
+  --accent-fill-4:     color-mix(in srgb, var(--theme-primary, #ffe6cb) 22%, transparent);
+  --accent-fill-5:     color-mix(in srgb, var(--theme-primary, #ffe6cb) 32%, transparent);
+
+  /* ── Accent stroke levels (4 tiers for borders/outlines) ───────── */
+  --accent-stroke-1:   color-mix(in srgb, var(--theme-primary, #ffe6cb) 14%, transparent);
+  --accent-stroke-2:   color-mix(in srgb, var(--theme-primary, #ffe6cb) 28%, transparent);
+  --accent-stroke-3:   color-mix(in srgb, var(--theme-primary, #ffe6cb) 44%, transparent);
+  --accent-stroke-4:   color-mix(in srgb, var(--theme-primary, #ffe6cb) 62%, transparent);
+
+  /* ── Ring / focus ──────────────────────────────────────────────── */
+  --dt-ring:           var(--theme-primary, #ffe6cb);
+  --dt-composer-ring:  color-mix(in srgb, var(--theme-primary, #ffe6cb) 40%, transparent);
+
+  /* ── Destructive ───────────────────────────────────────────────── */
+  --dt-destructive:            #fb2c36;
+  --dt-destructive-foreground: #ffffff;
+
+  /* ── Desktop-style UI tokens (stroke / fill / text) ─────────────
+     These mirror Desktop's `--ui-stroke-*` / `--ui-fill-*` / `--ui-text-*`
+     cascade so panels, inputs, and interactive elements get the same
+     refined borders and backgrounds as the Electron app. */
+
+  /* Stroke tiers — 4 levels of border visibility.
+     Built from the theme foreground + accent, layered via color-mix. */
+  --ui-stroke-primary:    var(--accent-stroke-2);
+  --ui-stroke-secondary:  var(--accent-stroke-1);
+  --ui-stroke-tertiary:   color-mix(in srgb, var(--theme-foreground, #ffe6cb) 6%, transparent);
+  --ui-stroke-quaternary: color-mix(in srgb, var(--theme-foreground, #ffe6cb) 3%, transparent);
+
+  /* Fill tiers — 5 levels of surface fill for hover/active/selected. */
+  --ui-fill-primary:      var(--accent-fill-5);
+  --ui-fill-secondary:    var(--accent-fill-4);
+  --ui-fill-tertiary:     var(--accent-fill-3);
+  --ui-fill-quaternary:   var(--accent-fill-2);
+  --ui-fill-quinary:      var(--accent-fill-1);
+
+  /* Text tiers — aliased from the parametric text ladder. */
+  --ui-text-primary:      var(--text-high);
+  --ui-text-secondary:    var(--text-medium);
+  --ui-text-tertiary:     var(--text-low);
+
+  /* Chat surface — the main conversation background. */
+  --ui-chat-surface-background: var(--dt-background);
+
+  /* Sidebar edge — subtle hairline on the sidebar's right edge. */
+  --sidebar-edge-border:
+    color-mix(in srgb, var(--theme-foreground, #ffe6cb) 6%, transparent);
+
+  /* Selection — warm yellow highlight, Desktop style. */
+  --ui-selection-background:
+    color-mix(in srgb, #ffd24a 38%, transparent);
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+   Light-mode overrides — when <html> does NOT have the .dark class,
+   swap neutrals from black→white and adjust derivation knobs so
+   surfaces read as paper-like panels rather than glowing screens.
+   ══════════════════════════════════════════════════════════════════════ */
+
+:root:not(.dark) {
+  /* ── Neutral anchors (light-mode) ────────────────────────────── */
+  --neutral-chrome:    #f3f3f3;
+  --neutral-sidebar:   #f3f4f6;
+  --neutral-card:      #ffffff;
+  --neutral-elevated:  #ffffff;
+  --neutral-bubble:    #fafafa;
+
+  /* ── Border / divider tokens (lighter for bright bg) ─────────── */
+  --dt-panel-border:
+    color-mix(in srgb, var(--theme-foreground, #1a1a1a) 14%, transparent);
+  --dt-panel-border-strong:
+    color-mix(in srgb, var(--theme-foreground, #1a1a1a) 22%, transparent);
+  --dt-sidebar-border:
+    color-mix(in srgb, var(--theme-foreground, #1a1a1a) 8%, transparent);
+
+  /* ── Interactive states ──────────────────────────────────────── */
+  --dt-hover:
+    color-mix(in srgb, var(--theme-foreground, #1a1a1a) 6%, transparent);
+  --dt-active:
+    color-mix(in srgb, var(--theme-foreground, #1a1a1a) 10%, transparent);
+
+  /* ── Text opacity tiers ──────────────────────────────────────── */
+  --text-high:         color-mix(in srgb, var(--theme-foreground, #1a1a1a) 92%, transparent);
+  --text-medium:       color-mix(in srgb, var(--theme-foreground, #1a1a1a) 68%, transparent);
+  --text-low:          color-mix(in srgb, var(--theme-foreground, #1a1a1a) 48%, transparent);
+  --text-disabled:     color-mix(in srgb, var(--theme-foreground, #1a1a1a) 30%, transparent);
+
+  /* ── Accent fill levels (subtle on white bg) ─────────────────── */
+  --accent-fill-1:     color-mix(in srgb, var(--theme-primary, #0053fd) 4%, transparent);
+  --accent-fill-2:     color-mix(in srgb, var(--theme-primary, #0053fd) 8%, transparent);
+  --accent-fill-3:     color-mix(in srgb, var(--theme-primary, #0053fd) 14%, transparent);
+  --accent-fill-4:     color-mix(in srgb, var(--theme-primary, #0053fd) 22%, transparent);
+  --accent-fill-5:     color-mix(in srgb, var(--theme-primary, #0053fd) 32%, transparent);
+
+  /* ── Accent stroke levels ────────────────────────────────────── */
+  --accent-stroke-1:   color-mix(in srgb, var(--theme-primary, #0053fd) 14%, transparent);
+  --accent-stroke-2:   color-mix(in srgb, var(--theme-primary, #0053fd) 28%, transparent);
+  --accent-stroke-3:   color-mix(in srgb, var(--theme-primary, #0053fd) 44%, transparent);
+  --accent-stroke-4:   color-mix(in srgb, var(--theme-primary, #0053fd) 62%, transparent);
+
+  /* ── Ring / focus ────────────────────────────────────────────── */
+  --dt-ring:           var(--theme-primary, #0053fd);
+  --dt-composer-ring:  color-mix(in srgb, var(--theme-primary, #0053fd) 40%, transparent);
+
+  /* ── Status bar ──────────────────────────────────────────────── */
+  --dt-statusbar:      color-mix(in srgb, var(--theme-background-seed, #fafafa) 96%, #e0e0e0);
+
+  /* ── Shadows (softer for light bg) ───────────────────────────── */
+  --dt-shadow-xs:
+    0 1px 2px color-mix(in srgb, #000 4%, transparent);
+  --dt-shadow-sm:
+    0 0 0 1px color-mix(in srgb, var(--dt-foreground) 6%, transparent),
+    0 2px 8px color-mix(in srgb, #000 4%, transparent);
+  --dt-shadow-md:
+    0 0 0 1px color-mix(in srgb, var(--dt-foreground) 8%, transparent),
+    0 4px 16px color-mix(in srgb, #000 6%, transparent),
+    0 16px 32px -24px color-mix(in srgb, #000 12%, transparent);
+  --dt-shadow:
+    0 2px 4px -2px color-mix(in srgb, #000 5%, transparent),
+    0 8px 12px -6px color-mix(in srgb, #000 4%, transparent),
+    0 24px 80px color-mix(in srgb, #000 18%, transparent);
+  --dt-shadow-lg:
+    inset 0 1px 0 color-mix(in srgb, #fff 50%, transparent),
+    0 0 0 1px color-mix(in srgb, var(--dt-foreground) 6%, transparent),
+    0 24px 48px -12px color-mix(in srgb, #000 22%, transparent);
+
+  /* ── Desktop-style UI tokens (light-mode) ─────────────────────── */
+  --ui-stroke-primary:    var(--accent-stroke-2);
+  --ui-stroke-secondary:  var(--accent-stroke-1);
+  --ui-stroke-tertiary:   color-mix(in srgb, var(--theme-foreground, #1a1a1a) 6%, transparent);
+  --ui-stroke-quaternary: color-mix(in srgb, var(--theme-foreground, #1a1a1a) 3%, transparent);
+
+  --ui-fill-primary:      var(--accent-fill-5);
+  --ui-fill-secondary:    var(--accent-fill-4);
+  --ui-fill-tertiary:     var(--accent-fill-3);
+  --ui-fill-quaternary:   var(--accent-fill-2);
+  --ui-fill-quinary:      var(--accent-fill-1);
+
+  --ui-text-primary:      var(--text-high);
+  --ui-text-secondary:    var(--text-medium);
+  --ui-text-tertiary:     var(--text-low);
+
+  --ui-chat-surface-background: var(--dt-background);
+
+  --sidebar-edge-border:
+    color-mix(in srgb, var(--theme-foreground, #1a1a1a) 7%, transparent);
+
+  --ui-selection-background:
+    color-mix(in srgb, #ffd24a 55%, transparent);
 }
 
 /* Theme tokens cascade into the document root so every descendant inherits
@@ -139,6 +394,22 @@ body {
   height: 100%;
   margin: 0;
   overflow: hidden;
+  background: var(--ui-chat-surface-background);
+  color: var(--dt-foreground);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Desktop-style selection. */
+*::selection {
+  background: var(--ui-selection-background);
+  color: inherit;
+}
+
+/* Hairline underline — 20% currentColor with offset. */
+:where(a, .underline) {
+  text-decoration-color: color-mix(in srgb, currentColor 20%, transparent);
+  text-underline-offset: 0.25rem;
 }
 
 code, kbd, pre, samp, .font-mono, .font-mono-ui {
@@ -180,37 +451,48 @@ code { font-size: 0.875rem; }
 /* Shadcn-compat tokens.
    The dashboard's page code predates the Nous DS and uses shadcn-style
    utility classes (bg-card, text-muted-foreground, border-border, etc.)
-   extensively. Rather than rewrite every call site, we expose those
-   tokens on top of the Nous palette so classes continue to resolve. */
+   extensively. These are now mapped to the parametric surface system
+   (seeds.ts + :root --dt-* / --accent-* cascade) so every class
+   resolves through the 5-surface hierarchy. */
 @theme inline {
   /* Remap foreground to midground so `text-foreground` / `bg-foreground`
      stay visible — in LENS_0, `--foreground` itself has alpha 0. */
-  --color-foreground: var(--midground);
+  --color-foreground: var(--dt-foreground);
 
-  --color-card: color-mix(in srgb, var(--midground-base) 4%, var(--background-base));
-  --color-card-foreground: var(--midground);
-  --color-primary: var(--midground);
-  --color-primary-foreground: var(--background-base);
-  --color-secondary: color-mix(in srgb, var(--midground-base) 6%, var(--background-base));
-  --color-secondary-foreground: var(--midground);
-  --color-muted: color-mix(in srgb, var(--midground-base) 8%, var(--background-base));
-  /* Routes the shadcn `muted-foreground` slot through the DS semantic
-     text-secondary token (defaults to midground 80%) so legacy call
-     sites that use `text-muted-foreground` get a readable color
-     instead of the old 55%-transparent default. */
-  --color-muted-foreground: var(--color-text-secondary);
-  --color-accent: color-mix(in srgb, var(--midground-base) 10%, var(--background-base));
-  --color-accent-foreground: var(--midground);
-  --color-destructive: #fb2c36;
-  --color-destructive-foreground: #ffffff;
+  /* Surface-mapped tokens — each points into the parametric hierarchy. */
+  --color-card: var(--dt-panel);
+  --color-card-foreground: var(--dt-foreground);
+  --color-popover: var(--dt-panel-strong);
+  --color-popover-foreground: var(--dt-foreground);
+
+  /* Primary / accent — driven by the theme's midground (--theme-primary). */
+  --color-primary: var(--theme-primary);
+  --color-primary-foreground: var(--theme-background-seed);
+
+  /* Secondary / muted / accent — accent fill tiers from the seed cascade. */
+  --color-secondary: var(--accent-fill-2);
+  --color-secondary-foreground: var(--dt-foreground);
+  --color-muted: var(--accent-fill-1);
+  --color-muted-foreground: var(--text-medium);
+  --color-accent: var(--accent-fill-3);
+  --color-accent-foreground: var(--dt-foreground);
+
+  /* Destructive — hardcoded per theme convention. */
+  --color-destructive: var(--dt-destructive);
+  --color-destructive-foreground: var(--dt-destructive-foreground);
+
+  /* Semantic feedback colors. */
   --color-success: #4ade80;
   --color-warning: #ffbd38;
-  --color-border: color-mix(in srgb, var(--midground-base) 22%, transparent);
-  --color-input: color-mix(in srgb, var(--midground-base) 22%, transparent);
-  --color-ring: var(--midground);
-  --color-popover: color-mix(in srgb, var(--midground-base) 4%, var(--background-base));
-  --color-popover-foreground: var(--midground);
 
+  /* Borders + inputs — powered by the foreground seed at fixed opacity. */
+  --color-border: var(--dt-panel-border);
+  --color-input: var(--dt-panel-border);
+
+  /* Ring — powered by the theme primary. */
+  --color-ring: var(--dt-ring);
+
+  /* Radius cascade. */
   --radius-sm: calc(var(--theme-radius) - 4px);
   --radius-md: calc(var(--theme-radius) - 2px);
   --radius-lg: var(--theme-radius);
@@ -485,7 +767,13 @@ code { font-size: 0.875rem; }
 }
 
 .hermes-desktop-sidebar {
-  box-shadow: inset -1px 0 0 var(--dt-panel-border);
+  box-shadow: inset -1px 0 0 var(--sidebar-edge-border);
+  background: var(--dt-sidebar);
+}
+
+.hermes-desktop-sidebar [role="button"]:hover,
+.hermes-desktop-sidebar button:hover {
+  background: var(--ui-fill-quinary);
 }
 
 .hermes-desktop-main {
@@ -501,9 +789,11 @@ code { font-size: 0.875rem; }
 }
 
 .hermes-desktop-pane {
-  background: var(--dt-panel);
-  border: 1px solid var(--dt-panel-border);
+  background: color-mix(in srgb, var(--dt-panel-strong) 96%, transparent);
+  border: 1px solid var(--ui-stroke-secondary);
   box-shadow: var(--dt-shadow);
+  backdrop-filter: blur(0.75rem) saturate(1.08);
+  -webkit-backdrop-filter: blur(0.75rem) saturate(1.08);
 }
 
 .hermes-desktop-pane-header {
@@ -553,3 +843,147 @@ code { font-size: 0.875rem; }
 .hl-meta { color: #89ddff; font-weight: 600; }
 .hl-ins { color: #c3e88d; }
 .hl-del { color: #ff5370; }
+
+/* ══════════════════════════════════════════════════════════════════════
+   Desktop chat typography + composer — match Electron app's text scale
+   and input chrome so messages and the input area feel native.
+   ══════════════════════════════════════════════════════════════════════ */
+
+/* Chat message text — Desktop uses 0.8125rem with 1.5 line-height. */
+.chat-message-content {
+  font-size: 0.8125rem;
+  line-height: 1.5;
+}
+
+.chat-message-content p {
+  margin-block: 0.7rem 0;
+}
+
+.chat-message-content > :first-child {
+  margin-top: 0;
+}
+
+/* Assistant message scaffolding (tool blocks, thinking) at 0.67 opacity
+   lifting to 1.0 on hover — Desktop's fade effect. */
+.chat-scaffold-block {
+  opacity: 0.67;
+  transition: opacity 120ms ease-out;
+}
+
+.chat-scaffold-block:hover,
+.chat-scaffold-block:focus-within {
+  opacity: 1;
+}
+
+/* User message — tighter line-height for human text. */
+.chat-user-message {
+  line-height: 1.3;
+}
+
+/* Composer / input — Desktop-inspired chrome. */
+.desktop-composer {
+  background: color-mix(in srgb, var(--dt-panel) var(--dt-input-bg, 0%), transparent);
+  border: 1px solid color-mix(in srgb, var(--dt-composer-ring, var(--theme-primary)) var(--dt-input-border, 7%), transparent);
+  border-radius: var(--theme-radius, 0.5rem);
+  box-shadow: inset 0 1px 1px color-mix(in srgb, #000 38%, transparent);
+  transition: border-color 200ms ease-out;
+  font-size: 0.8125rem;
+}
+
+.desktop-composer:hover {
+  border-color: color-mix(in srgb, var(--dt-composer-ring, var(--theme-primary)) 14%, transparent);
+}
+
+.desktop-composer:focus-within {
+  border-color: var(--dt-composer-ring, var(--theme-primary));
+  box-shadow: none;
+  outline: none;
+}
+
+/* Composer placeholder */
+.desktop-composer [contenteditable]:empty::before {
+  color: var(--text-low);
+  content: attr(data-placeholder);
+}
+
+/* ── Desktop-grade chat area styling ── */
+
+/* Chat main container — dark surface, fills available space. */
+.hermes-desktop-main {
+  background: var(--dt-background) !important;
+}
+
+/* Chat message cards — parametric panel surface. */
+.hermes-desktop-main [class*=bg-card],
+.hermes-desktop-main [class*=bg-background] {
+  background-color: var(--dt-panel) !important;
+  border-color: var(--ui-stroke-secondary) !important;
+}
+
+/* Composer area — centered, max-width like Desktop. */
+.hermes-desktop-main textarea,
+.hermes-desktop-main input[type=text] {
+  background: var(--dt-panel-strong) !important;
+  border-color: var(--ui-stroke-secondary) !important;
+  color: var(--text-high) !important;
+  font-size: 0.8125rem;
+  border-radius: var(--theme-radius);
+}
+
+.hermes-desktop-main textarea:focus,
+.hermes-desktop-main input[type=text]:focus {
+  border-color: var(--theme-primary) !important;
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--theme-primary) 20%, transparent);
+  outline: none;
+}
+
+/* Chat message text — match Desktop 0.8125rem. */
+.hermes-desktop-main .text-muted-foreground {
+  color: var(--text-medium) !important;
+}
+.hermes-desktop-main .text-foreground {
+  color: var(--text-high) !important;
+}
+
+/* Chat borders */
+.hermes-desktop-main [class*=border-current] {
+  border-color: var(--ui-stroke-tertiary) !important;
+}
+
+/* Selection dropdowns / popovers */
+.hermes-desktop-main select,
+.hermes-desktop-main [class*=bg-popover] {
+  background: var(--dt-panel-strong) !important;
+  border-color: var(--ui-stroke-secondary) !important;
+  color: var(--text-high) !important;
+}
+
+/* Buttons in chat area */
+.hermes-desktop-main button:not([class*=bg-]):hover {
+  background: var(--accent-fill-1);
+}
+
+/* Chat viewport — thread scrolling. */
+.chat-viewport {
+  overflow-anchor: none;
+}
+
+.chat-viewport[data-following="true"] {
+  overflow-anchor: auto;
+}
+
+/* Message action buttons — subtle, lift on hover. */
+.chat-msg-actions button {
+  opacity: 0.5;
+  color: var(--text-low);
+  transition: opacity 120ms ease, color 120ms ease;
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+}
+
+.chat-msg-actions button:hover {
+  opacity: 1;
+  color: var(--text-high);
+}
+

@@ -102,6 +102,58 @@ def _fire_kanban_hook(hook_name: str, **kwargs: Any) -> None:
         _log.debug("kanban hook %s dispatch failed", hook_name, exc_info=True)
 
 
+def _add_session_notify_sub_in_txn(
+    conn: sqlite3.Connection,
+    *,
+    task_id: str,
+    session_id: Optional[str],
+) -> None:
+    """Subscribe the originating Hermes session to task terminal events.
+
+    This is the durable coordinator wake-up path for CLI/TUI/WebUI/API
+    workflows.  Higher-level tools used to remember to call
+    ``subscribe_session()`` after creating a task, but any path that forgot left
+    coordinators polling manually forever.  Keeping the invariant in the DB
+    creation path means every task carrying ``session_id`` is notify-capable.
+    """
+    sid = str(session_id or "").strip()
+    if not sid:
+        return
+    now = int(time.time())
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO kanban_notify_subs
+            (task_id, platform, chat_id, thread_id, created_at)
+        VALUES (?, 'session', ?, '', ?)
+        """,
+        (task_id, sid, now),
+    )
+
+
+def _backfill_session_notify_subs(conn: sqlite3.Connection) -> None:
+    """Backfill session wake subscriptions for legacy tasks.
+
+    Older task-creation paths stored ``tasks.session_id`` but forgot the
+    matching ``kanban_notify_subs`` row.  Those coordinators never received
+    automatic wake-up messages and had to poll manually.  The insert is
+    idempotent and intentionally keeps terminal tasks too: old completed or
+    blocked tasks may still have unseen terminal events that should wake the
+    originating session after an upgrade.
+    """
+    now = int(time.time())
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO kanban_notify_subs
+            (task_id, platform, chat_id, thread_id, created_at)
+        SELECT id, 'session', session_id, '', ?
+          FROM tasks
+         WHERE session_id IS NOT NULL
+           AND TRIM(session_id) != ''
+        """,
+        (now,),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -1540,6 +1592,7 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_tasks_session_id ON tasks(session_id)"
     )
+    _backfill_session_notify_subs(conn)
 
     # task_events gained a run_id column; back-fill it as NULL for
     # historical events (they predate runs and can't be attributed).
@@ -1870,6 +1923,13 @@ def create_task(
             (idempotency_key,),
         ).fetchone()
         if row:
+            if session_id:
+                with write_txn(conn):
+                    _add_session_notify_sub_in_txn(
+                        conn,
+                        task_id=row["id"],
+                        session_id=session_id,
+                    )
             return row["id"]
 
     now = int(time.time())
@@ -1973,6 +2033,11 @@ def create_task(
                         "branch_name": branch_name,
                         "skills": list(skills_list) if skills_list else None,
                     },
+                )
+                _add_session_notify_sub_in_txn(
+                    conn,
+                    task_id=task_id,
+                    session_id=session_id,
                 )
             return task_id
         except sqlite3.IntegrityError:

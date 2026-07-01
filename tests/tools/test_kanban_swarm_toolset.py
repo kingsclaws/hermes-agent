@@ -6,7 +6,9 @@ from tools.legal_evidence_gate import (
 )
 from tools.kanban_tools import _handle_complete
 from tools.kanban_toolset import (
+    kanban_task_approve_handler,
     kanban_task_create_handler,
+    kanban_task_read_handler,
 )
 
 
@@ -84,3 +86,88 @@ def test_kanban_complete_blocks_missing_claim_before_db_connect():
     assert data["error"]
     assert "Read-before-conclude" in data["error"]
     assert "File Evidence Ledger" in data["error"]
+
+
+def test_swarm_task_approve_routes_to_official_board_from_worker_env(monkeypatch, tmp_path):
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    project = tmp_path / "legal project"
+    project.mkdir()
+    board = "legal-demo"
+    monkeypatch.setenv("HERMES_KANBAN_HOME", str(home))
+    monkeypatch.setenv("HERMES_KANBAN_BOARD", board)
+
+    conn = kb.connect(board=board)
+    try:
+        task_id = kb.create_task(
+            conn,
+            title="Review response",
+            assignee="hpswarm-coordinator",
+            workspace_kind="dir",
+            workspace_path=str(project),
+            initial_status="running",
+            session_id="coord-session",
+        )
+        conn.execute(
+            "UPDATE tasks SET claim_lock = ?, claim_expires = ? WHERE id = ?",
+            ("claim-123", 9999999999, task_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    monkeypatch.setenv("HERMES_KANBAN_TASK", task_id)
+    monkeypatch.setenv("HERMES_KANBAN_CLAIM_LOCK", "claim-123")
+    out = kanban_task_approve_handler({
+        "task_id": task_id,
+        "claim_token": "claim-123",
+        "project_path": str(project),
+        "note": "Reviewer checked the task and approves completion.",
+    })
+    data = json.loads(out)
+
+    assert data["success"] is True
+    assert data["board"]["slug"] == board
+
+    conn = kb.connect(board=board)
+    try:
+        task = kb.get_task(conn, task_id)
+        events = kb.list_events_for_tasks(conn, [task_id])
+    finally:
+        conn.close()
+
+    assert task is not None
+    assert task.status == "done"
+    assert any(e.kind == "completed" for e in events)
+
+
+def test_swarm_task_read_routes_to_official_board_from_project_path(monkeypatch, tmp_path):
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    project = tmp_path / "legal project"
+    project.mkdir()
+    monkeypatch.setenv("HERMES_KANBAN_HOME", str(home))
+
+    board = "legal-legal-project-test"
+    conn = kb.connect(board=board)
+    try:
+        task_id = kb.create_task(
+            conn,
+            title="Official board task",
+            assignee="hpswarm-reviewer-content",
+            workspace_kind="dir",
+            workspace_path=str(project),
+        )
+    finally:
+        conn.close()
+
+    out = kanban_task_read_handler({
+        "task_id": task_id,
+        "board": board,
+        "project_path": str(project),
+    })
+    data = json.loads(out)
+
+    assert data["success"] is True
+    assert data["task"]["id"] == task_id
+    assert data["board"]["slug"] == board

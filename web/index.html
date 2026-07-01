@@ -8,6 +8,26 @@
       content="width=device-width, initial-scale=1.0, viewport-fit=cover"
     />
     <title>LEX - Dashboard</title>
+    <script>
+      // Boot-time paint — apply mode and theme before React mounts to avoid
+      // a visible flash of the wrong colour scheme (most jarring: light flash
+      // on a dark-theme install).
+      (function () {
+        var html = document.documentElement;
+        try {
+          var mode = localStorage.getItem('hermes-dashboard-mode') || 'dark';
+          var systemDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+          var resolved = mode === 'system' ? (systemDark ? 'dark' : 'light') : mode;
+          if (resolved === 'dark') html.classList.add('dark');
+          else html.classList.remove('dark');
+
+          // Stash the active theme name so the first frame can already
+          // show the right <title> / favicon flavour if desired.
+          var themeName = localStorage.getItem('hermes-dashboard-theme') || 'nous';
+          html.dataset.hermesTheme = themeName;
+        } catch (_) { /* localStorage unavailable — stay with defaults */ }
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

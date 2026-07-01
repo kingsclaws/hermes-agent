@@ -1,29 +1,29 @@
 ---
 name: design-an-interface
-description: Generate multiple radically different interface designs for a module using parallel sub-agents. Use when user wants to design an API, explore interface options, compare module shapes, or mentions "design it twice".
+description: 使用 parallel sub-agents 为 module 生成多个 radically different interface designs。Use when user wants to design an API, explore interface options, compare module shapes, or mentions "design it twice".
 ---
 
 # Design an Interface
 
-Based on "Design It Twice" from "A Philosophy of Software Design": your first idea is unlikely to be the best. Generate multiple radically different designs, then compare.
+基于 “A Philosophy of Software Design” 中的 “Design It Twice”：你的第一个想法很可能不是最好的。生成多个根本不同的 designs，然后比较。
 
 ## Workflow
 
 ### 1. Gather Requirements
 
-Before designing, understand:
+设计前先理解：
 
-- [ ] What problem does this module solve?
-- [ ] Who are the callers? (other modules, external users, tests)
-- [ ] What are the key operations?
-- [ ] Any constraints? (performance, compatibility, existing patterns)
-- [ ] What should be hidden inside vs exposed?
+- [ ] 这个 module 解决什么问题？
+- [ ] callers 是谁？（other modules、external users、tests）
+- [ ] key operations 是什么？
+- [ ] 有哪些 constraints？（performance、compatibility、existing patterns）
+- [ ] 什么应该隐藏在内部，什么应该暴露？
 
-Ask: "What does this module need to do? Who will use it?"
+询问：“这个 module 需要做什么？谁会使用它？”
 
 ### 2. Generate Designs (Parallel Sub-Agents)
 
-Spawn 3+ sub-agents simultaneously using Task tool. Each must produce a **radically different** approach.
+使用 Task tool 同时生成 3+ 个 sub-agents。每个都必须产出**根本不同**的 approach。
 
 ```
 Prompt template for each sub-agent:
@@ -47,48 +47,48 @@ Output format:
 
 ### 3. Present Designs
 
-Show each design with:
+每个 design 展示：
 
-1. **Interface signature** - types, methods, params
-2. **Usage examples** - how callers actually use it in practice
-3. **What it hides** - complexity kept internal
+1. **Interface signature** — types、methods、params
+2. **Usage examples** — callers 在实践中如何使用
+3. **What it hides** — 保持在内部的 complexity
 
-Present designs sequentially so user can absorb each approach before comparison.
+顺序展示 designs，让用户能在比较前吸收每个 approach。
 
 ### 4. Compare Designs
 
-After showing all designs, compare them on:
+展示所有 designs 后，按以下维度比较：
 
-- **Interface simplicity**: fewer methods, simpler params
-- **General-purpose vs specialized**: flexibility vs focus
-- **Implementation efficiency**: does shape allow efficient internals?
-- **Depth**: small interface hiding significant complexity (good) vs large interface with thin implementation (bad)
+- **Interface simplicity**：更少 methods、更简单 params
+- **General-purpose vs specialized**：flexibility vs focus
+- **Implementation efficiency**：shape 是否允许高效 internals？
+- **Depth**：小 interface 隐藏大量 complexity（好）vs 大 interface 配薄 implementation（坏）
 - **Ease of correct use** vs **ease of misuse**
 
-Discuss trade-offs in prose, not tables. Highlight where designs diverge most.
+用 prose 讨论 trade-offs，不用 tables。突出 designs 分歧最大的地方。
 
 ### 5. Synthesize
 
-Often the best design combines insights from multiple options. Ask:
+最好的 design 往往结合多个 options 的 insights。询问：
 
-- "Which design best fits your primary use case?"
-- "Any elements from other designs worth incorporating?"
+- “哪个 design 最适合你的 primary use case？”
+- “其他 designs 中是否有值得合并的 elements？”
 
 ## Evaluation Criteria
 
-From "A Philosophy of Software Design":
+来自 “A Philosophy of Software Design”：
 
-**Interface simplicity**: Fewer methods, simpler params = easier to learn and use correctly.
+**Interface simplicity**：更少 methods、更简单 params = 更容易学习和正确使用。
 
-**General-purpose**: Can handle future use cases without changes. But beware over-generalization.
+**General-purpose**：能不改动就处理未来 use cases。但要警惕 over-generalization。
 
-**Implementation efficiency**: Does interface shape allow efficient implementation? Or force awkward internals?
+**Implementation efficiency**：interface shape 是否允许高效 implementation？还是迫使 internals 变别扭？
 
-**Depth**: Small interface hiding significant complexity = deep module (good). Large interface with thin implementation = shallow module (avoid).
+**Depth**：小 interface 隐藏大量 complexity = deep module（好）。大 interface 配薄 implementation = shallow module（避免）。
 
 ## Anti-Patterns
 
-- Don't let sub-agents produce similar designs - enforce radical difference
-- Don't skip comparison - the value is in contrast
-- Don't implement - this is purely about interface shape
-- Don't evaluate based on implementation effort
+- 不要让 sub-agents 产出相似 designs；强制 radical difference
+- 不要跳过 comparison；价值在 contrast
+- 不要 implement；这里只讨论 interface shape
+- 不要基于 implementation effort 评价

@@ -216,6 +216,51 @@ class TestDelegateTask(unittest.TestCase):
         self.assertEqual(result["results"][1]["summary"], "Result B")
         self.assertIn("total_duration_seconds", result)
 
+    @patch("tools.delegate_tool._load_config")
+    @patch("tools.delegate_tool._run_single_child")
+    def test_default_background_dispatches_without_explicit_arg(self, mock_run, mock_config):
+        mock_config.return_value = {
+            "default_background": True,
+            "max_iterations": 50,
+            "max_concurrent_children": 3,
+        }
+        mock_run.return_value = {
+            "task_index": 0,
+            "status": "completed",
+            "summary": "Done in background",
+            "api_calls": 1,
+            "duration_seconds": 0.1,
+        }
+        parent = _make_mock_parent()
+
+        result = json.loads(delegate_task(goal="Fix tests", parent_agent=parent))
+
+        self.assertEqual(result["status"], "dispatched")
+        self.assertEqual(len(result["background_tasks"]), 1)
+        self.assertTrue(result["background_tasks"][0]["task_id"].startswith("bg-"))
+
+    @patch("tools.delegate_tool._load_config")
+    @patch("tools.delegate_tool._run_single_child")
+    def test_explicit_background_false_overrides_default(self, mock_run, mock_config):
+        mock_config.return_value = {
+            "default_background": True,
+            "max_iterations": 50,
+            "max_concurrent_children": 3,
+        }
+        mock_run.return_value = {
+            "task_index": 0,
+            "status": "completed",
+            "summary": "Done synchronously",
+            "api_calls": 1,
+            "duration_seconds": 0.1,
+        }
+        parent = _make_mock_parent()
+
+        result = json.loads(delegate_task(goal="Fix tests", background=False, parent_agent=parent))
+
+        self.assertIn("results", result)
+        self.assertEqual(result["results"][0]["summary"], "Done synchronously")
+
     @patch("tools.delegate_tool._run_single_child")
     def test_batch_mode_accepts_json_string_tasks(self, mock_run):
         mock_run.side_effect = [

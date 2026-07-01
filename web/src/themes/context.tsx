@@ -21,11 +21,21 @@ import type {
   ThemePalette,
   ThemeTypography,
 } from "./types";
+import { paletteToSeeds, synthLightSeeds } from "./seeds";
+import {
+  getUserThemes,
+  onUserThemesChange,
+  resolveTheme as resolveUserTheme,
+  listAllThemes,
+} from "./user-themes";
 import { api } from "@/lib/api";
 
 /** LocalStorage key — pre-applied before the React tree mounts to avoid
  *  a visible flash of the default palette on theme-overridden installs. */
 const STORAGE_KEY = "hermes-dashboard-theme";
+
+/** LocalStorage key for the colour scheme preference. */
+const MODE_STORAGE_KEY = "hermes-dashboard-mode";
 
 /** Tracks fontUrls we've already injected so multiple theme switches don't
  *  pile up <link> tags. Keyed by URL. */
@@ -260,7 +270,7 @@ function injectFontStylesheet(url: string | undefined) {
 // Apply a full theme to :root
 // ---------------------------------------------------------------------------
 
-function applyTheme(theme: DashboardTheme) {
+function applyTheme(theme: DashboardTheme, mode: "light" | "dark") {
   if (typeof document === "undefined") return;
   const root = document.documentElement;
 
@@ -268,21 +278,33 @@ function applyTheme(theme: DashboardTheme) {
   for (const cssVar of ALL_OVERRIDE_VARS) {
     root.style.removeProperty(cssVar);
   }
-  // Clear dynamic (asset/component) vars from the previous theme so the
+  // Clear dynamic (asset/component/seed) vars from the previous theme so the
   // new one starts clean — otherwise stale notched clip-paths, hero URLs,
   // etc. would bleed across theme switches.
   for (const prevKey of _PREV_DYNAMIC_VAR_KEYS) {
     root.style.removeProperty(prevKey);
   }
 
+  // Derive parametric surface seeds — dark vs light use different derivations.
+  const darkSeeds = paletteToSeeds(theme.palette);
+  const seeds = mode === "light"
+    ? { ...darkSeeds, ...synthLightSeeds(theme.palette) }
+    : darkSeeds;
+  // Advanced: theme authors can override individual seeds directly.
+  const seedOverrides = theme.seeds ?? {};
+
   const assetMap = assetVars(theme.assets);
   const componentMap = componentStyleVars(theme.componentStyles);
   _PREV_DYNAMIC_VAR_KEYS = new Set([
+    ...Object.keys(seeds),
+    ...Object.keys(seedOverrides),
     ...Object.keys(assetMap),
     ...Object.keys(componentMap),
   ]);
 
   const vars = {
+    ...seeds,
+    ...seedOverrides,
     ...paletteVars(theme.palette),
     ...typographyVars(theme.typography),
     ...layoutVars(theme.layout),
@@ -293,6 +315,9 @@ function applyTheme(theme: DashboardTheme) {
   for (const [k, v] of Object.entries(vars)) {
     root.style.setProperty(k, v);
   }
+
+  // Toggle .dark class for light/dark-specific CSS overrides.
+  root.classList.toggle("dark", mode === "dark");
 
   injectFontStylesheet(theme.typography.fontUrl);
   applyCustomCSS(theme.customCSS);
@@ -306,9 +331,31 @@ function applyTheme(theme: DashboardTheme) {
 export function ThemeProvider({ children }: { children: ReactNode }) {
   /** Name of the currently active theme (built-in id or user YAML name). */
   const [themeName, setThemeName] = useState<string>(() => {
-    if (typeof window === "undefined") return "default";
-    return window.localStorage.getItem(STORAGE_KEY) ?? "default";
+    if (typeof window === "undefined") return "nous";
+    return window.localStorage.getItem(STORAGE_KEY) ?? "nous";
   });
+
+  /** Colour scheme: light, dark, or follow the OS. */
+  const [mode, setModeState] = useState<"light" | "dark" | "system">(() => {
+    if (typeof window === "undefined") return "dark";
+    return (window.localStorage.getItem(MODE_STORAGE_KEY) as "light" | "dark" | "system") ?? "dark";
+  });
+
+  // Resolve system → actual light/dark.
+  const [systemDark, setSystemDark] = useState<boolean>(() => {
+    if (typeof window === "undefined") return true;
+    return window.matchMedia("(prefers-color-scheme: dark)").matches;
+  });
+
+  useEffect(() => {
+    const mq = window.matchMedia("(prefers-color-scheme: dark)");
+    const handler = (e: MediaQueryListEvent) => setSystemDark(e.matches);
+    mq.addEventListener("change", handler);
+    return () => mq.removeEventListener("change", handler);
+  }, []);
+
+  const resolvedMode: "light" | "dark" =
+    mode === "system" ? (systemDark ? "dark" : "light") : mode;
 
   /** All selectable themes (shown in the picker). Starts with just the
    *  built-ins; the API call below merges in user themes. */
@@ -333,18 +380,46 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
       return (
         BUILTIN_THEMES[name] ??
         userThemeDefs[name] ??
+        resolveUserTheme(name) ??
         defaultTheme
       );
     },
     [userThemeDefs],
   );
 
-  // Re-apply on every themeName change, or when user themes arrive from
-  // the API (since the active theme might be a user theme whose definition
-  // hadn't loaded yet on first render).
+  // Subscribe to user-theme store changes so installs/removals at runtime
+  // are reflected in the picker without a full page reload.
   useEffect(() => {
-    applyTheme(resolveTheme(themeName));
-  }, [themeName, resolveTheme]);
+    const sync = () => {
+      const users = getUserThemes();
+      setUserThemeDefs(users);
+      setAvailableThemes(
+        listAllThemes().map((t) => ({
+          name: t.name,
+          label: t.label,
+          description: t.description,
+          definition: t,
+        })),
+      );
+    };
+    sync(); // initial sync
+    return onUserThemesChange(sync);
+  }, []);
+
+  // Re-apply on every themeName or resolvedMode change.
+  useEffect(() => {
+    applyTheme(resolveTheme(themeName), resolvedMode);
+  }, [themeName, resolvedMode, resolveTheme]);
+
+  const setMode = useCallback(
+    (next: "light" | "dark" | "system") => {
+      setModeState(next);
+      if (typeof window !== "undefined") {
+        window.localStorage.setItem(MODE_STORAGE_KEY, next);
+      }
+    },
+    [],
+  );
 
   // Load server-side themes (built-ins + user YAMLs) once on mount.
   useEffect(() => {
@@ -391,7 +466,7 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
         ...availableThemes.map((t) => t.name),
         ...Object.keys(userThemeDefs),
       ]);
-      const next = knownNames.has(name) ? name : "default";
+      const next = knownNames.has(name) ? name : "nous";
       setThemeName(next);
       if (typeof window !== "undefined") {
         window.localStorage.setItem(STORAGE_KEY, next);
@@ -405,10 +480,13 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
     () => ({
       theme: resolveTheme(themeName),
       themeName,
+      mode,
+      resolvedMode,
       availableThemes,
       setTheme,
+      setMode,
     }),
-    [themeName, availableThemes, setTheme, resolveTheme],
+    [themeName, mode, resolvedMode, availableThemes, setTheme, setMode, resolveTheme],
   );
 
   return <ThemeContext.Provider value={value}>{children}</ThemeContext.Provider>;
@@ -420,17 +498,25 @@ export function useTheme(): ThemeContextValue {
 
 const ThemeContext = createContext<ThemeContextValue>({
   theme: defaultTheme,
-  themeName: "default",
+  themeName: "nous",
+  mode: "dark",
+  resolvedMode: "dark",
   availableThemes: Object.values(BUILTIN_THEMES).map((t) => ({
     name: t.name,
     label: t.label,
     description: t.description,
   })),
   setTheme: () => {},
+  setMode: () => {},
 });
 
 interface ThemeContextValue {
   availableThemes: ThemeListEntry[];
+  /** Active colour-scheme preference: light, dark, or follow OS. */
+  mode: "light" | "dark" | "system";
+  /** Resolved colour scheme — the actual light/dark being rendered. */
+  resolvedMode: "light" | "dark";
+  setMode: (mode: "light" | "dark" | "system") => void;
   setTheme: (name: string) => void;
   theme: DashboardTheme;
   themeName: string;

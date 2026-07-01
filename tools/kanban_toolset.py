@@ -344,6 +344,82 @@ def _official_task_to_dict(task) -> dict:
     }
 
 
+def _official_board_arg(args: dict) -> str | None:
+    board = str(args.get("board") or "").strip()
+    return board or None
+
+
+def _should_try_official_board(args: dict) -> bool:
+    """Return True when a tool call likely targets Hermes' official kanban DB."""
+    return bool(
+        _official_board_arg(args)
+        or os.environ.get("HERMES_KANBAN_BOARD")
+        or os.environ.get("HERMES_KANBAN_DB")
+        or os.environ.get("HERMES_KANBAN_TASK")
+    )
+
+
+def _connect_official_for_task(
+    task_id: str,
+    args: dict,
+    parent_agent=None,
+):
+    """Find an official Hermes kanban task.
+
+    The swarm toolset predates Hermes' multi-board kanban DB and still has a
+    project-local DB fallback.  Dispatcher-spawned workers, however, are pinned
+    to the official DB via HERMES_KANBAN_* env vars.  Try that path first so
+    worker tools mutate the same board the dispatcher claimed from.
+    """
+    from hermes_cli import kanban_db as kb
+
+    candidates: list[str | None] = []
+    explicit_board = _official_board_arg(args)
+    if explicit_board:
+        candidates.append(explicit_board)
+
+    env_board = os.environ.get("HERMES_KANBAN_BOARD", "").strip()
+    if env_board and env_board not in candidates:
+        candidates.append(env_board)
+
+    project_path = _resolve_project_path(args, parent_agent)
+    if project_path:
+        slug = _official_board_slug(project_path)
+        if slug not in candidates:
+            candidates.append(slug)
+
+    if os.environ.get("HERMES_KANBAN_DB") and None not in candidates:
+        candidates.append(None)
+
+    for board in candidates:
+        conn = kb.connect(board=board)
+        task = kb.get_task(conn, task_id)
+        if task is not None:
+            return kb, conn, task, board
+        conn.close()
+
+    if _should_try_official_board(args) or not project_path:
+        for meta in kb.list_boards(include_archived=False):
+            board = meta.get("slug")
+            if board in candidates:
+                continue
+            conn = kb.connect(board=board)
+            task = kb.get_task(conn, task_id)
+            if task is not None:
+                return kb, conn, task, board
+            conn.close()
+
+    return None
+
+
+def _official_claim_ok(task, claim_token: str) -> bool:
+    return bool(claim_token and task.claim_lock and str(task.claim_lock) == claim_token)
+
+
+def _official_result(success: bool, **fields: Any) -> str:
+    return json.dumps({"success": success, **fields}, ensure_ascii=False)
+
+
 def _parse_gates(gates_raw: Any) -> list[dict]:
     gates = []
     if gates_raw:
@@ -1757,6 +1833,10 @@ KANBAN_TASK_CLAIM_SCHEMA = {
                 "type": "string",
                 "description": "要认领的任务 ID。",
             },
+            "board": {
+                "type": "string",
+                "description": "可选：Hermes Kanban board slug。不填则使用 HERMES_KANBAN_BOARD/HERMES_KANBAN_DB 或当前项目推导。",
+            },
         },
         "required": ["task_id"],
     },
@@ -1776,6 +1856,10 @@ KANBAN_TASK_READ_SCHEMA = {
             "task_id": {
                 "type": "string",
                 "description": "任务 ID。",
+            },
+            "board": {
+                "type": "string",
+                "description": "可选：Hermes Kanban board slug。不填则使用 HERMES_KANBAN_BOARD/HERMES_KANBAN_DB 或当前项目推导。",
             },
         },
         "required": ["task_id"],
@@ -1806,6 +1890,10 @@ KANBAN_TASK_HANDOFF_SCHEMA = {
                 "type": "string",
                 "description": "认领时获得的 claim_token。用于验证操作权限。",
             },
+            "board": {
+                "type": "string",
+                "description": "可选：Hermes Kanban board slug。不填则使用 HERMES_KANBAN_BOARD/HERMES_KANBAN_DB 或当前项目推导。",
+            },
         },
         "required": ["task_id", "claim_token"],
     },
@@ -1833,6 +1921,10 @@ KANBAN_TASK_APPROVE_SCHEMA = {
             "claim_token": {
                 "type": "string",
                 "description": "认领时获得的 claim_token。",
+            },
+            "board": {
+                "type": "string",
+                "description": "可选：Hermes Kanban board slug。不填则使用 HERMES_KANBAN_BOARD/HERMES_KANBAN_DB 或当前项目推导。",
             },
         },
         "required": ["task_id", "claim_token"],
@@ -1862,6 +1954,10 @@ KANBAN_TASK_REJECT_SCHEMA = {
                 "type": "string",
                 "description": "认领时获得的 claim_token。",
             },
+            "board": {
+                "type": "string",
+                "description": "可选：Hermes Kanban board slug。不填则使用 HERMES_KANBAN_BOARD/HERMES_KANBAN_DB 或当前项目推导。",
+            },
         },
         "required": ["task_id", "reason", "claim_token"],
     },
@@ -1887,6 +1983,10 @@ KANBAN_TASK_REVISE_SCHEMA = {
             "claim_token": {
                 "type": "string",
                 "description": "认领时获得的 claim_token。",
+            },
+            "board": {
+                "type": "string",
+                "description": "可选：Hermes Kanban board slug。不填则使用 HERMES_KANBAN_BOARD/HERMES_KANBAN_DB 或当前项目推导。",
             },
         },
         "required": ["task_id", "claim_token"],
@@ -1930,6 +2030,38 @@ def kanban_task_claim_handler(args: dict, **kwargs) -> str:
         return json.dumps({"success": False, "error": "task_id 为必填项。"})
 
     parent_agent = kwargs.get("parent_agent")
+    official = _connect_official_for_task(task_id, args, parent_agent)
+    if official is not None:
+        kb, conn, row, board = official
+        assignee = getattr(parent_agent, "name", None) or os.environ.get("HERMES_PROFILE", "worker")
+        try:
+            if row.status == "ready":
+                claimed = kb.claim_task(conn, task_id, claimer=assignee)
+            elif row.status == "review":
+                claimed = kb.claim_review_task(conn, task_id, claimer=assignee)
+            else:
+                claimed = None
+            if claimed is None:
+                current = kb.get_task(conn, task_id)
+                return _official_result(
+                    False,
+                    error=(
+                        f"任务状态为 '{current.status if current else row.status}'，无法认领；"
+                        "只有 ready/review 且未被认领的官方 Kanban 任务可以认领。"
+                    ),
+                    board={"slug": board, "source": "hermes_kanban"},
+                )
+            task_dict = _official_task_to_dict(claimed)
+            task_dict["claim_token"] = claimed.claim_lock
+            return _official_result(
+                True,
+                task=task_dict,
+                board={"slug": board, "source": "hermes_kanban"},
+                message=f"任务 '{claimed.title}' 已认领。请开始工作。",
+            )
+        finally:
+            conn.close()
+
     try:
         conn, row, board_id = _resolve_task_db(task_id, args, parent_agent)
     except ValueError as e:
@@ -1972,6 +2104,41 @@ def kanban_task_read_handler(args: dict, **kwargs) -> str:
         return json.dumps({"success": False, "error": "task_id 为必填项。"})
 
     parent_agent = kwargs.get("parent_agent")
+    official = _connect_official_for_task(task_id, args, parent_agent)
+    if official is not None:
+        kb, conn, row, board = official
+        try:
+            events = []
+            for event in kb.list_events_for_tasks(conn, [task_id]):
+                events.append({
+                    "id": event.id,
+                    "task_id": event.task_id,
+                    "kind": event.kind,
+                    "payload": event.payload,
+                    "created_at": event.created_at,
+                    "run_id": event.run_id,
+                })
+            comments = [
+                {
+                    "id": c.id,
+                    "task_id": c.task_id,
+                    "author": c.author,
+                    "body": c.body,
+                    "created_at": c.created_at,
+                }
+                for c in kb.list_comments(conn, task_id)
+            ]
+            return _official_result(
+                True,
+                task=_official_task_to_dict(row),
+                comments=comments,
+                events=events,
+                event_count=len(events),
+                board={"slug": board, "source": "hermes_kanban"},
+            )
+        finally:
+            conn.close()
+
     try:
         conn, row, board_id = _resolve_task_db(task_id, args, parent_agent)
     except ValueError as e:
@@ -2005,6 +2172,34 @@ def kanban_task_handoff_handler(args: dict, **kwargs) -> str:
         return json.dumps({"success": False, "error": "task_id 和 claim_token 为必填项。"})
 
     parent_agent = kwargs.get("parent_agent")
+    official = _connect_official_for_task(task_id, args, parent_agent)
+    if official is not None:
+        kb, conn, row, board = official
+        try:
+            if not _official_claim_ok(row, claim_token):
+                return _official_result(False, error="claim_token 无效或已过期。")
+        finally:
+            conn.close()
+        from tools.kanban_tools import _handle_complete
+
+        complete_args = {
+            "task_id": task_id,
+            "summary": note or "handoff completed",
+            "metadata": {"swarm_action": "handoff", "approved_by": getattr(parent_agent, "name", None)},
+        }
+        if board:
+            complete_args["board"] = board
+        out = json.loads(_handle_complete(complete_args))
+        if out.get("ok"):
+            return _official_result(
+                True,
+                task_id=task_id,
+                board={"slug": board, "source": "hermes_kanban"},
+                message=out.get("message") or "已通过官方 Kanban handoff/complete 路由。",
+                kanban=out,
+            )
+        return _official_result(False, error=out.get("error") or json.dumps(out, ensure_ascii=False), kanban=out)
+
     try:
         conn, row, board_id = _resolve_task_db(task_id, args, parent_agent)
     except ValueError as e:
@@ -2139,6 +2334,10 @@ KANBAN_TASK_PROGRESS_SCHEMA = {
             "item": {"type": "string", "description": "可选：本次进度对应的子项标识（如 \"§5 利率条款\"）。"},
             "status": {"type": "string", "description": "可选：子项状态，如 ok / failed / skipped。"},
             "project_path": {"type": "string", "description": "项目根目录绝对路径。省略则用当前选中项目。"},
+            "board": {
+                "type": "string",
+                "description": "可选：Hermes Kanban board slug。不填则使用 HERMES_KANBAN_BOARD/HERMES_KANBAN_DB 或当前项目推导。",
+            },
         },
         "required": ["task_id", "note"],
     },
@@ -2152,6 +2351,27 @@ def kanban_task_progress_handler(args: dict, **kwargs) -> str:
         return json.dumps({"success": False, "error": "task_id 和 note 为必填项。"})
 
     parent_agent = kwargs.get("parent_agent")
+    official = _connect_official_for_task(task_id, args, parent_agent)
+    if official is not None:
+        kb, conn, row, board = official
+        actor = getattr(parent_agent, "name", None) or os.environ.get("HERMES_PROFILE", "worker")
+        payload = {"note": note}
+        if args.get("item"):
+            payload["item"] = str(args["item"]).strip()
+        if args.get("status"):
+            payload["status"] = str(args["status"]).strip()
+        try:
+            with kb.write_txn(conn):
+                kb._append_event(conn, task_id, "progress", payload)  # noqa: SLF001
+            kb.add_comment(conn, task_id, author=actor, body=f"[progress] {note}")
+            return _official_result(
+                True,
+                board={"slug": board, "source": "hermes_kanban"},
+                message="进度已记录。Coordinator 可通过 board/session 通知链路查看。",
+            )
+        finally:
+            conn.close()
+
     try:
         conn, row, board_id = _resolve_task_db(task_id, args, parent_agent)
     except ValueError as e:
@@ -2181,6 +2401,34 @@ def kanban_task_approve_handler(args: dict, **kwargs) -> str:
         return json.dumps({"success": False, "error": "task_id 和 claim_token 为必填项。"})
 
     parent_agent = kwargs.get("parent_agent")
+    official = _connect_official_for_task(task_id, args, parent_agent)
+    if official is not None:
+        kb, conn, row, board = official
+        try:
+            if not _official_claim_ok(row, claim_token):
+                return _official_result(False, error="claim_token 无效或已过期。")
+        finally:
+            conn.close()
+        from tools.kanban_tools import _handle_complete
+
+        complete_args = {
+            "task_id": task_id,
+            "summary": note or "approved",
+            "metadata": {"swarm_action": "approve", "approved_by": getattr(parent_agent, "name", None)},
+        }
+        if board:
+            complete_args["board"] = board
+        out = json.loads(_handle_complete(complete_args))
+        if out.get("ok"):
+            return _official_result(
+                True,
+                task_id=task_id,
+                board={"slug": board, "source": "hermes_kanban"},
+                message=out.get("message") or "官方 Kanban 任务已批准/完成。",
+                kanban=out,
+            )
+        return _official_result(False, error=out.get("error") or json.dumps(out, ensure_ascii=False), kanban=out)
+
     try:
         conn, row, board_id = _resolve_task_db(task_id, args, parent_agent)
     except ValueError as e:
@@ -2332,6 +2580,30 @@ def kanban_task_reject_handler(args: dict, **kwargs) -> str:
         return json.dumps({"success": False, "error": "task_id、reason 和 claim_token 为必填项。"})
 
     parent_agent = kwargs.get("parent_agent")
+    official = _connect_official_for_task(task_id, args, parent_agent)
+    if official is not None:
+        kb, conn, row, board = official
+        try:
+            if not _official_claim_ok(row, claim_token):
+                return _official_result(False, error="claim_token 无效或已过期。")
+        finally:
+            conn.close()
+        from tools.kanban_tools import _handle_block
+
+        block_args = {"task_id": task_id, "reason": reason}
+        if board:
+            block_args["board"] = board
+        out = json.loads(_handle_block(block_args))
+        if out.get("ok"):
+            return _official_result(
+                True,
+                task_id=task_id,
+                board={"slug": board, "source": "hermes_kanban"},
+                message=f"已拒绝/阻塞任务。理由: {reason}",
+                kanban=out,
+            )
+        return _official_result(False, error=out.get("error") or json.dumps(out, ensure_ascii=False), kanban=out)
+
     try:
         conn, row, board_id = _resolve_task_db(task_id, args, parent_agent)
     except ValueError as e:
@@ -2391,6 +2663,24 @@ def kanban_task_revise_handler(args: dict, **kwargs) -> str:
         return json.dumps({"success": False, "error": "task_id 和 claim_token 为必填项。"})
 
     parent_agent = kwargs.get("parent_agent")
+    official = _connect_official_for_task(task_id, args, parent_agent)
+    if official is not None:
+        kb, conn, row, board = official
+        try:
+            if not _official_claim_ok(row, claim_token):
+                return _official_result(False, error="claim_token 无效或已过期。")
+            ok = kb.block_task(conn, task_id, reason=f"revise requested: {note}")
+            if not ok:
+                return _official_result(False, error=f"任务状态为 '{row.status}'，无法重新提交/阻塞。")
+            return _official_result(
+                True,
+                task_id=task_id,
+                board={"slug": board, "source": "hermes_kanban"},
+                message="官方 Kanban 任务已记录 revise 请求并转为 blocked，等待重新分派/人工处理。",
+            )
+        finally:
+            conn.close()
+
     try:
         conn, row, board_id = _resolve_task_db(task_id, args, parent_agent)
     except ValueError as e:

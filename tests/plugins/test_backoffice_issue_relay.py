@@ -94,3 +94,32 @@ def test_ordinary_user_validation_error_is_not_recorded(tmp_path, monkeypatch):
 
     assert transformed is None
     assert not issue_dir.exists()
+
+
+def test_kanban_terminal_workspace_failure_creates_backoffice_issue(tmp_path, monkeypatch):
+    plugin = _load_plugin()
+    issue_dir = tmp_path / "issues"
+    monkeypatch.setattr(plugin, "_FALLBACK_ISSUE_DIR", issue_dir)
+    monkeypatch.setattr(plugin, "_project_root_from_args", lambda _args: None)
+    monkeypatch.setenv("HERMES_KANBAN_TASK", "t_workspace")
+
+    transformed = plugin._on_transform_tool_result(
+        tool_name="terminal",
+        args={
+            "cmd": (
+                "find '/workingfile/106. 国金资管 - 欢乐颂' -type f "
+                "|| echo Workspace empty"
+            )
+        },
+        result={"error": "Workspace empty — Source files not found under /workingfile/106. 国金资管 - 欢乐颂"},
+        session_id="coord-session",
+    )
+
+    files = list(issue_dir.glob("*.json"))
+    assert len(files) == 1
+    issue = json.loads(files[0].read_text(encoding="utf-8"))
+    assert issue["category"] == "workflow"
+    assert issue["severity"] == "high"
+    assert issue["tool_name"] == "terminal"
+    assert "/workingfile/106. 国金资管 - 欢乐颂" in issue["artifact_paths"]
+    assert "backoffice_issue" in json.loads(transformed)

@@ -124,6 +124,7 @@ _PUBLIC_API_PATHS: frozenset = frozenset({
     "/api/dashboard/themes",
     "/api/dashboard/plugins",
     "/api/kanban/broadcast",  # loopback-only kanban event relay from gateway notifier
+    "/api/gateway/token",     # remote Desktop auth — uses Bearer API key, not session token
 })
 
 
@@ -333,7 +334,7 @@ _SCHEMA_OVERRIDES: Dict[str, Dict[str, Any]] = {
     "dashboard.theme": {
         "type": "select",
         "description": "Web dashboard visual theme",
-        "options": ["default", "midnight", "ember", "mono", "cyberpunk", "rose"],
+        "options": ["nous", "default", "midnight", "ember", "mono", "cyberpunk", "rose"],
     },
     "display.resume_display": {
         "type": "select",
@@ -6507,6 +6508,41 @@ async def pty_ws(ws: WebSocket) -> None:
 # ---------------------------------------------------------------------------
 
 
+# ── Gateway token endpoint for remote Desktop clients ────────────────
+# Desktop needs the session token to open a WebSocket to /api/ws.
+# Authenticate with a pre-shared API key (env HERMES_GATEWAY_API_KEY
+# or the global _SESSION_TOKEN as fallback for loopback-only setups).
+
+_GATEWAY_API_KEY = os.environ.get(
+    "HERMES_GATEWAY_API_KEY",
+    os.environ.get("ANTHROPIC_API_KEY", ""),
+).strip()
+
+if not _GATEWAY_API_KEY:
+    _GATEWAY_API_KEY = _SESSION_TOKEN  # fallback: session token itself
+
+
+@app.get("/api/gateway/token")
+async def gateway_token(request: Request) -> JSONResponse:
+    """Return the session token needed for a remote Desktop to open
+    ``/api/ws?token=...``.  Requires ``Authorization: Bearer <key>``
+    where ``<key>`` matches ``HERMES_GATEWAY_API_KEY`` (or falls back
+    to the session token itself for loopback-only configurations).
+    """
+    auth = request.headers.get("Authorization", "")
+    expected = f"Bearer {_GATEWAY_API_KEY}"
+    if not hmac.compare_digest(auth, expected):
+        host = request.client.host if request.client else ""
+        _log.warning("Gateway token request rejected: host=%s auth_head=%s",
+                     host, auth[:20] if len(auth) >= 20 else auth)
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+
+    netloc = request.headers.get("Host", "localhost:9119")
+    scheme = "wss" if request.url.scheme == "https" else "ws"
+    ws_url = f"{scheme}://{netloc}/api/ws?token={_SESSION_TOKEN}"
+    return JSONResponse({"token": _SESSION_TOKEN, "ws_url": ws_url})
+
+
 @app.websocket("/api/ws")
 async def gateway_ws(ws: WebSocket) -> None:
     if not _ws_auth_ok(ws):
@@ -7699,6 +7735,7 @@ def mount_spa(application: FastAPI):
 # Built-in dashboard themes — label + description only.  The actual color
 # definitions live in the frontend (web/src/themes/presets.ts).
 _BUILTIN_DASHBOARD_THEMES = [
+    {"name": "nous",          "label": "Nous",                "description": "Desktop nous — glass neutrals with Nous blue accents"},
     {"name": "default",       "label": "Hermes Teal",         "description": "Classic dark teal — the canonical Hermes look"},
     {"name": "default-large", "label": "Hermes Teal (Large)", "description": "Hermes Teal with bigger fonts and roomier spacing"},
     {"name": "midnight",      "label": "Midnight",            "description": "Deep blue-violet with cool accents"},
@@ -7806,13 +7843,16 @@ def _normalise_theme_definition(data: Dict[str, Any]) -> Optional[Dict[str, Any]
         "midground": _layer("midground", "#ffe6cb", 1.0),
         "foreground": _layer("foreground", "#ffffff", 0.0),
         "warmGlow": palette_src.get("warmGlow") or data.get("warmGlow") or "rgba(255, 189, 56, 0.35)",
-        "noiseOpacity": 1.0,
     }
+    # noiseOpacity is promoted to colorOverrides["--noise-opacity-mul"]
+    # so the seed system (paletteToSeeds) handles it uniformly.
     raw_noise = palette_src.get("noiseOpacity", data.get("noiseOpacity"))
-    try:
-        palette["noiseOpacity"] = float(raw_noise) if raw_noise is not None else 1.0
-    except (TypeError, ValueError):
-        palette["noiseOpacity"] = 1.0
+    if raw_noise is not None:
+        try:
+            noise_val = str(float(raw_noise))
+            color_overrides.setdefault("--noise-opacity-mul", noise_val)
+        except (TypeError, ValueError):
+            pass
 
     # Typography
     typo_src = data.get("typography", {}) if isinstance(data.get("typography"), dict) else {}
@@ -7832,13 +7872,15 @@ def _normalise_theme_definition(data: Dict[str, Any]) -> Optional[Dict[str, Any]
     if isinstance(density, str) and density in {"compact", "comfortable", "spacious"}:
         layout["density"] = density
 
-    # Color overrides — keep only valid keys with string values.
+    # Color overrides — keep valid shadcn keys and raw CSS var names.
     overrides_src = data.get("colorOverrides", {})
     color_overrides: Dict[str, str] = {}
     if isinstance(overrides_src, dict):
         for key, val in overrides_src.items():
-            if key in _THEME_OVERRIDE_KEYS and isinstance(val, str) and val.strip():
-                color_overrides[key] = val
+            if isinstance(key, str) and isinstance(val, str) and val.strip():
+                # shadcn token names (camelCase) or raw CSS vars (--theme-*, --dt-*)
+                if key in _THEME_OVERRIDE_KEYS or key.startswith(("--theme-", "--dt-")):
+                    color_overrides[key] = val
 
     # Assets — named slots + arbitrary user-defined keys.  Values must be
     # strings (URLs or CSS ``url(...)``/``linear-gradient(...)`` expressions).
@@ -7920,6 +7962,20 @@ def _normalise_theme_definition(data: Dict[str, Any]) -> Optional[Dict[str, Any]
         result["customCSS"] = custom_css
     if component_styles:
         result["componentStyles"] = component_styles
+    # Advanced: direct seed/knob overrides for the parametric surface system.
+    seeds_src = data.get("seeds", {})
+    if isinstance(seeds_src, dict):
+        seeds_out: Dict[str, str] = {}
+        for key, val in seeds_src.items():
+            if (
+                isinstance(key, str)
+                and key.startswith("--theme-")
+                and isinstance(val, str)
+                and val.strip()
+            ):
+                seeds_out[key] = val
+        if seeds_out:
+            result["seeds"] = seeds_out
     return result
 
 
@@ -7956,7 +8012,7 @@ async def get_dashboard_themes():
     them without a stub.
     """
     config = load_config()
-    active = cfg_get(config, "dashboard", "theme", default="default")
+    active = cfg_get(config, "dashboard", "theme", default="nous")
     user_themes = _discover_user_themes()
     seen = set()
     themes = []

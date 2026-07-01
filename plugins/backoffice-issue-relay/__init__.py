@@ -34,6 +34,10 @@ _LEX_TOOL_NAMES = {
     "lex_ref",
     "lex_heal",
     "lex_review",
+    "execute_code",
+    "terminal",
+    "terminal_exec",
+    "run_shell_command",
 }
 
 _WORKFLOW_TOOL_PREFIXES = (
@@ -97,8 +101,13 @@ _TECH_ERROR_PATTERNS: Tuple[Tuple[str, str, str], ...] = (
     ),
     (
         "workflow",
+        "high",
+        r"Workspace empty|Source files? not found|workingfile|worker.*workspace|workspace.*empty",
+    ),
+    (
+        "workflow",
         "medium",
-        r"stale gateway|gateway_state|dispatcher|worker.*claim|kanban|claim lock",
+        r"stale gateway|gateway_state|dispatcher|worker.*claim|kanban|claim lock|hpswarm-coordinator",
     ),
 )
 
@@ -145,6 +154,16 @@ _SOURCE_CANDIDATES_BY_TOOL = {
         "hermes_cli/kanban_db.py",
         "tools/kanban_toolset.py",
         "plugins/kanban",
+    ],
+    "terminal": [
+        "tools/terminal_tool.py",
+        "tools/environments/docker.py",
+        "hermes_cli/kanban_db.py",
+    ],
+    "execute_code": [
+        "tools/python_tool.py",
+        "tools/terminal_tool.py",
+        "hermes_cli/kanban_db.py",
     ],
 }
 
@@ -196,6 +215,10 @@ def _is_candidate_tool(tool_name: str) -> bool:
         tool_name in _LEX_TOOL_NAMES
         or tool_name.startswith("lex_")
         or tool_name.startswith(_WORKFLOW_TOOL_PREFIXES)
+        or (
+            bool(os.environ.get("HERMES_KANBAN_TASK"))
+            and tool_name in {"terminal", "terminal_exec", "execute_code", "run_shell_command"}
+        )
     )
 
 
@@ -275,6 +298,27 @@ def _looks_like_path(value: str) -> bool:
     return value.startswith(("/", "~/")) or value.endswith((".docx", ".pdf", ".md", ".html", ".json"))
 
 
+_QUOTED_PATH_IN_TEXT_RE = re.compile(
+    r"(?P<quote>['\"`])(?P<path>(?:/workingfile|/workspace|/data/projects|/tmp|~)/.+?)(?P=quote)"
+)
+_PATH_IN_TEXT_RE = re.compile(
+    r"(?P<path>(?:/workingfile|/workspace|/data/projects|/tmp|~)/[^\s'\"`<>]+)"
+)
+
+
+def _extract_paths_from_text(value: str) -> list[str]:
+    paths: list[str] = []
+    for match in _QUOTED_PATH_IN_TEXT_RE.finditer(value):
+        path = match.group("path").rstrip(".,;:，。；：)")
+        if path:
+            paths.append(path)
+    for match in _PATH_IN_TEXT_RE.finditer(value):
+        path = match.group("path").rstrip(".,;:，。；：)")
+        if path and not any(path == existing or path.startswith(existing + "/") for existing in paths):
+            paths.append(path)
+    return paths
+
+
 def _iter_string_values(value: Any) -> Iterable[str]:
     if isinstance(value, dict):
         for nested in value.values():
@@ -291,25 +335,29 @@ def _artifact_paths(args: Any) -> list[str]:
     for value in _iter_string_values(args):
         if _looks_like_path(value):
             paths.append(value)
+        else:
+            paths.extend(_extract_paths_from_text(value))
     return sorted(set(paths))
 
 
 def _project_root_from_args(args: Any) -> Optional[Path]:
     for value in _iter_string_values(args):
-        if not _looks_like_path(value):
-            continue
-        try:
-            p = Path(value).expanduser()
-        except Exception:
-            continue
-        candidates = [p if p.is_dir() else p.parent, *p.parents]
-        for candidate in candidates:
-            if (candidate / ".hermes-project").is_dir():
-                return candidate
-        if str(p).startswith("/workingfile/"):
-            parts = p.parts
-            if len(parts) >= 3:
-                return Path(parts[0]) / parts[1] / parts[2]
+        candidates_text = [value] if _looks_like_path(value) else []
+        if not candidates_text:
+            candidates_text.extend(_extract_paths_from_text(value))
+        for candidate_text in candidates_text:
+            try:
+                p = Path(candidate_text).expanduser()
+            except Exception:
+                continue
+            candidates = [p if p.is_dir() else p.parent, *p.parents]
+            for candidate in candidates:
+                if (candidate / ".hermes-project").is_dir():
+                    return candidate
+            if str(p).startswith("/workingfile/"):
+                parts = p.parts
+                if len(parts) >= 3:
+                    return Path(parts[0]) / parts[1] / parts[2]
     return None
 
 
@@ -332,6 +380,64 @@ def _fingerprint(category: str, tool_name: str, error: str, project_path: str) -
         sort_keys=True,
     )
     return hashlib.sha256(seed.encode("utf-8")).hexdigest()[:16]
+
+
+_AUTOFIX_LOCK = threading.Lock()
+_AUTOFIX_RUNNING = False
+
+# Category → Claude skill mapping
+_SKILL_FOR_CATEGORY = {
+    "bug":       "/diagnose",                    # crash / wrong output → fix
+    "lexitool":  "/diagnose",                    # tool parameter errors → fix
+    "workflow":  "/diagnose",                    # workflow execution errors → fix
+    "feature":   "/to-prd",                      # new tool / feature → write PRD
+    "sop":       "/to-issues",                   # process / pattern → create workflow tickets
+    "arch":      "/to-issues",                   # design / structure → create issues
+    "perf":      "/diagnose",                    # performance regression → fix
+    "security":  "/diagnose",                    # security issue → fix
+}
+
+
+def _trigger_autofix(issue: Dict[str, Any]) -> None:
+    """Spawn background autofix with the right skill for the issue type."""
+    global _AUTOFIX_RUNNING
+    category = str(issue.get("category", "")).lower()
+    severity = str(issue.get("severity", "")).lower()
+
+    # Auto-fix: bugs & errors immediately; features/SOPs queue for review
+    auto_categories = ("bug", "lexitool", "workflow", "perf", "security")
+    if category not in _SKILL_FOR_CATEGORY:
+        return
+    if category not in auto_categories and severity != "high":
+        return  # features/SOPs: only auto-fix if high severity
+
+    with _AUTOFIX_LOCK:
+        if _AUTOFIX_RUNNING:
+            return
+        _AUTOFIX_RUNNING = True
+
+    skill = _SKILL_FOR_CATEGORY.get(category, "/diagnose")
+
+    def _run():
+        global _AUTOFIX_RUNNING
+        try:
+            import subprocess, time
+            time.sleep(5)
+            issue_id = issue.get("id", "")
+            subprocess.run(
+                ["/opt/hermes/scripts/backoffice-autofix.sh",
+                 "--issue", issue_id, "--max-fixes", "1", "--skill", skill],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                timeout=600,
+            )
+        except Exception:
+            pass
+        finally:
+            with _AUTOFIX_LOCK:
+                _AUTOFIX_RUNNING = False
+
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
 
 
 def _atomic_write_json(path: Path, payload: Dict[str, Any]) -> None:
@@ -589,6 +695,7 @@ def _record_issue(
         issue["maintainer_prompt"] = _maintainer_prompt(issue)
         _atomic_write_json(path, issue)
         _write_markdown_report(path, issue)
+        _trigger_autofix(issue)
         issue["_path"] = str(path)
         return issue
 

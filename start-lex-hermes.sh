@@ -22,9 +22,10 @@ platform_toolsets:
   cli:
     - hermes-cli
 delegation:
+  default_background: true
   max_spawn_depth: 1
   orchestrator_enabled: true
-  max_concurrent_children: 3
+  max_concurrent_children: 5
   max_iterations: 50
   child_timeout_seconds: 600
 HARNESS_EOF
@@ -161,10 +162,14 @@ for name, desc, is_coord in specs:
         'platform_toolsets': {
             'cli': toolsets
         },
+        'plugins': {
+            'enabled': ['backoffice-issue-relay', 'legal-drafting-gate'],
+        },
         'delegation': {
+            'default_background': True,
             'max_spawn_depth': 1,
             'orchestrator_enabled': True,
-            'max_concurrent_children': 3,
+            'max_concurrent_children': 5,
             'max_iterations': 50,
             'child_timeout_seconds': 600,
         },
@@ -197,6 +202,7 @@ create_profile_symlinks() {
   echo "[lex-hermes] Creating profile symlinks (hpswarm-* → lex-*)..."
   local prof_root="/root/.hermes/profiles"
   local pairs=(
+    "hpswarm-coordinator:lex-coordinator"
     "hpswarm-drafter:lex-drafter"
     "hpswarm-reviewer-content:lex-reviewer-content"
     "hpswarm-reviewer-format:lex-reviewer-format"
@@ -215,6 +221,97 @@ create_profile_symlinks() {
   echo "[lex-hermes] Profile symlinks ready"
 }
 create_profile_symlinks
+
+# ── Lex Master bootstrap: API entrypoint + Weixin notification tools ─────
+# The Outlook/API workflow enters through the lex-master api_server platform.
+# Hermes deliberately keeps api_server's default toolset narrow, so make the
+# profile-specific opt-in explicit here instead of changing core defaults.
+ensure_lex_master_profile() {
+  echo "[lex-hermes] Ensuring lex-master API + notification toolsets..."
+
+  /opt/hermes/.venv/bin/python - <<'PY' 2>/dev/null || echo "[lex-hermes] WARNING: lex-master API bootstrap failed"
+from pathlib import Path
+import sys
+
+try:
+    import yaml
+except Exception as exc:  # pragma: no cover - boot diagnostic
+    print(f"[lex-hermes] WARNING: PyYAML unavailable: {exc}", file=sys.stderr)
+    raise
+
+profile_dir = Path("/root/.hermes/profiles/lex-master")
+profile_dir.mkdir(parents=True, exist_ok=True)
+config_path = profile_dir / "config.yaml"
+
+try:
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8")) if config_path.exists() else {}
+except Exception:
+    config = {}
+if not isinstance(config, dict):
+    config = {}
+
+platform_toolsets = config.setdefault("platform_toolsets", {})
+if not isinstance(platform_toolsets, dict):
+    platform_toolsets = {}
+    config["platform_toolsets"] = platform_toolsets
+
+api_toolsets = platform_toolsets.setdefault("api_server", [])
+if not isinstance(api_toolsets, list):
+    api_toolsets = []
+    platform_toolsets["api_server"] = api_toolsets
+
+required_api_toolsets = [
+    "messaging",
+    "cronjob",
+    "project_management",
+    "kanban",
+    "kanban_swarm",
+    "lexitool",
+    "legal_orchestration",
+    "session_search",
+    "memory",
+    "skills",
+    "todo",
+    "terminal",
+    "file",
+    "web",
+]
+for toolset in required_api_toolsets:
+    if toolset not in api_toolsets:
+        api_toolsets.append(toolset)
+
+cli_toolsets = platform_toolsets.setdefault("cli", [])
+if isinstance(cli_toolsets, list) and "messaging" not in cli_toolsets:
+    cli_toolsets.append("messaging")
+
+platforms = config.setdefault("platforms", {})
+if not isinstance(platforms, dict):
+    platforms = {}
+    config["platforms"] = platforms
+
+api_server = platforms.setdefault("api_server", {})
+if not isinstance(api_server, dict):
+    api_server = {}
+    platforms["api_server"] = api_server
+api_server["enabled"] = True
+extra = api_server.setdefault("extra", {})
+if not isinstance(extra, dict):
+    extra = {}
+    api_server["extra"] = extra
+extra.setdefault("host", "0.0.0.0")
+extra.setdefault("port", 8642)
+extra.setdefault("key", "123456")
+extra.setdefault("allow_weak_key", True)
+extra.setdefault("model_name", "lex-master")
+
+config_path.write_text(
+    yaml.safe_dump(config, allow_unicode=True, sort_keys=False),
+    encoding="utf-8",
+)
+print("[lex-hermes] lex-master api_server toolsets include messaging/send_message")
+PY
+}
+ensure_lex_master_profile
 
 echo "[lex-hermes] Starting gateway..."
 hermes gateway run &

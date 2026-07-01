@@ -37,7 +37,9 @@ export interface ThemePalette {
   warmGlow: string;
   /** Scalar multiplier (0–1.2) on the noise overlay. Lower for softer themes
    *  like Mono and Rosé, higher for grittier themes like Cyberpunk. */
-  noiseOpacity: number;
+  /** Noise opacity multiplier (0–1.2). Defaults to 1. Set via
+   *  `colorOverrides["--noise-opacity-mul"]` for per-theme tuning. */
+  noiseOpacity?: number;
 }
 
 export interface ThemeTypography {
@@ -120,7 +122,11 @@ export interface ThemeComponentStyles {
 }
 
 /** Optional hex overrides keyed by shadcn-compat token name (without the
- *  `--color-` prefix). Any key set here wins over the DS cascade. */
+ *  `--color-` prefix). Any key set here wins over the DS cascade.
+ *
+ *  Also accepts raw CSS custom property names starting with `--theme-` or
+ *  `--dt-` (e.g. `--theme-mix-card`, `--dt-ring`). Values are written
+ *  directly to `:root` on theme apply. */
 export interface ThemeColorOverrides {
   card?: string;
   cardForeground?: string;
@@ -141,6 +147,8 @@ export interface ThemeColorOverrides {
   border?: string;
   input?: string;
   ring?: string;
+  /** Catch-all for raw CSS var overrides (e.g. `--theme-mix-card`). */
+  [cssVar: string]: string | undefined;
 }
 
 export interface DashboardTheme {
@@ -162,6 +170,12 @@ export interface DashboardTheme {
   /** Per-component CSS-var overrides. See `ThemeComponentStyles`. */
   componentStyles?: ThemeComponentStyles;
   colorOverrides?: ThemeColorOverrides;
+  /**
+   * Advanced: directly set seed/knob CSS variables, bypassing the
+   * palette-derived defaults. Keys must start with `--theme-` or `--dt-`.
+   * Example: `{ "--theme-mix-card": "78%" }`.
+   */
+  seeds?: Record<string, string>;
 }
 
 /**

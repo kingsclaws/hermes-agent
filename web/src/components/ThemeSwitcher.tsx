@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { Palette, Check } from "lucide-react";
+import { Palette, Check, Sun, Moon, Monitor } from "lucide-react";
 import { Button } from "@nous-research/ui/ui/components/button";
 import { ListItem } from "@nous-research/ui/ui/components/list-item";
 import { BottomSheet } from "@nous-research/ui/ui/components/bottom-sheet";
@@ -25,7 +25,7 @@ import { cn } from "@/lib/utils";
  * the sidebar (same idea as a responsive Drawer).
  */
 export function ThemeSwitcher({ collapsed = false, dropUp = false }: ThemeSwitcherProps) {
-  const { themeName, availableThemes, setTheme } = useTheme();
+  const { themeName, availableThemes, setTheme, mode, setMode } = useTheme();
   const { t } = useI18n();
   const [open, setOpen] = useState(false);
   const wrapperRef = useRef<HTMLDivElement>(null);
@@ -104,6 +104,7 @@ export function ThemeSwitcher({ collapsed = false, dropUp = false }: ThemeSwitch
               setTheme={setTheme}
               themeName={themeName}
             />
+            <ModeSelector mode={mode} setMode={setMode} />
           </div>
         </BottomSheet>
       )}
@@ -142,6 +143,7 @@ export function ThemeSwitcher({ collapsed = false, dropUp = false }: ThemeSwitch
               setTheme={setTheme}
               themeName={themeName}
             />
+            <ModeSelector mode={mode} setMode={setMode} />
           </div>
         );
         return dropUp ? createPortal(dropdown, document.body) : dropdown;
@@ -227,6 +229,48 @@ function PlaceholderSwatch() {
       aria-hidden
       className="h-4 w-9 shrink-0 border border-dashed border-current/20"
     />
+  );
+}
+
+const MODE_OPTIONS = [
+  { value: "dark" as const, icon: Moon, label: "Dark" },
+  { value: "light" as const, icon: Sun, label: "Light" },
+  { value: "system" as const, icon: Monitor, label: "System" },
+];
+
+function ModeSelector({
+  mode,
+  setMode,
+}: {
+  mode: "light" | "dark" | "system";
+  setMode: (m: "light" | "dark" | "system") => void;
+}) {
+  return (
+    <div className="border-t border-current/20 px-3 py-2">
+      <div className="flex gap-1">
+        {MODE_OPTIONS.map((opt) => {
+          const isActive = mode === opt.value;
+          const Icon = opt.icon;
+          return (
+            <button
+              key={opt.value}
+              type="button"
+              onClick={() => setMode(opt.value)}
+              className={cn(
+                "flex items-center gap-1.5 rounded px-2 py-1 text-xs transition-colors",
+                isActive
+                  ? "bg-accent-fill-2 text-foreground"
+                  : "text-text-tertiary hover:text-foreground hover:bg-accent-fill-1",
+              )}
+              title={`${opt.label} mode`}
+            >
+              <Icon className="h-3 w-3" />
+              <span className="hidden sm:inline">{opt.label}</span>
+            </button>
+          );
+        })}
+      </div>
+    </div>
   );
 }
 

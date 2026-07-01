@@ -1,6 +1,6 @@
 # GLOSSARY.md Format
 
-`GLOSSARY.md` is the canonical language for this teaching workspace. All explainers, exercises, and learning records should adhere to its terminology. Building it is itself part of learning: compressing a concept into a tight definition is evidence the user understands it.
+`GLOSSARY.md` 是这个 teaching workspace 的 canonical language。所有 explainers、exercises 和 learning records 都应遵守它的 terminology。构建它本身就是学习的一部分：把一个 concept 压缩成 tight definition，是用户理解它的证据。
 
 ## Structure
 
@@ -26,10 +26,10 @@ _Avoid_: Effort score, intensity rating
 
 ## Rules
 
-- **Add a term only when the user understands it.** The glossary is a record of compressed knowledge, not a dictionary the user reads to learn. If the user has just been introduced to a concept, wait until they can use it correctly before promoting it here.
-- **Be opinionated.** When several words exist for the same concept, pick the best one and list the rest as aliases to avoid. This is how language compresses.
-- **Keep definitions tight.** One or two sentences. Define what the term IS, not what it does or how to do it.
-- **Use the glossary's own terms inside definitions.** Once a term is in the glossary, prefer it everywhere — including inside other definitions. This is what makes complex terms easier to grasp later.
-- **Group under subheadings** when natural clusters emerge (e.g. `## Anatomy`, `## Programming`). A flat list is fine when terms cohere.
-- **Flag ambiguities explicitly.** If a term is used loosely in the wider field, note the resolution: "In this workspace, 'set' always means a working set — warm-ups are tracked separately."
-- **Revise as understanding deepens.** A definition the user wrote in week one may be wrong by week six. Update in place; do not leave stale entries.
+- **Add a term only when the user understands it.** Glossary 是 compressed knowledge 的记录，不是给用户阅读学习的 dictionary。如果用户刚接触一个 concept，等到他们能正确使用它后，再把它提升到这里。
+- **Be opinionated.** 当同一 concept 有多个词时，选择最好的那个，并把其他词列为应避免的 aliases。这就是 language compression 的方式。
+- **Keep definitions tight.** 一两句话。定义这个 term 是什么，而不是它做什么或怎么做。
+- **Use the glossary's own terms inside definitions.** 一旦某个 term 进入 glossary，就在所有地方优先使用它，包括其他 definitions 内部。这会让复杂 terms 之后更容易理解。
+- **Group under subheadings** when natural clusters emerge（例如 `## Anatomy`、`## Programming`）。当 terms 自然内聚时，扁平列表也可以。
+- **Flag ambiguities explicitly.** 如果一个 term 在更大领域中被宽泛使用，记录本 workspace 的 resolution："In this workspace, 'set' always means a working set — warm-ups are tracked separately."
+- **Revise as understanding deepens.** 用户第一周写的 definition 到第六周可能是错的。就地更新，不要留下 stale entries。

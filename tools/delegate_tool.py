@@ -2200,7 +2200,7 @@ def delegate_task(
     acp_args: Optional[List[str]] = None,
     role: Optional[str] = None,
     profile: Optional[str] = None,
-    background: bool = False,
+    background: Optional[bool] = None,
     parent_agent=None,
 ) -> str:
     """
@@ -2212,7 +2212,8 @@ def delegate_task(
 
     When background=True, children are dispatched in daemon threads and the
     parent returns immediately with task IDs.  Use check_background_tasks
-    to poll for results.
+    to poll for results.  When background is omitted, delegation.default_background
+    in config.yaml decides the default.
 
     The 'role' parameter controls whether a child can further delegate:
     'leaf' (default) cannot; 'orchestrator' retains the delegation
@@ -2258,6 +2259,10 @@ def delegate_task(
 
     # Load config
     cfg = _load_config()
+    if background is None:
+        background = is_truthy_value(cfg.get("default_background", False))
+    else:
+        background = bool(background)
     default_max_iter = cfg.get("max_iterations", DEFAULT_MAX_ITERATIONS)
     # Model-supplied max_iterations is ignored — the config value is authoritative
     # so users get predictable budgets. The kwarg is retained for internal callers
@@ -2888,13 +2893,14 @@ def _build_top_level_description() -> str:
         "- Mechanical multi-step work with no reasoning needed -> use execute_code\n"
         "- Single tool call -> just call the tool directly\n"
         "- Tasks needing user interaction -> subagents cannot use clarify\n"
-        "- Durable long-running work that must outlive the current turn -> "
+        "- Durable long-running work that must outlive process/container restarts -> "
         "use cronjob (action='create') or terminal(background=True, "
-        "notify_on_complete=True) instead. delegate_task runs SYNCHRONOUSLY "
-        "inside the parent turn: if the parent is interrupted (user sends a "
-        "new message, /stop, /new) the child is cancelled with status="
-        "'interrupted' and its work is discarded. Children cannot continue "
-        "in the background.\n\n"
+        "notify_on_complete=True) instead. delegate_task can run either "
+        "synchronously or as in-process background work. For legal document "
+        "review/drafting fan-out, prefer background=true so the parent turn "
+        "returns immediately with task IDs and the coordinator can poll or "
+        "collect later. Background delegate tasks are not durable across "
+        "process/container restarts; use Kanban for durable swarm work.\n\n"
         "IMPORTANT:\n"
         "- Subagents have NO memory of your conversation. Pass all relevant "
         "info (file paths, error messages, constraints) via the 'context' field.\n"
@@ -3131,8 +3137,10 @@ DELEGATE_TASK_SCHEMA = {
                     "When true, dispatch subagents in background daemon threads "
                     "and return immediately with task IDs. The parent continues "
                     "without blocking. Use check_background_tasks to poll for "
-                    "results. Default: false (synchronous, parent blocks until "
-                    "all children complete)."
+                    "results. When omitted, delegation.default_background in "
+                    "config.yaml decides the default. For legal document fan-out, "
+                    "prefer true unless the user explicitly needs the final answer "
+                    "in the same turn."
                 ),
             },
         },
@@ -3158,7 +3166,7 @@ registry.register(
         acp_args=args.get("acp_args"),
         role=args.get("role"),
         profile=args.get("profile"),
-        background=bool(args.get("background", False)),
+        background=args.get("background") if "background" in args else None,
         parent_agent=kw.get("parent_agent"),
     ),
     check_fn=check_delegate_requirements,

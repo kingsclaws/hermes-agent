@@ -1,6 +1,6 @@
 # RESOURCES.md Format
 
-`RESOURCES.md` is the curated set of trusted sources for this topic. Knowledge for explainers should be drawn from here, not from parametric guesses. Wisdom comes from the communities listed here.
+`RESOURCES.md` 是这个 topic 的 trusted sources curated set。Explainers 中的 knowledge 应来自这里，而不是 parametric guesses。Wisdom 来自这里列出的 communities。
 
 ## Structure
 
@@ -24,9 +24,9 @@
 
 ## Rules
 
-- **High-trust only.** Prefer primary sources, recognised experts, peer-reviewed work, and communities with strong moderation. If a resource is marketing dressed as education, leave it out.
-- **Annotate every entry.** A bare link is useless in three months. Add one line: what it covers and when to reach for it.
-- **Group by Knowledge / Wisdom.** Mirrors the philosophy in [SKILL.md](./SKILL.md). It is fine for a resource to appear in only one group.
-- **Surface gaps explicitly.** If no good resource exists for an area the mission needs, write a `## Gaps` section listing what is missing. This drives future search.
-- **Prune ruthlessly.** A resource that turned out to be wrong, shallow, or off-mission should be removed, not buried. Better five sharp sources than thirty mediocre ones.
-- **Record community preferences.** If the user has opted out of joining communities, note it here so future sessions don't keep proposing them.
+- **High-trust only.** 优先使用 primary sources、recognized experts、peer-reviewed work，以及 moderation 强的 communities。如果一个 resource 是披着教育外衣的 marketing，就不要放进来。
+- **Annotate every entry.** 只有裸 link，三个月后毫无用处。加一行说明：它覆盖什么，以及什么时候使用它。
+- **Group by Knowledge / Wisdom.** 与 [SKILL.md](./SKILL.md) 中的 philosophy 保持一致。一个 resource 只出现在其中一组也可以。
+- **Surface gaps explicitly.** 如果 mission 需要的某个领域没有好 resource，写一个 `## Gaps` section，列出缺失内容。这会推动 future search。
+- **Prune ruthlessly.** 如果一个 resource 后来被证明是错的、浅的或偏离 mission，应移除它，而不是埋在列表里。五个 sharp sources 胜过三十个 mediocre ones。
+- **Record community preferences.** 如果用户已经选择不加入 communities，在这里记录，避免 future sessions 反复建议。

@@ -672,6 +672,67 @@ def _table_rows(items: List[Any], columns: List[str]) -> List[str]:
     return rows
 
 
+_TASK_BRIEF_REQUIRED_KEYS = (
+    "task_goal",
+    "source_materials",
+    "document_scope",
+    "format_requirements",
+    "revision_trace_policy",
+    "review_granularity",
+    "delivery_outputs",
+    "interaction_policy",
+)
+
+
+_TASK_BRIEF_QUESTIONS = {
+    "task_goal": (
+        "这次任务的具体交付目标是什么？请说明是起草、修订、proofread、翻译校对、交叉引用修复，"
+        "还是其他任务，以及最终要交付给谁。"
+    ),
+    "source_materials": (
+        "本次任务需要依据哪些材料？请列出 TS、批复、清单、原稿、对方反馈、权威来源或业务资料；"
+        "如果有优先级，也请说明。"
+    ),
+    "document_scope": (
+        "处理范围是什么？请说明文件路径、章节/页码/段落范围，是否必须全文通读，"
+        "以及哪些部分只读不改或暂不处理。"
+    ),
+    "format_requirements": (
+        "格式要求请具体说明：字体/字号、编号层级、表格样式、页眉页脚、中文/英文标点、"
+        "占位符、定义术语格式、是否保留原模板风格。"
+    ),
+    "revision_trace_policy": (
+        "修订痕迹怎么处理？请说明是否必须 track changes、是否允许 comment、是否可 highlight/mark、"
+        "新增内容是否用特定颜色、删除是否先标记再决定、以及是否禁止整段替换。"
+    ),
+    "review_granularity": (
+        "审阅/制作颗粒度是什么？请说明是一条一条/逐段/逐页/逐文件处理，"
+        "每一步是否需要读回核对，以及是否需要先输出修订计划再动手。"
+    ),
+    "delivery_outputs": (
+        "交付物格式是什么？请说明是否需要保留 docx、html、md、修订清单、问题清单、"
+        "证据覆盖表、compare/diff、备份文件，以及文件命名规则。"
+    ),
+    "interaction_policy": (
+        "哪些事项需要先问你再做？哪些可以 agent 自主决定？例如商业条件不明、格式冲突、"
+        "无法读取文件、批量替换、删除内容、绕过 gate、OCR 失败等。"
+    ),
+}
+
+
+def _as_dict(value: Any) -> Dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _task_brief_missing(task_brief: Dict[str, Any]) -> List[str]:
+    missing = []
+    for key in _TASK_BRIEF_REQUIRED_KEYS:
+        value = task_brief.get(key)
+        if value in (None, "", [], {}):
+            missing.append(key)
+    return missing
+
+
 def _render_transaction_structure_doc(payload: Dict[str, Any]) -> str:
     tier = str(payload.get("structure_tier") or "minimal").strip() or "minimal"
     confirmed_by = str(payload.get("confirmed_by") or "").strip()
@@ -681,6 +742,7 @@ def _render_transaction_structure_doc(payload: Dict[str, Any]) -> str:
     amounts = _as_list(payload.get("amounts"))
     transaction_files = _as_list(payload.get("transaction_files"))
     format_conventions = payload.get("format_conventions") if isinstance(payload.get("format_conventions"), dict) else {}
+    task_brief = _as_dict(payload.get("task_brief"))
     notes = str(payload.get("notes") or "").strip()
 
     lines = [
@@ -700,24 +762,35 @@ def _render_transaction_structure_doc(payload: Dict[str, Any]) -> str:
         "|------|------|---------|",
         *_table_rows(parties, ["contract", "role", "entity"]),
         "",
+        "## ③ 本次任务执行约定",
+        "",
+        f"- 任务目标：{_table_escape(task_brief.get('task_goal', ''))}",
+        f"- 依据材料：{_table_escape(task_brief.get('source_materials', ''))}",
+        f"- 处理范围：{_table_escape(task_brief.get('document_scope', ''))}",
+        f"- 格式要求：{_table_escape(task_brief.get('format_requirements', ''))}",
+        f"- 修订痕迹策略：{_table_escape(task_brief.get('revision_trace_policy', ''))}",
+        f"- 审阅颗粒度：{_table_escape(task_brief.get('review_granularity', ''))}",
+        f"- 交付物：{_table_escape(task_brief.get('delivery_outputs', ''))}",
+        f"- 需先询问事项：{_table_escape(task_brief.get('interaction_policy', ''))}",
+        "",
     ]
 
     if tier == "full":
         lines.extend([
-            "## ③ 关键金额与费率表",
+            "## ④ 关键金额与费率表",
             "",
             "| 项目 | 数值 | 出处/依据 | 备注 |",
             "|------|------|----------|------|",
             *_table_rows(amounts, ["item", "value", "source", "note"]),
             "",
-            "## ④ 编号/格式约定",
+            "## ⑤ 编号/格式约定",
             "",
             f"- 占位符格式：{_table_escape(format_conventions.get('placeholder_format', ''))}",
             f"- 其他格式约定：{_table_escape(format_conventions.get('other', ''))}",
             f"- 编号样式：{_table_escape(format_conventions.get('numbering', ''))}",
             f"- 字体/字号约定：{_table_escape(format_conventions.get('font', ''))}",
             "",
-            "## ⑤ 交易文件清单与跨文件引用",
+            "## ⑥ 交易文件清单与跨文件引用",
             "",
             "| 文件名 | 角色（主合同/配套/担保/监管等） | 被引用方 |",
             "|--------|------------------------------|---------|",
@@ -746,6 +819,7 @@ def _append_planning_log(project_dir: str, args: dict, payload: Dict[str, Any]) 
             "terms",
             "amounts",
             "format_conventions",
+            "task_brief",
             "transaction_files",
             "notes",
         )
@@ -836,6 +910,61 @@ def _record_planning_decision_in_state(project_dir: str, payload: Dict[str, Any]
         return {"ok": False, "error": str(exc)}
 
 
+def _write_planning_bypass_log(project_dir: str, *, reason: str, action: str, session_id: str = "") -> str:
+    root = Path(project_dir)
+    log_path = root / ".hermes-project" / "planning" / "grill-bypass-log.json"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        data = json.loads(log_path.read_text(encoding="utf-8")) if log_path.is_file() else {}
+    except Exception:
+        data = {}
+    entries = data.setdefault("bypasses", [])
+    entries.append({
+        "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "action": action,
+        "reason": reason,
+        "session_id": session_id,
+    })
+    _write_json_file(log_path, data)
+    return str(log_path)
+
+
+def _planning_grill_gate(project_dir: str, args: dict, *, action: str, parent_agent=None) -> Optional[Dict[str, Any]]:
+    """Hard gate before execution: every legal task needs a persisted grill brief."""
+    bypass = bool(args.get("bypass_planning_grill_gate"))
+    reason = str(args.get("bypass_reason") or args.get("planning_bypass_reason") or "").strip()
+    status = _transaction_structure_status(project_dir)
+    if status.get("confirmed") and not status.get("missing"):
+        return None
+    if bypass and reason:
+        session_id = str(getattr(parent_agent, "session_id", "") or os.environ.get("HERMES_SESSION_ID", ""))
+        return {
+            "ok": True,
+            "bypassed": True,
+            "bypass_log_path": _write_planning_bypass_log(
+                project_dir,
+                reason=reason,
+                action=action,
+                session_id=session_id,
+            ),
+            "planning_status": status,
+        }
+    return {
+        "ok": False,
+        "blocked": True,
+        "error": "planning_grill_gate blocked legal workflow execution.",
+        "missing": status.get("missing", []),
+        "next_question": status.get("next_question", ""),
+        "planning_status": status,
+        "interaction_contract": {
+            "ask_with": "clarify",
+            "persist_with": "legal_workflow(action='planning_intake')",
+            "rule": "Ask one question at a time and persist each answer. Start execution only after confirmed=true.",
+            "bypass": "Only if the user explicitly approves; pass bypass_planning_grill_gate=true and bypass_reason.",
+        },
+    }
+
+
 def _transaction_structure_status(project_dir: str) -> Dict[str, Any]:
     root = Path(project_dir)
     meta = _read_json_file(root / ".hermes-project" / "project-meta.json", {})
@@ -843,6 +972,8 @@ def _transaction_structure_status(project_dir: str) -> Dict[str, Any]:
     md_path = root / "交易结构与术语表.md"
     tier = str(meta.get("structure_tier") or draft.get("structure_tier") or "").strip()
     confirmed = bool(meta.get("structure_confirmed_by") and meta.get("structure_confirmed_at"))
+    task_brief = _as_dict(draft.get("task_brief"))
+    missing_task_brief = _task_brief_missing(task_brief)
 
     missing: List[str] = []
     next_question = ""
@@ -855,6 +986,10 @@ def _transaction_structure_status(project_dir: str) -> Dict[str, Any]:
     elif not _as_list(draft.get("terms")):
         missing.append("terms")
         next_question = "本项目有哪些必须统一或避免使用的核心术语？请说明定义、使用场景和替代规则。"
+    elif missing_task_brief:
+        key = missing_task_brief[0]
+        missing.append(f"task_brief.{key}")
+        next_question = _TASK_BRIEF_QUESTIONS.get(key, "请补充本次任务执行约定。")
     elif tier == "full" and not _as_list(draft.get("transaction_files")):
         missing.append("transaction_files")
         next_question = "这些合同之间的引用关系是什么？哪份是主合同，哪些是配套/担保/监管文件？"
@@ -879,6 +1014,9 @@ def _transaction_structure_status(project_dir: str) -> Dict[str, Any]:
         "structure_tier": tier or None,
         "missing": missing,
         "next_question": next_question,
+        "task_brief_required_keys": list(_TASK_BRIEF_REQUIRED_KEYS),
+        "task_brief_missing": missing_task_brief,
+        "task_brief_questions": _TASK_BRIEF_QUESTIONS,
         "draft": draft,
         "meta": {
             "structure_tier": meta.get("structure_tier"),
@@ -951,6 +1089,23 @@ def _sync_transaction_structure_facts(project_dir: str, payload: Dict[str, Any])
             tags=["transaction_structure"],
         )
         updates.append(result)
+    task_brief = _as_dict(payload.get("task_brief"))
+    for key in _TASK_BRIEF_REQUIRED_KEYS:
+        value = task_brief.get(key)
+        if value in (None, "", [], {}):
+            continue
+        result = project_facts(
+            project_dir,
+            "upsert",
+            category="task_brief",
+            key=key,
+            value=value,
+            source="legal_workflow.planning_intake",
+            confidence="high",
+            status="confirmed" if payload.get("confirmed_by") else "draft",
+            tags=["planning_grill", "task_execution"],
+        )
+        updates.append(result)
     return updates
 
 
@@ -965,6 +1120,7 @@ def _record_planning_intake(args: dict, project_dir: str) -> Dict[str, Any]:
         "terms",
         "amounts",
         "format_conventions",
+        "task_brief",
         "transaction_files",
         "notes",
     ):
@@ -1081,6 +1237,14 @@ LEGAL_WORKFLOW_SCHEMA = {
                 "type": "boolean",
                 "description": "Whether workflow learning is enabled. Default: true.",
             },
+            "bypass_planning_grill_gate": {
+                "type": "boolean",
+                "description": "Emergency override for legal_workflow(action='start') planning grill gate. Use only after explicit user approval.",
+            },
+            "planning_bypass_reason": {
+                "type": "string",
+                "description": "Audit reason required when bypass_planning_grill_gate=true.",
+            },
             "review_types": {
                 "type": "array",
                 "items": {
@@ -1183,6 +1347,24 @@ LEGAL_WORKFLOW_SCHEMA = {
                 "type": "object",
                 "description": "Format conventions: placeholder_format, other, numbering, font.",
             },
+            "task_brief": {
+                "type": "object",
+                "description": (
+                    "Per-task grill/intake answers. Required keys before execution: "
+                    "task_goal, source_materials, document_scope, format_requirements, "
+                    "revision_trace_policy, review_granularity, delivery_outputs, interaction_policy."
+                ),
+                "properties": {
+                    "task_goal": {"type": "string"},
+                    "source_materials": {"type": "string"},
+                    "document_scope": {"type": "string"},
+                    "format_requirements": {"type": "string"},
+                    "revision_trace_policy": {"type": "string"},
+                    "review_granularity": {"type": "string"},
+                    "delivery_outputs": {"type": "string"},
+                    "interaction_policy": {"type": "string"},
+                },
+            },
             "transaction_files": {
                 "type": "array",
                 "description": "Transaction document map rows: {file, role, referenced_by}. Required for full tier.",
@@ -1225,6 +1407,15 @@ def _handle_legal_workflow(args: dict, **kwargs) -> str:
 
     if action in {"start", "create_plan"}:
         project = _resolve_project(args, parent_agent=parent_agent)
+        if action == "start" and project.get("project_dir"):
+            gate = _planning_grill_gate(
+                project["project_dir"] or "",
+                args,
+                action=action,
+                parent_agent=parent_agent,
+            )
+            if gate is not None and not gate.get("bypassed"):
+                return json.dumps({"ok": False, **gate}, ensure_ascii=False)
         document_path = str(args.get("document_path") or "").strip() or None
         term_sheet_path = str(args.get("term_sheet_path") or "").strip() or None
         bilingual_path = str(args.get("bilingual_path") or "").strip() or None
@@ -1315,6 +1506,11 @@ def _handle_legal_workflow(args: dict, **kwargs) -> str:
         workflow = db.get_legal_workflow(run_id)
         kanban = None
         if action == "start":
+            planning_status = (
+                _transaction_structure_status(project["project_dir"])
+                if project.get("project_dir") else {}
+            )
+            task_brief = _as_dict(_as_dict(planning_status.get("draft")).get("task_brief"))
             kanban = _compile_kanban_execution(
                 workflow_run_id=run_id,
                 workflow_type=workflow_type,
@@ -1330,6 +1526,8 @@ def _handle_legal_workflow(args: dict, **kwargs) -> str:
                     "sop_path": sop_path,
                     "instructions": instructions,
                     "chunk_size": chunk_size,
+                    "task_brief": task_brief,
+                    "planning_artifact_path": planning_status.get("artifact_path"),
                 },
             )
             first_step = (workflow.get("steps") or [None])[0]

@@ -1,15 +1,14 @@
 ---
 name: edit-article
-description: Edit and improve articles by restructuring sections, improving clarity, and tightening prose. Use when user wants to edit, revise, or improve an article draft.
-disable-model-invocation: true
+description: 通过重组 sections、提升 clarity、收紧 prose 来编辑并改进 articles。Use when user wants to edit, revise, or improve an article draft.
 ---
 
-1. First, divide the article into sections based on its headings. Think about the main points you want to make during those sections.
+1. 首先，根据 headings 把文章分成 sections。思考每个 section 中你想表达的 main points。
 
-Consider that information is a directed acyclic graph, and that pieces of information can depend on other pieces of information. Make sure that the order of the sections and their contents respects these dependencies.
+把信息看作 directed acyclic graph：一部分信息可能依赖另一部分信息。确保 sections 的顺序及其内容尊重这些依赖关系。
 
-Confirm the sections with the user.
+与用户确认 sections。
 
-2. For each section:
+2. 对每个 section：
 
-2a. Rewrite the section to improve clarity, coherence, and flow. Use maximum 240 characters per paragraph.
+2a. 重写该 section，提高 clarity、coherence 和 flow。每段最多 240 个字符。

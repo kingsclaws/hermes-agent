@@ -14,6 +14,7 @@ import { FileText, Image as ImageIcon, ListPlus, LoaderCircle, Paperclip, Send, 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReasoningEffort } from "@/components/ReasoningEffortPicker";
 import { getSwarmProfile, SWARM_PROFILES } from "@/lib/swarmProfiles";
+import { ChatView } from "@/components/ChatView";
 import { ChatMessageList } from "@/components/ChatMessageList";
 
 type ChatMessage = {
@@ -753,237 +754,33 @@ export function NativeChatSurface({
   }, [submit]);
 
   return (
-    <Card className="flex min-h-0 flex-1 flex-col overflow-hidden border-primary/20 bg-background-base/70 p-0 normal-case">
-      {/* Header bar */}
-      <div className="flex items-center justify-between gap-2 border-b border-current/10 px-3 py-2">
-        <div className="min-w-0 flex-1">
-          <div className="text-xs uppercase tracking-wider text-muted-foreground">
-            Lex Gateway Web
-          </div>
-          <div className="flex items-center gap-3">
-            <div className="truncate text-sm text-muted-foreground">
-              JSON-RPC session · native tools, slash commands, and workflow
-            </div>
-            {projectContext && (
-              <div
-                className="hidden max-w-[18rem] truncate rounded border border-primary/25 bg-primary/5 px-2 py-0.5 text-[0.65rem] text-primary sm:block"
-                title={projectContext.directory || projectContext.cwd || projectContext.name}
-              >
-                {projectContext.name}
-              </div>
-            )}
-            {sessionId && (
-              <div className="hidden truncate font-mono-ui text-[0.65rem] text-muted-foreground/70 sm:block">
-                {sessionId}
-              </div>
-            )}
-            <ContextIndicator gw={gw} />
-          </div>
-        </div>
-        <span
-          className={cn(
-            "rounded border px-2 py-0.5 text-[0.65rem] shrink-0",
-            conn === "open"
-              ? "border-success/40 text-success"
-              : "border-current/20 text-muted-foreground",
-          )}
-        >
-          {conn}
-        </span>
-      </div>
-
-      {/* Chat message list — bubble style */}
-      <ChatMessageList
-        messages={messages}
-        thinkingBlocks={thinkingBlocks}
-        tools={tools}
-        subagents={subagents}
-        swarmState={swarmState}
-        running={running}
-        assistantIdRef={assistantIdRef}
-        className="min-h-0 flex-1"
-      />
-
-      {/* Error banner */}
-      {error && (
-        <div className="border-t border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive">
-          {error}
-        </div>
-      )}
-
-      {/* Queue indicator */}
-      {hasQueued && (
-        <div className="lex-panel-reveal lex-queue-ribbon flex items-center gap-2 border-t border-amber-500/30 bg-amber-500/[0.06] px-3 py-2 text-xs">
-          <LoaderCircle className="h-3 w-3 shrink-0 animate-spin text-amber-400" />
-          <span className="flex-1 text-amber-300/80">
-            Message queued — will submit when current turn completes.{" "}
-            {queuedRef.current && (
-              <span className="text-muted-foreground/60">
-                ({queuedRef.current.text.slice(0, 50)}
-                {queuedRef.current.text.length > 50 ? "…" : ""}
-                {queuedRef.current.attachments.length ? ` · ${queuedRef.current.attachments.length} attachment(s)` : ""})
-              </span>
-            )}
-          </span>
-          <button
-            type="button"
-            onClick={() => {
-              queuedRef.current = null;
-              setHasQueued(false);
-            }}
-            className="shrink-0 rounded border border-current/20 px-1.5 py-0.5 text-[0.65rem] hover:bg-amber-500/10"
-          >
-            cancel
-          </button>
-        </div>
-      )}
-
-      {/* Composer */}
-      <form
-        className="flex shrink-0 flex-col gap-1 border-t border-current/10 p-3"
-        onDragOver={(ev) => {
-          if (ev.dataTransfer?.types.includes("Files")) {
-            ev.preventDefault();
-          }
-        }}
-        onDrop={(ev) => {
-          if (ev.dataTransfer?.files?.length) {
-            ev.preventDefault();
-            addFiles(ev.dataTransfer.files);
-          }
-        }}
-        onSubmit={(ev) => {
-          ev.preventDefault();
-          void submit(input);
-        }}
-      >
-        {draftAttachments.length > 0 && (
-          <div className="lex-panel-reveal flex max-h-28 flex-wrap gap-2 overflow-y-auto rounded border border-current/10 bg-black/10 p-2">
-            {draftAttachments.map((item) => {
-              const isImage = item.file.type.startsWith("image/");
-              return (
-                <div
-                  key={item.id}
-                  className="group flex max-w-[16rem] items-center gap-2 rounded border border-current/15 bg-muted/10 px-2 py-1 text-xs"
-                  title={`${item.file.name} · ${formatBytes(item.file.size)}`}
-                >
-                  {isImage && item.previewUrl ? (
-                    <img
-                      src={item.previewUrl}
-                      alt=""
-                      className="h-8 w-8 shrink-0 rounded object-cover"
-                    />
-                  ) : isImage ? (
-                    <ImageIcon className="h-4 w-4 shrink-0 text-primary/80" />
-                  ) : (
-                    <FileText className="h-4 w-4 shrink-0 text-muted-foreground" />
-                  )}
-                  <div className="min-w-0">
-                    <div className="truncate text-foreground/90">{item.file.name}</div>
-                    <div className="font-mono-ui text-[0.6rem] text-muted-foreground/70">
-                      {formatBytes(item.file.size)}
-                    </div>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => removeDraftAttachment(item.id)}
-                    className="ml-1 rounded p-0.5 text-muted-foreground/70 hover:bg-destructive/10 hover:text-destructive"
-                    aria-label={`Remove ${item.file.name}`}
-                  >
-                    <X className="h-3.5 w-3.5" />
-                  </button>
-                </div>
-              );
-            })}
-          </div>
-        )}
-        <div className="flex gap-2">
-          <textarea
-            value={input}
-            onChange={(ev) => setInput(ev.target.value)}
-            onPaste={(ev) => {
-              const files = Array.from(ev.clipboardData.files || []);
-              if (files.length) {
-                addFiles(files);
-              }
-            }}
-            onKeyDown={(ev) => {
-              if (ev.key === "Enter" && !ev.shiftKey) {
-                ev.preventDefault();
-                void submit(input);
-              }
-            }}
-            disabled={!sessionId || conn !== "open"}
-            rows={2}
-            placeholder="输入任务，或使用 /resume、/swarm、/kanban 等命令。Shift+Enter 换行。Cmd+K 命令面板。"
-            className="min-h-12 flex-1 resize-none rounded border border-current/15 bg-black/10 px-3 py-2 text-sm outline-none focus:border-primary/60"
-          />
-          <div className="flex shrink-0 items-end gap-2">
-            <input
-              ref={fileInputRef}
-              type="file"
-              multiple
-              className="hidden"
-              onChange={(ev) => {
-                if (ev.currentTarget.files) addFiles(ev.currentTarget.files);
-                ev.currentTarget.value = "";
-              }}
-            />
-            <Button
-              type="button"
-              ghost
-              onClick={() => fileInputRef.current?.click()}
-              disabled={!sessionId || conn !== "open" || uploading}
-              title="Attach images or files"
-              aria-label="Attach images or files"
-              className="px-3"
-            >
-              <Paperclip className="h-4 w-4" />
-            </Button>
-            {running && (
-              <Button
-                type="button"
-                ghost
-                onClick={queueCurrentInput}
-                disabled={!sessionId || (!input.trim() && draftAttachments.length === 0) || hasQueued}
-                title={hasQueued ? "A message is already queued" : "Queue message after current turn"}
-                aria-label="Queue message after current turn"
-                className="px-3"
-              >
-                <ListPlus className="h-4 w-4" />
-              </Button>
-            )}
-            <Button
-              type={running ? "button" : "submit"}
-              onClick={running ? interrupt : undefined}
-              disabled={!sessionId || stopping || uploading || (!running && !input.trim() && draftAttachments.length === 0)}
-              title={running ? "Stop current turn" : uploading ? "Uploading attachments" : "Send"}
-              aria-label={running ? "Stop current turn" : uploading ? "Uploading attachments" : "Send"}
-              className="px-3"
-            >
-              {uploading ? (
-                <LoaderCircle className="h-4 w-4 animate-spin" />
-              ) : running ? (
-                <Square className="h-4 w-4" />
-              ) : (
-                <Send className="h-4 w-4" />
-              )}
-            </Button>
-          </div>
-        </div>
-        {/* reasoning effort moved to ChatTopBar */}
-      </form>
-
-      {/* Overlays */}
+    <>
+    <ChatView
+      messages={messages}
+      thinkingBlocks={thinkingBlocks}
+      tools={tools}
+      subagents={subagents}
+      swarmState={swarmState}
+      running={running}
+      assistantIdRef={assistantIdRef}
+      sessionId={sessionId}
+      projectContext={projectContext ?? undefined}
+      conn={conn}
+      error={error}
+      input={input}
+      setInput={setInput}
+      submit={submit}
+      cancel={() => setStopping(true)}
+      uploading={uploading}
+      hasQueued={hasQueued}
+      queuedPrompt={(queuedRef.current as any)?.prompt ?? ""}
+      cancelQueue={() => { queuedRef.current = null; setHasQueued(false); }}
+    />
       <ApprovalModal gw={gw} sessionId={sessionId} />
-      <CommandPalette
-        gw={gw}
-        sessionId={sessionId}
-        onExecute={handleCommandPalette}
-      />
+      <CommandPalette gw={gw} sessionId={sessionId} onExecute={handleCommandPalette} />
       <NotificationFeed gw={gw} />
-    </Card>
+    </>
   );
 }
 
-// ExecutionInspector + SubagentCard removed — tools and subagents now render inline via ChatMessageList.
+// ExecutionInspector + SubagentCard removed.

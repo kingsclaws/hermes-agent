@@ -1,130 +1,130 @@
 ---
 name: qa
-description: Interactive QA session where user reports bugs or issues conversationally, and the agent files GitHub issues. Explores the codebase in the background for context and domain language. Use when user wants to report bugs, do QA, file issues conversationally, or mentions "QA session".
+description: 交互式 QA session，用户以对话方式报告 bugs 或 issues，agent 创建 GitHub issues。后台探索 codebase 以获取 context 和 domain language。Use when user wants to report bugs, do QA, file issues conversationally, or mentions "QA session".
 ---
 
 # QA Session
 
-Run an interactive QA session. The user describes problems they're encountering. You clarify, explore the codebase for context, and file GitHub issues that are durable, user-focused, and use the project's domain language.
+运行交互式 QA session。用户描述遇到的问题。你负责澄清、探索 codebase 获取 context，并创建 durable、user-focused 且使用项目 domain language 的 GitHub issues。
 
 ## For each issue the user raises
 
 ### 1. Listen and lightly clarify
 
-Let the user describe the problem in their own words. Ask **at most 2-3 short clarifying questions** focused on:
+让用户用自己的话描述问题。最多问 **2-3 个简短 clarifying questions**，聚焦：
 
-- What they expected vs what actually happened
-- Steps to reproduce (if not obvious)
-- Whether it's consistent or intermittent
+- 他们期望什么，实际发生了什么
+- Steps to reproduce（如果不明显）
+- 是否稳定复现，还是 intermittent
 
-Do NOT over-interview. If the description is clear enough to file, move on.
+不要过度访谈。如果描述足够清楚，可以直接 file。
 
 ### 2. Explore the codebase in the background
 
-While talking to the user, kick off an Agent (subagent_type=Explore) in the background to understand the relevant area. The goal is NOT to find a fix — it's to:
+与用户对话时，在后台启动 Agent（subagent_type=Explore）理解相关区域。目标不是找 fix，而是：
 
-- Learn the domain language used in that area (check UBIQUITOUS_LANGUAGE.md)
-- Understand what the feature is supposed to do
-- Identify the user-facing behavior boundary
+- 学习该区域使用的 domain language（检查 UBIQUITOUS_LANGUAGE.md）
+- 理解 feature 本应做什么
+- 识别 user-facing behavior boundary
 
-This context helps you write a better issue — but the issue itself should NOT reference specific files, line numbers, or internal implementation details.
+这些 context 帮助你写出更好的 issue，但 issue 本身不应引用具体 files、line numbers 或 internal implementation details。
 
 ### 3. Assess scope: single issue or breakdown?
 
-Before filing, decide whether this is a **single issue** or needs to be **broken down** into multiple issues.
+file 前判断这是**单个 issue**，还是需要**拆成多个 issues**。
 
-Break down when:
+拆分条件：
 
-- The fix spans multiple independent areas (e.g. "the form validation is wrong AND the success message is missing AND the redirect is broken")
-- There are clearly separable concerns that different people could work on in parallel
-- The user describes something that has multiple distinct failure modes or symptoms
+- fix 跨多个 independent areas（例如 “form validation is wrong AND success message is missing AND redirect is broken”）
+- 存在清晰可分离 concerns，不同人可以并行处理
+- 用户描述了多个不同 failure modes 或 symptoms
 
-Keep as a single issue when:
+保持单个 issue 的条件：
 
-- It's one behavior that's wrong in one place
-- The symptoms are all caused by the same root behavior
+- 一个地方的一个 behavior 错了
+- symptoms 都来自同一个 root behavior
 
 ### 4. File the GitHub issue(s)
 
-Create issues with `gh issue create`. Do NOT ask the user to review first — just file and share URLs.
+使用 `gh issue create` 创建 issues。不要先要求用户 review；直接 file 并分享 URLs。
 
-Issues must be **durable** — they should still make sense after major refactors. Write from the user's perspective.
+Issues 必须 **durable**，即 major refactors 后仍有意义。从用户视角写。
 
 #### For a single issue
 
-Use this template:
+使用这个模板：
 
 ```
 ## What happened
 
-[Describe the actual behavior the user experienced, in plain language]
+[用普通语言描述用户经历的实际行为]
 
 ## What I expected
 
-[Describe the expected behavior]
+[描述期望行为]
 
 ## Steps to reproduce
 
-1. [Concrete, numbered steps a developer can follow]
-2. [Use domain terms from the codebase, not internal module names]
-3. [Include relevant inputs, flags, or configuration]
+1. [developer 可执行的具体编号步骤]
+2. [使用 codebase 的 domain terms，不用 internal module names]
+3. [包含相关 inputs、flags 或 configuration]
 
 ## Additional context
 
-[Any extra observations from the user or from codebase exploration that help frame the issue — e.g. "this only happens when using the Docker layer, not the filesystem layer" — use domain language but don't cite files]
+[来自用户或 codebase exploration 的额外观察，用来帮助 framing；使用 domain language，但不引用 files]
 ```
 
 #### For a breakdown (multiple issues)
 
-Create issues in dependency order (blockers first) so you can reference real issue numbers.
+按 dependency order 创建 issues（blockers first），这样可以引用真实 issue numbers。
 
-Use this template for each sub-issue:
+每个 sub-issue 使用这个模板：
 
 ```
 ## Parent issue
 
-#<parent-issue-number> (if you created a tracking issue) or "Reported during QA session"
+#<parent-issue-number>（如果你创建了 tracking issue）或 "Reported during QA session"
 
 ## What's wrong
 
-[Describe this specific behavior problem — just this slice, not the whole report]
+[描述这个 specific behavior problem，只描述这个 slice]
 
 ## What I expected
 
-[Expected behavior for this specific slice]
+[这个 slice 的 expected behavior]
 
 ## Steps to reproduce
 
-1. [Steps specific to THIS issue]
+1. [只针对这个 issue 的步骤]
 
 ## Blocked by
 
-- #<issue-number> (if this issue can't be fixed until another is resolved)
+- #<issue-number>（如果必须等另一个 issue 解决）
 
-Or "None — can start immediately" if no blockers.
+如果没有 blockers，写 "None — can start immediately"。
 
 ## Additional context
 
-[Any extra observations relevant to this slice]
+[与这个 slice 相关的额外观察]
 ```
 
-When creating a breakdown:
+创建 breakdown 时：
 
-- **Prefer many thin issues over few thick ones** — each should be independently fixable and verifiable
-- **Mark blocking relationships honestly** — if issue B genuinely can't be tested until issue A is fixed, say so. If they're independent, mark both as "None — can start immediately"
-- **Create issues in dependency order** so you can reference real issue numbers in "Blocked by"
-- **Maximize parallelism** — the goal is that multiple people (or agents) can grab different issues simultaneously
+- **Prefer many thin issues over few thick ones** — 每个都应能独立 fix 和 verify
+- **Mark blocking relationships honestly** — 如果 B 确实必须等 A 才能测试，就说明。如果独立，两个都写 “None — can start immediately”
+- **Create issues in dependency order**，这样可以在 “Blocked by” 中引用真实 issue numbers
+- **Maximize parallelism** — 目标是让多人（或 agents）能同时领取不同 issues
 
 #### Rules for all issue bodies
 
-- **No file paths or line numbers** — these go stale
-- **Use the project's domain language** (check UBIQUITOUS_LANGUAGE.md if it exists)
-- **Describe behaviors, not code** — "the sync service fails to apply the patch" not "applyPatch() throws on line 42"
-- **Reproduction steps are mandatory** — if you can't determine them, ask the user
-- **Keep it concise** — a developer should be able to read the issue in 30 seconds
+- **No file paths or line numbers** — 它们会过时
+- **Use the project's domain language**（如果存在，检查 UBIQUITOUS_LANGUAGE.md）
+- **Describe behaviors, not code** — 写 “the sync service fails to apply the patch”，不要写 “applyPatch() throws on line 42”
+- **Reproduction steps are mandatory** — 如果无法确定，询问用户
+- **Keep it concise** — developer 应能 30 秒内读完 issue
 
-After filing, print all issue URLs (with blocking relationships summarized) and ask: "Next issue, or are we done?"
+file 后，打印所有 issue URLs（并总结 blocking relationships），然后问：“Next issue, or are we done?”
 
 ### 5. Continue the session
 
-Keep going until the user says they're done. Each issue is independent — don't batch them.
+持续进行，直到用户说结束。每个 issue 都独立处理，不要 batch。

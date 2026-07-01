@@ -23,6 +23,8 @@ COPY . /tmp/lex-hermes-patch
 
 RUN set -e; \
     cd /tmp/lex-hermes-patch; \
+    cp start-lex-hermes.sh /start-lex.sh; \
+    chmod 755 /start-lex.sh; \
     \
     cp vendor/lexitool/lexitool/edit_ops.py /opt/lexitool/lexitool/edit_ops.py; \
     cp vendor/lexitool/lexitool/markup.py /opt/lexitool/lexitool/markup.py; \
@@ -85,9 +87,13 @@ RUN set -e; \
     cp plugins/legal-drafting-gate/__init__.py /opt/hermes/plugins/legal-drafting-gate/__init__.py; \
     mkdir -p /opt/hermes/profiles; \
     cp profiles/*.soul.md /opt/hermes/profiles/; \
-    mkdir -p /opt/hermes/web/src/components /opt/hermes/web/src/contexts /opt/hermes/web/src/hooks /opt/hermes/web/src/lib /opt/hermes/web/src/pages; \
+    mkdir -p /opt/hermes/web/src/components /opt/hermes/web/src/contexts /opt/hermes/web/src/hooks /opt/hermes/web/src/lib /opt/hermes/web/src/pages /opt/hermes/web/src/themes; \
     cp -a hermes_cli/web_dist /opt/hermes/hermes_cli/; \
+    find /opt/hermes/hermes_cli/web_dist/assets -name 'index-*' -mtime +0 -delete 2>/dev/null; \
+    cp web/index.html /opt/hermes/web/index.html; \
     cp web/src/index.css /opt/hermes/web/src/index.css; \
+    cp web/src/themes/*.ts /opt/hermes/web/src/themes/; \
+    cp web/src/themes/*.tsx /opt/hermes/web/src/themes/; \
     cp web/src/App.tsx /opt/hermes/web/src/App.tsx; \
     cp web/src/components/ChatBubble.tsx /opt/hermes/web/src/components/ChatBubble.tsx; \
     cp web/src/components/ChatMessageList.tsx /opt/hermes/web/src/components/ChatMessageList.tsx; \
@@ -140,9 +146,12 @@ RUN set -e; \
     cp plugins/legal-drafting-gate/__init__.py /opt/lex-hermes/plugins/legal-drafting-gate/__init__.py; \
     mkdir -p /opt/lex-hermes/profiles; \
     cp profiles/*.soul.md /opt/lex-hermes/profiles/; \
-    mkdir -p /opt/lex-hermes/web/src/components /opt/lex-hermes/web/src/contexts /opt/lex-hermes/web/src/hooks /opt/lex-hermes/web/src/lib /opt/lex-hermes/web/src/pages; \
+    mkdir -p /opt/lex-hermes/web/src/components /opt/lex-hermes/web/src/contexts /opt/lex-hermes/web/src/hooks /opt/lex-hermes/web/src/lib /opt/lex-hermes/web/src/pages /opt/lex-hermes/web/src/themes; \
     cp -a hermes_cli/web_dist /opt/lex-hermes/hermes_cli/; \
+    cp web/index.html /opt/lex-hermes/web/index.html; \
     cp web/src/index.css /opt/lex-hermes/web/src/index.css; \
+    cp web/src/themes/*.ts /opt/lex-hermes/web/src/themes/; \
+    cp web/src/themes/*.tsx /opt/lex-hermes/web/src/themes/; \
     cp web/src/App.tsx /opt/lex-hermes/web/src/App.tsx; \
     cp web/src/components/ChatBubble.tsx /opt/lex-hermes/web/src/components/ChatBubble.tsx; \
     cp web/src/components/ChatMessageList.tsx /opt/lex-hermes/web/src/components/ChatMessageList.tsx; \
@@ -267,4 +276,14 @@ RUN set -e; \
       plugins/legal-drafting-gate/__init__.py \
       tests/gateway/test_status.py \
       tests/gateway/test_kanban_notifier.py; \
+    \
+    echo "=== Setting up backoffice Claude Code autofix ==="; \
+    npm install -g @anthropic-ai/claude-code@latest 2>/dev/null || true; \
+    npx skills@latest add vinvcn/mattpocock-skills-zh-CN --yes 2>/dev/null || true; \
+    mkdir -p /opt/hermes/scripts /root/.hermes/backoffice-claude-session; \
+    cp /tmp/lex-hermes-patch/scripts/backoffice-autofix.sh /opt/hermes/scripts/backoffice-autofix.sh; \
+    chmod +x /opt/hermes/scripts/backoffice-autofix.sh; \
+    ln -sf /opt/hermes/scripts/backoffice-autofix.sh /command/backoffice-autofix; \
+    echo '{"codebase":"lex-hermes","repo":"/opt/hermes-agent","branch":"lex-hermes"}' > /root/.hermes/backoffice-claude-session/config.json; \
+    \
     rm -rf /tmp/lex-hermes-patch

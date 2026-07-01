@@ -1,6 +1,6 @@
 ---
 name: obsidian-vault
-description: Search, create, and manage notes in the Obsidian vault with wikilinks and index notes. Use when user wants to find, create, or organize notes in Obsidian.
+description: 在 Obsidian vault 中使用 wikilinks 和 index notes 搜索、创建并管理 notes。Use when user wants to find, create, or organize notes in Obsidian.
 ---
 
 # Obsidian Vault
@@ -9,19 +9,19 @@ description: Search, create, and manage notes in the Obsidian vault with wikilin
 
 `/mnt/d/Obsidian Vault/AI Research/`
 
-Mostly flat at root level.
+root level 基本保持扁平。
 
 ## Naming conventions
 
-- **Index notes**: aggregate related topics (e.g., `Ralph Wiggum Index.md`, `Skills Index.md`, `RAG Index.md`)
-- **Title case** for all note names
-- No folders for organization - use links and index notes instead
+- **Index notes**：聚合相关 topics（例如 `Ralph Wiggum Index.md`、`Skills Index.md`、`RAG Index.md`）
+- 所有 note names 使用 **Title case**
+- 不用 folders 做组织；改用 links 和 index notes
 
 ## Linking
 
-- Use Obsidian `[[wikilinks]]` syntax: `[[Note Title]]`
-- Notes link to dependencies/related notes at the bottom
-- Index notes are just lists of `[[wikilinks]]`
+- 使用 Obsidian `[[wikilinks]]` syntax：`[[Note Title]]`
+- Notes 在底部链接 dependencies/related notes
+- Index notes 只是 `[[wikilinks]]` 列表
 
 ## Workflows
 
@@ -35,18 +35,18 @@ find "/mnt/d/Obsidian Vault/AI Research/" -name "*.md" | grep -i "keyword"
 grep -rl "keyword" "/mnt/d/Obsidian Vault/AI Research/" --include="*.md"
 ```
 
-Or use Grep/Glob tools directly on the vault path.
+或直接在 vault path 上使用 Grep/Glob tools。
 
 ### Create a new note
 
-1. Use **Title Case** for filename
-2. Write content as a unit of learning (per vault rules)
-3. Add `[[wikilinks]]` to related notes at the bottom
-4. If part of a numbered sequence, use the hierarchical numbering scheme
+1. filename 使用 **Title Case**
+2. 按 vault rules，把内容写成一个 learning unit
+3. 在底部添加指向 related notes 的 `[[wikilinks]]`
+4. 如果属于 numbered sequence，使用 hierarchical numbering scheme
 
 ### Find related notes
 
-Search for `[[Note Title]]` across the vault to find backlinks:
+在 vault 中搜索 `[[Note Title]]` 来找 backlinks：
 
 ```bash
 grep -rl "\\[\\[Note Title\\]\\]" "/mnt/d/Obsidian Vault/AI Research/"
