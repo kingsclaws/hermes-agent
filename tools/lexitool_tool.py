@@ -44,6 +44,70 @@ def _resolve_path(path: str) -> str:
     return str(Path(path).expanduser().resolve())
 
 
+def _lex_scan_core(path: str, query: str, *, regex: bool = False,
+                   case_sensitive: bool = True, include_hf: bool = True,
+                   max_results: int = 200, context_chars: int = 80) -> dict:
+    """Internal scan wrapper used by lex_scan and lex_bulk_scan."""
+    from lexitool.scan import scan_text
+    return scan_text(path, query, regex=regex, case_sensitive=case_sensitive,
+                     include_headers_footers=include_hf,
+                     max_results=max_results, context_chars=context_chars)
+
+
+def _normalize_para_range(value):
+    """Normalize paragraph range to (lo, hi) tuple or None.
+
+    Accepts: 24, "24", "24-24", [24,24], ["24","24"], "24,26", [24,26]
+    """
+    if value is None:
+        return None
+
+    # List/array: [24, 24] or ["24", "24"] or [24, 26]
+    if isinstance(value, list):
+        if len(value) == 1:
+            lo = hi = int(value[0])
+            return (lo, hi)
+        if len(value) == 2:
+            lo, hi = int(value[0]), int(value[1])
+            return (min(lo, hi), max(lo, hi))
+        return None
+
+    # Scalar: 24
+    if isinstance(value, (int, float)):
+        lo = int(value)
+        return (lo, lo)
+
+    # String formats
+    if isinstance(value, str) and value.strip():
+        s = value.strip()
+        # "24,26"
+        if "," in s and not s.startswith("["):
+            parts = s.split(",")
+            if len(parts) == 2:
+                try:
+                    lo, hi = int(parts[0].strip()), int(parts[1].strip())
+                    return (min(lo, hi), max(lo, hi))
+                except ValueError:
+                    pass
+        # "24-26"
+        if "-" in s and not s.startswith("-"):
+            parts = s.split("-")
+            if len(parts) == 2:
+                try:
+                    lo, hi = int(parts[0].strip()), int(parts[1].strip())
+                    return (min(lo, hi), max(lo, hi))
+                except ValueError:
+                    pass
+        # "24" or " 24 "
+        try:
+            lo = int(s)
+            return (lo, lo)
+        except ValueError:
+            pass
+
+    return None
+
+
 def _supports_kwargs(func) -> tuple[set[str], bool]:
     try:
         sig = inspect.signature(func)
@@ -1807,21 +1871,9 @@ def _handle_tc(args: dict, **kwargs) -> str:
     dry_run = args.get("dry_run", False)
     include_tables = args.get("include_tables", False)
 
-    # Parse paragraph range — accept both string ("1119,1124") and array ([1119, 1124])
-    para_range = None
-    if para_range_str is not None:
-        if isinstance(para_range_str, list):
-            if len(para_range_str) == 2:
-                para_range = (int(para_range_str[0]), int(para_range_str[1]))
-            else:
-                return tool_error(f"Invalid para_range list (need exactly 2 elements): {para_range_str}")
-        elif isinstance(para_range_str, str) and para_range_str.strip():
-            parts = para_range_str.split(",")
-            if len(parts) == 2:
-                try:
-                    para_range = (int(parts[0].strip()), int(parts[1].strip()))
-                except ValueError:
-                    return tool_error(f"Invalid para_range: {para_range_str}")
+    # Parse paragraph range — accept multiple model-generated formats:
+    #   24, "24", "24-24", [24, 24], ["24", "24"], "24,26", [24, 26]
+    para_range = _normalize_para_range(para_range_str)
 
     doc = Document(path)
 
@@ -4743,10 +4795,146 @@ def _handle_verify_edits(args: dict, **kwargs) -> str:
 
 # ── Registration ──────────────────────────────────────────────────────────────
 
+LEX_BULK_SCAN_SCHEMA = {
+    "name": "lex_bulk_scan",
+    "description": (
+        "Scan multiple .docx files for text/regex matches. Returns compact "
+        "per-file counts and match locations (paragraph IDs, context snippets) "
+        "instead of full document text. Use this for legal term audits across "
+        "document sets — never loop lex_scan manually for the same purpose. "
+        "Supports glob patterns like \"**/*.docx\"."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "root": {
+                "type": "string",
+                "description": "Directory containing .docx files to scan."
+            },
+            "glob": {
+                "type": "string",
+                "description": "Glob pattern for .docx files (e.g. \"*.docx\" or \"**/*.docx\")."
+            },
+            "terms": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Text or regex patterns to search for."
+            },
+            "regex": {
+                "type": "boolean",
+                "description": "Treat terms as regex patterns.",
+                "default": False
+            },
+            "case_sensitive": {
+                "type": "boolean",
+                "description": "Case-sensitive matching.",
+                "default": True
+            },
+            "include_headers_footers": {
+                "type": "boolean",
+                "description": "Include header/footer text in scan.",
+                "default": True
+            },
+            "max_matches_per_file": {
+                "type": "integer",
+                "description": "Max matches to return per file before truncating.",
+                "default": 50
+            },
+            "context_chars": {
+                "type": "integer",
+                "description": "Characters of surrounding context per match.",
+                "default": 120
+            },
+        },
+        "required": ["root", "terms"],
+        "additionalProperties": False,
+    },
+}
+
+
+def _handle_bulk_scan(args: dict, **kwargs) -> str:
+    """Scan multiple .docx files for terms and return compact counts."""
+    import glob as glob_mod
+    import os
+
+    root_dir = _resolve_path(args["root"])
+    glob_pattern = args.get("glob", "*.docx")
+    terms: list = args.get("terms", [])
+    regex = args.get("regex", False)
+    case_sensitive = args.get("case_sensitive", True)
+    include_hf = args.get("include_headers_footers", True)
+    max_per_file = int(args.get("max_matches_per_file", 50))
+    ctx_chars = int(args.get("context_chars", 120))
+
+    if not terms:
+        return tool_error("terms is required")
+    if not os.path.isdir(root_dir):
+        return tool_error(f"root directory not found: {root_dir}")
+
+    pattern = os.path.join(root_dir, glob_pattern)
+    paths = sorted(glob_mod.glob(pattern, recursive="**" in glob_pattern))
+    docx_paths = [p for p in paths if p.lower().endswith(".docx")]
+
+    if not docx_paths:
+        return tool_error(f"no .docx files matched: {pattern} (found {len(paths)} files)")
+    if len(docx_paths) > 100:
+        return tool_error(f"too many files: {len(docx_paths)}. Limit to 100.")
+
+    results: list = []
+    total_by_term: dict = {}
+    files_scanned = 0
+
+    for fp in docx_paths:
+        file_matches: list = []
+        file_counts: dict = {}
+        try:
+            for term in terms:
+                res = _lex_scan_core(fp, term, regex=regex,
+                                     case_sensitive=case_sensitive,
+                                     include_hf=include_hf,
+                                     max_results=max_per_file,
+                                     context_chars=ctx_chars)
+                if res.get("ok"):
+                    matches = res.get("results", [])
+                    file_counts[term] = len(matches)
+                    total_by_term[term] = total_by_term.get(term, 0) + len(matches)
+                    for m in matches[:max_per_file]:
+                        file_matches.append({
+                            "term": term,
+                            "paragraph": m.get("paragraph"),
+                            "context": m.get("context", ""),
+                        })
+            results.append({
+                "path": os.path.relpath(fp, root_dir),
+                "counts": file_counts,
+                "matches": file_matches[:max_per_file],
+                "truncated": sum(file_counts.values()) > max_per_file,
+            })
+            files_scanned += 1
+        except Exception as e:
+            results.append({
+                "path": os.path.relpath(fp, root_dir),
+                "error": str(e),
+                "counts": {},
+                "matches": [],
+            })
+
+    return tool_result({
+        "ok": True,
+        "root": root_dir,
+        "files_scanned": files_scanned,
+        "total_files": len(docx_paths),
+        "terms": terms,
+        "total_counts": total_by_term,
+        "files": results,
+    })
+
+
 _TOOLS = [
     # Read
     ("lex_read",     "lexitool", LEX_READ_SCHEMA,     _handle_read),
     ("lex_scan",     "lexitool", LEX_SCAN_SCHEMA,     _handle_scan),
+    ("lex_bulk_scan","lexitool", LEX_BULK_SCAN_SCHEMA, _handle_bulk_scan),
     ("lex_revision_guard", "lexitool", LEX_REVISION_GUARD_SCHEMA, _handle_revision_guard),
     ("lex_stats",    "lexitool", LEX_STATS_SCHEMA,    _handle_stats),
     ("lex_table_list", "lexitool", LEX_TABLE_LIST_SCHEMA, _handle_table_list),
