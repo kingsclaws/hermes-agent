@@ -1780,19 +1780,20 @@ def _new_task_id() -> str:
 
 def _notify_task_lifecycle(conn, task_id: str, event: str, data: dict) -> None:
     """Fire lifecycle hook for kanban task state transitions.
-    Registered plugins (backoffice relay, workflow orchestrator) react to these."""
+    Registered plugins (backoffice relay, workflow orchestrator) react to these.
+    Writes to task_events table AND logs for container-level monitoring."""
     import json
     try:
         task = get_task(conn, task_id)
         if not task: return
-        payload = {"event": event, "task_id": task_id, "task_title": task.title,
-                   "task_status": task.status, "data": data}
+        payload = json.dumps({"event": event, "task_id": task_id, "task_title": task.title,
+                             "task_status": task.status, "data": data}, ensure_ascii=False)
+        # Write to task_events table for persistence
         try:
-            from hermes_cli.plugins import get_plugin_context
-            ctx = get_plugin_context()
-            if ctx: ctx.fire_hook(f"kanban_{event}", payload)
+            _append_event(conn, task_id, event, {"task_title": task.title, "data": data})
         except Exception: pass
-        logger.info("kanban lifecycle: %s task=%s", event, task_id)
+        # Structured log for container monitoring + backoffice
+        logger.info("KANBAN_LIFECYCLE %s", payload)
     except Exception as e:
         logger.debug("kanban lifecycle notify: %s", e)
 
