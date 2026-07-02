@@ -1778,6 +1778,25 @@ def _new_task_id() -> str:
     return "t_" + secrets.token_hex(4)
 
 
+def _notify_task_lifecycle(conn, task_id: str, event: str, data: dict) -> None:
+    """Fire lifecycle hook for kanban task state transitions.
+    Registered plugins (backoffice relay, workflow orchestrator) react to these."""
+    import json
+    try:
+        task = get_task(conn, task_id)
+        if not task: return
+        payload = {"event": event, "task_id": task_id, "task_title": task.title,
+                   "task_status": task.status, "data": data}
+        try:
+            from hermes_cli.plugins import get_plugin_context
+            ctx = get_plugin_context()
+            if ctx: ctx.fire_hook(f"kanban_{event}", payload)
+        except Exception: pass
+        logger.info("kanban lifecycle: %s task=%s", event, task_id)
+    except Exception as e:
+        logger.debug("kanban lifecycle notify: %s", e)
+
+
 def _claimer_id() -> str:
     """Return a ``host:pid`` string that identifies this claimer."""
     import socket
