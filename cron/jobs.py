@@ -6,14 +6,26 @@ Output is saved to ~/.hermes/cron/output/{job_id}/{timestamp}.md
 """
 
 import copy
+import contextlib
 import json
 import logging
 import shutil
 import tempfile
 import threading
+import time
 import os
 import re
 import uuid
+
+# Cross-process advisory file locking for jobs.json critical sections.
+try:
+    import fcntl
+except ImportError:
+    fcntl = None
+try:
+    import msvcrt
+except ImportError:
+    msvcrt = None
 from datetime import datetime, timedelta
 from pathlib import Path
 from hermes_constants import get_hermes_home
@@ -23,6 +35,42 @@ logger = logging.getLogger(__name__)
 
 from hermes_time import now as _hermes_now
 from utils import atomic_replace
+
+# Cross-process advisory lock for jobs.json to prevent corruption
+# when multiple processes (gateway + CLI) access it concurrently.
+@contextlib.contextmanager
+def _jobs_lock(file_path: str, timeout: float = 5.0):
+    """Acquire a cross-process file lock, or degrade to in-process only."""
+    lock_file = None
+    locked = False
+    try:
+        if fcntl:
+            lock_file = open(file_path + ".lock", "w")
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline:
+                try:
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    locked = True
+                    break
+                except (BlockingIOError, OSError):
+                    time.sleep(0.05)
+            if not locked:
+                logger.warning("cron: could not acquire cross-process lock within %ss", timeout)
+        elif msvcrt:
+            lock_file = open(file_path + ".lock", "w")
+            msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
+            locked = True
+        yield
+    finally:
+        if locked and lock_file:
+            try:
+                if fcntl:
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+                elif msvcrt:
+                    msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+            except Exception:
+                pass
+            lock_file.close()
 
 try:
     from croniter import croniter
