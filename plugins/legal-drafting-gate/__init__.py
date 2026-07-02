@@ -55,7 +55,6 @@ _LEX_MASTER_EXECUTION_TOOLS = {
     "lex_ref",
     "lex_tc",
     "lex_comment",
-    "lex_ocr",
     "lex_heal",
     "lex_review",
     "swarm_board_create",
@@ -71,6 +70,20 @@ _LEX_MASTER_EXECUTION_TOOLS = {
     "project_delete_task",
 }
 
+_LEX_MASTER_DIRECT_READ_TOOLS = {
+    "lex_master_route",
+    "project_list",
+    "session_search",
+    # lex-master must be able to identify projects and inspect source material
+    # before routing.  Keep these read-only/OCR tools available while blocking
+    # direct editing and project execution tools below.
+    "lex_ocr",
+    "lex_read",
+    "lex_scan",
+    "lex_stats",
+    "lex_table_list",
+}
+
 _DELIVERY_CLAIM_RE = re.compile(
     r"(已完成|完成了|已经完成|修改完成|修订完成|审阅完成|审核完成|校对完成|全部完成|"
     r"done|completed|reviewed|revised|updated)",
@@ -79,6 +92,23 @@ _DELIVERY_CLAIM_RE = re.compile(
 _LEGAL_WORK_RE = re.compile(
     r"(合同|协议|文书|法律|审阅|修订|修改|校对|交叉引用|定义|条款|附件|redline|"
     r"docx|lex_|lexitool|proofread|cross[- ]?reference)",
+    re.IGNORECASE,
+)
+_DELIVERY_WORK_ACTION_RE = re.compile(
+    r"(起草|制作|修改|修订|审阅|审核|校对|交付|出具|生成交付|"
+    r"draft(?:ed|ing)?|revis(?:e|ed|ing)|review(?:ed|ing)?|proofread|redline|deliver(?:ed|y)?)",
+    re.IGNORECASE,
+)
+_DOCUMENT_DELIVERY_ANCHOR_RE = re.compile(
+    r"(/workingfile/|[/\\\w\u4e00-\u9fff .()\[\]-]+\.(?:docx|pdf|html|md)\b|"
+    r"lex_(?:read|diff|proofread|ref|edit|tc|ocr|verify)|"
+    r"§\s*\d+|第\s*\d+(?:\.\d+)?\s*条|段落|页码|页面|全文|全篇|"
+    r"合同修改|协议修改|文书修改|修订文件|交付文件|交付包|报告路径)",
+    re.IGNORECASE,
+)
+_FUTURE_OR_CONDITIONAL_COMPLETION_RE = re.compile(
+    r"(完成后|完成时|完成之前|完成以后|待.{0,12}完成|等.{0,12}完成|"
+    r"如果.{0,12}完成|如.{0,12}完成|完成后我会|完成后再|完成后将)",
     re.IGNORECASE,
 )
 _EVIDENCE_MARKERS = (
@@ -298,7 +328,7 @@ def _lex_master_route_gate(
 ) -> Optional[dict]:
     if _active_profile_name() != "lex-master":
         return None
-    if tool_name in {"lex_master_route", "project_list", "session_search"}:
+    if tool_name in _LEX_MASTER_DIRECT_READ_TOOLS:
         return None
     if tool_name not in _LEX_MASTER_EXECUTION_TOOLS and not tool_name.startswith(("lex_", "swarm_")):
         return None
@@ -364,7 +394,13 @@ def _looks_like_legal_delivery(response_text: str) -> bool:
     text = response_text or ""
     if not _DELIVERY_CLAIM_RE.search(text):
         return False
-    return bool(_LEGAL_WORK_RE.search(text))
+    if _FUTURE_OR_CONDITIONAL_COMPLETION_RE.search(text):
+        return False
+    return bool(
+        _LEGAL_WORK_RE.search(text)
+        and _DELIVERY_WORK_ACTION_RE.search(text)
+        and _DOCUMENT_DELIVERY_ANCHOR_RE.search(text)
+    )
 
 
 def _has_evidence_coverage(response_text: str) -> bool:

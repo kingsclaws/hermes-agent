@@ -103,6 +103,13 @@ def test_lex_master_allows_route_tool(monkeypatch):
     assert plugin._on_pre_tool_call("lex_master_route", {"action": "dispatch"}) is None
 
 
+def test_lex_master_allows_direct_ocr_for_project_identification(monkeypatch):
+    plugin = _load_plugin()
+    monkeypatch.setenv("HERMES_PROFILE", "lex-master")
+
+    assert plugin._on_pre_tool_call("lex_ocr", {"path": "/workingfile/140. Test/a.pdf"}) is None
+
+
 def test_lex_master_bypass_requires_reason_and_writes_audit_log(monkeypatch, tmp_path):
     plugin = _load_plugin()
     home = tmp_path / "lex-master"
@@ -110,15 +117,15 @@ def test_lex_master_bypass_requires_reason_and_writes_audit_log(monkeypatch, tmp
     monkeypatch.setenv("HERMES_HOME", str(home))
 
     blocked = plugin._on_pre_tool_call(
-        "lex_ocr",
-        {"path": "/workingfile/140. Test/a.pdf", "bypass_lex_master_route_gate": True},
+        "lex_edit",
+        {"path": "/workingfile/140. Test/a.docx", "bypass_lex_master_route_gate": True},
     )
     assert blocked["action"] == "block"
 
     allowed = plugin._on_pre_tool_call(
-        "lex_ocr",
+        "lex_edit",
         {
-            "path": "/workingfile/140. Test/a.pdf",
+            "path": "/workingfile/140. Test/a.docx",
             "bypass_lex_master_route_gate": True,
             "bypass_reason": "User approved direct diagnostics.",
         },
@@ -140,6 +147,26 @@ def test_delivery_gate_blocks_bare_legal_completion_claim():
     assert transformed is not None
     assert "Legal delivery gate blocked" in transformed
     assert "evidence coverage" in transformed
+
+
+def test_delivery_gate_allows_simple_tooling_completion_status():
+    plugin = _load_plugin()
+
+    transformed = plugin._on_transform_llm_output(
+        "已完成：lex-master 已开启 lex_ocr，gateway 已重启。"
+    )
+
+    assert transformed is None
+
+
+def test_delivery_gate_allows_future_completion_status():
+    plugin = _load_plugin()
+
+    transformed = plugin._on_transform_llm_output(
+        "任务已分派。审阅完成后我会整合结果并汇报。"
+    )
+
+    assert transformed is None
 
 
 def test_delivery_gate_allows_completion_with_evidence_coverage():
