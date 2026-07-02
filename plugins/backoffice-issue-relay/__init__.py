@@ -190,6 +190,9 @@ def register(ctx: Any) -> None:
     ctx.register_hook("post_tool_call", _on_post_tool_call)
     ctx.register_hook("transform_tool_result", _on_transform_tool_result)
     ctx.register_hook("kanban_task_blocked", _on_kanban_task_blocked)
+    ctx.register_hook("kanban_task_completed", _on_kanban_task_completed)
+    ctx.register_hook("kanban_task_claimed", _on_kanban_task_lifecycle)
+    ctx.register_hook("kanban_task_unblocked", _on_kanban_task_lifecycle)
 
 
 def _now() -> str:
@@ -774,6 +777,35 @@ def _on_transform_tool_result(
         logger.debug("backoffice issue relay transform_tool_result failed: %s", exc)
         return None
 
+
+def _on_kanban_task_completed(payload: Dict[str, Any]) -> None:
+    """Kanban task completed — check workflow graph for next steps."""
+    task_id = str(payload.get("task_id", ""))
+    title = str(payload.get("task_title", ""))
+    logger.info("backoffice: task completed id=%s title=%s", task_id, title)
+    # Write a lightweight completion record — no full issue needed
+    _write_task_event("completed", payload)
+
+def _on_kanban_task_lifecycle(payload: Dict[str, Any]) -> None:
+    """Generic lifecycle event — log for audit trail."""
+    task_id = str(payload.get("task_id", ""))
+    event = str(payload.get("event", "unknown"))
+    logger.info("backoffice: task lifecycle event=%s id=%s", event, task_id)
+
+def _write_task_event(event: str, payload: Dict[str, Any]) -> None:
+    """Write a lightweight task event record for the audit trail."""
+    try:
+        task_id = str(payload.get("task_id", ""))
+        now = datetime.now(timezone.utc).isoformat()
+        record = {
+            "event": event, "task_id": task_id,
+            "task_title": payload.get("task_title", ""),
+            "timestamp": now,
+        }
+        path = BACKOFFICE_DIR / f"task_{event}_{task_id}_{now.replace(':','-')}.json"
+        _atomic_write_json(path, record)
+    except Exception:
+        pass
 
 def _on_kanban_task_blocked(task_id: str = "", reason: str = "", **kwargs: Any) -> None:
     reason_text = reason or json.dumps(kwargs, ensure_ascii=False, default=str)
