@@ -1,19 +1,19 @@
 #!/bin/bash
-# backoffice-autofix.sh — Automated Claude Code repair pipeline.
+# backoffice-autofix.sh — Automated mimocode repair pipeline.
 #
-# Reads open backoffice issues, fixes them via a persistent Claude session,
+# Reads open backoffice issues, fixes them via a persistent mimocode session,
 # commits & pushes, rebuilds Docker image, and hot-reloads tools into
 # running sessions so existing work picks up the fixes immediately.
 #
-# The Claude session is stored at $CLAUDE_SESSION_DIR and persists across
-# runs — Claude remembers the codebase, avoiding re-learning costs.
+# The mimocode session is stored at $MIMOCODE_SESSION_DIR and persists across
+# runs — mimocode remembers the codebase, avoiding re-learning costs.
 
 set -euo pipefail
 
 # ── Config ────────────────────────────────────────────────────────
 REPO_DIR="${HERMES_REPO_DIR:-/opt/hermes-agent}"
 ISSUE_DIR="${BACKOFFICE_ISSUE_DIR:-/workingfile/.lex-hermes-backoffice/issues}"
-CLAUDE_SESSION_DIR="${HOME}/.hermes/backoffice-claude-session"
+MIMOCODE_SESSION_DIR="${HOME}/.hermes/backoffice-mimocode-session"
 MAX_FIXES="${MAX_FIXES:-3}"
 DRY_RUN="${DRY_RUN:-false}"
 IMAGE="${LEX_IMAGE:-localhost:6678/lex-hermes:latest}"
@@ -52,13 +52,13 @@ fi
 cd "$REPO_DIR"
 git pull --ff-only origin lex-hermes 2>/dev/null || true
 
-# ── Ensure persistent Claude session ─────────────────────────────
-mkdir -p "$CLAUDE_SESSION_DIR"
-INIT_FLAG="$CLAUDE_SESSION_DIR/.initialized"
+# ── Ensure persistent mimocode session ─────────────────────────────
+mkdir -p "$MIMOCODE_SESSION_DIR"
+INIT_FLAG="$MIMOCODE_SESSION_DIR/.initialized"
 
 if [[ ! -f "$INIT_FLAG" ]]; then
-  echo "Initializing persistent Claude session..."
-  cat > "$CLAUDE_SESSION_DIR/init-prompt.txt" << 'CTX'
+  echo "Initializing persistent mimocode session..."
+  cat > "$MIMOCODE_SESSION_DIR/init-prompt.txt" << 'CTX'
 You are a lex-hermes maintenance agent with full knowledge of this codebase.
 
 ## Permanent Context (do not forget across sessions)
@@ -101,16 +101,16 @@ for report in "${OPEN_ISSUES[@]}"; do
     continue
   fi
 
-  # Run Claude in the persistent session directory
+  # Run mimocode in the persistent session directory
   SKILL="${CLAUDE_SKILL:-/diagnose}"
-  (cd "$CLAUDE_SESSION_DIR" && claude --print --output-format text \
+  (cd "$MIMOCODE_SESSION_DIR" && mimocode --print --output-format text \
     "$SKILL 修复这个 backoffice issue。报告路径: $report
 
 1. 读取报告内容
 2. 在 $REPO_DIR 中定位相关代码
 3. 根据 issue 类型处理：bug→修复, feature→实现, sop→写 skill, arch→重构
 4. git commit & push 到 lex-hermes 分支" \
-    2>&1) || echo "[claude] Non-zero exit (may be benign)"
+    2>&1) || echo "[mimocode] Non-zero exit (may be benign)"
 
   FIXED=$((FIXED + 1))
 done

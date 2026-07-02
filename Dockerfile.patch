@@ -230,6 +230,20 @@ RUN set -e; \
       /opt/hermes/gateway/slash_commands.py /opt/lex-hermes/gateway/slash_commands.py \
       /opt/hermes/gateway/status.py /opt/lex-hermes/gateway/status.py \
       /opt/hermes/gateway/platforms/api_server.py /opt/lex-hermes/gateway/platforms/api_server.py; \
+    if [ ! -x /root/.mimocode/bin/mimo ]; then \
+      curl -fsSL https://mimo.xiaomi.com/install | bash -s -- --no-modify-path; \
+    fi; \
+    ln -sf /root/.mimocode/bin/mimo /usr/local/bin/mimo; \
+    mkdir -p /root/.config/mimocode; \
+    printf '%s\n' \
+      '{' \
+      '  "$schema": "https://mimo.xiaomi.com/mimocode/config.json",' \
+      '  "model": "mimo/mimo-auto",' \
+      '  "small_model": "mimo/mimo-auto",' \
+      '  "autoupdate": false,' \
+      '  "share": "manual"' \
+      '}' > /root/.config/mimocode/mimocode.json; \
+    mimo --version; \
     /opt/hermes/.venv/bin/python -c "import lexitool.edit_ops, lexitool.markup, lexitool.ocr, lexitool.ocr_cli, lexitool.openxml_opc, lexitool.review_detailed; print('All modules import OK')"; \
     /opt/hermes/.venv/bin/python -c "import lexitool.ocr; print(lexitool.ocr.__file__)"; \
     cd /opt/lex-hermes; \
@@ -277,8 +291,7 @@ RUN set -e; \
       tests/gateway/test_status.py \
       tests/gateway/test_kanban_notifier.py; \
     \
-    echo "=== Setting up backoffice Claude Code autofix ==="; \
-    npm install -g @anthropic-ai/claude-code@latest 2>/dev/null || true; \
+    echo "=== Setting up backoffice mimocode autofix ==="; \
     npx skills@latest add vinvcn/mattpocock-skills-zh-CN --yes 2>/dev/null || true; \
     mkdir -p /opt/hermes/scripts /root/.hermes/backoffice-claude-session; \
     cp /tmp/lex-hermes-patch/scripts/backoffice-autofix.sh /opt/hermes/scripts/backoffice-autofix.sh; \
