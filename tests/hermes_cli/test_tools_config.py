@@ -24,6 +24,7 @@ from hermes_cli.tools_config import (
     _visible_providers,
     tools_command,
 )
+from toolsets import resolve_multiple_toolsets
 
 
 def test_agent_disabled_toolsets_suppresses_across_platforms():
@@ -142,6 +143,22 @@ def test_get_platform_tools_old_explicit_config_keeps_lex_legal_baseline():
     assert "terminal" in enabled
     assert "file" in enabled
     assert _LEX_LEGAL_BASELINE_TOOLSETS.issubset(enabled)
+
+
+def test_get_platform_tools_coordinator_lex_docx_does_not_auto_enable_edit_tools():
+    config = {"platform_toolsets": {"cli": ["terminal", "delegation", "lex-docx-coordinator"]}}
+
+    enabled = _get_platform_tools(config, "cli", include_default_mcp_servers=False)
+    tools = resolve_multiple_toolsets(enabled)
+
+    assert "lex-docx-coordinator" in enabled
+    assert "lexitool" not in enabled
+    assert "lex-docx" not in enabled
+    assert "lex_ocr" in tools
+    assert "lex_edit" not in tools
+    assert "lex_format" not in tools
+    assert "execute_code" not in tools
+
 
 def test_get_platform_tools_default_telegram_includes_messaging():
     enabled = _get_platform_tools({}, "telegram")

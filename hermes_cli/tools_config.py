@@ -1177,6 +1177,7 @@ def _get_platform_tools(
     # YAML may parse bare numeric names (e.g. ``12306:``) as int.
     # Normalise to str so downstream sorted() never mixes types.
     toolset_names = [str(ts) for ts in toolset_names]
+    coordinator_lex_docx_requested = "lex-docx-coordinator" in toolset_names
 
     configurable_keys = {ts_key for ts_key, _, _ in CONFIGURABLE_TOOLSETS}
     plugin_ts_keys = _get_plugin_toolset_keys()
@@ -1227,12 +1228,22 @@ def _get_platform_tools(
 
             enabled_toolsets |= expanded
 
-        # Auto-enable lexitool when the library is importable
-        if _toolset_allowed_for_platform("lexitool", platform) and _lexitool_available():
+        # Auto-enable lexitool when the library is importable.  Coordinator
+        # profiles explicitly request lex-docx-coordinator to keep read/OCR
+        # tools while excluding lex_edit/lex_format/execute_code.
+        if (
+            not coordinator_lex_docx_requested
+            and _toolset_allowed_for_platform("lexitool", platform)
+            and _lexitool_available()
+        ):
             import tools.lexitool_tool  # noqa: F401 — triggers registry.register()
             enabled_toolsets.add("lexitool")
         # Auto-enable lex-docx when the library is importable
-        if _toolset_allowed_for_platform("lex-docx", platform) and _lex_docx_available():
+        if (
+            not coordinator_lex_docx_requested
+            and _toolset_allowed_for_platform("lex-docx", platform)
+            and _lex_docx_available()
+        ):
             enabled_toolsets.add("lex-docx")
     else:
         # No explicit config — fall back to resolving composite toolset names
@@ -1291,11 +1302,19 @@ def _get_platform_tools(
         enabled_toolsets -= default_off
 
         # Auto-enable lexitool when the library is importable
-        if _toolset_allowed_for_platform("lexitool", platform) and _lexitool_available():
+        if (
+            not coordinator_lex_docx_requested
+            and _toolset_allowed_for_platform("lexitool", platform)
+            and _lexitool_available()
+        ):
             import tools.lexitool_tool  # noqa: F401 — triggers registry.register()
             enabled_toolsets.add("lexitool")
         # Auto-enable lex-docx when the library is importable
-        if _toolset_allowed_for_platform("lex-docx", platform) and _lex_docx_available():
+        if (
+            not coordinator_lex_docx_requested
+            and _toolset_allowed_for_platform("lex-docx", platform)
+            and _lex_docx_available()
+        ):
             enabled_toolsets.add("lex-docx")
 
     # Recover non-configurable platform toolsets (e.g. discord, feishu_doc,
@@ -1408,9 +1427,10 @@ def _get_platform_tools(
 
     # Lex Hermes baseline: legal/document tools are on by default even when an
     # older config has an explicit allowlist such as ["terminal", "file"].
-    for baseline_ts in _LEX_LEGAL_BASELINE_TOOLSETS:
-        if _toolset_allowed_for_platform(baseline_ts, platform):
-            enabled_toolsets.add(baseline_ts)
+    if not coordinator_lex_docx_requested:
+        for baseline_ts in _LEX_LEGAL_BASELINE_TOOLSETS:
+            if _toolset_allowed_for_platform(baseline_ts, platform):
+                enabled_toolsets.add(baseline_ts)
 
     # Honor agent.disabled_toolsets from config.yaml — allows users to
     # globally suppress specific toolsets (e.g. "memory") across all
