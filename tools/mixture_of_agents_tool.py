@@ -52,25 +52,22 @@ import asyncio
 import datetime
 from typing import Dict, Any, List, Optional
 from tools.openrouter_client import get_async_client as _get_openrouter_client, check_api_key as check_openrouter_api_key
-from agent.auxiliary_client import extract_content_or_reasoning
+from agent.auxiliary_client import extract_content_or_reasoning, resolve_provider_client
 from tools.debug_helpers import DebugSession
-import sys
+import sys, os
 
 logger = logging.getLogger(__name__)
 
 # Configuration for MoA processing
+# Override via env vars: MOA_PROVIDER, MOA_REFERENCE_MODELS, MOA_AGGREGATOR_MODEL
+MOA_PROVIDER = os.getenv("MOA_PROVIDER", "openrouter").lower()
+
 # Reference models - these generate diverse initial responses in parallel.
-# Keep this list aligned with current top-tier OpenRouter frontier options.
-REFERENCE_MODELS = [
-    "anthropic/claude-opus-4.6",
-    "google/gemini-2.5-pro",
-    "openai/gpt-5.4-pro",
-    "deepseek/deepseek-v3.2",
-]
+_REF_DEFAULT = "anthropic/claude-opus-4.6,google/gemini-2.5-pro,openai/gpt-5.4-pro,deepseek/deepseek-v3.2"
+REFERENCE_MODELS = os.getenv("MOA_REFERENCE_MODELS", _REF_DEFAULT).split(",")
 
 # Aggregator model - synthesizes reference responses into final output.
-# Prefer the strongest synthesis model in the current OpenRouter lineup.
-AGGREGATOR_MODEL = "anthropic/claude-opus-4.6"
+AGGREGATOR_MODEL = os.getenv("MOA_AGGREGATOR_MODEL", "anthropic/claude-opus-4.6")
 
 # Temperature settings optimized for MoA performance
 REFERENCE_TEMPERATURE = 0.6  # Balanced creativity for diverse perspectives
@@ -83,6 +80,21 @@ MIN_SUCCESSFUL_REFERENCES = 1  # Minimum successful reference models needed to p
 AGGREGATOR_SYSTEM_PROMPT = """You have been provided with a set of responses from various open-source models to the latest user query. Your task is to synthesize these responses into a single, high-quality response. It is crucial to critically evaluate the information provided in these responses, recognizing that some of it may be biased or incorrect. Your response should not simply replicate the given answers but should offer a refined, accurate, and comprehensive reply to the instruction. Ensure your response is well-structured, coherent, and adheres to the highest standards of accuracy and reliability.
 
 Responses from models:"""
+
+_moa_client = None
+
+def _get_moa_client():
+    """Return an async client for the configured MoA provider."""
+    global _moa_client
+    if _moa_client is None:
+        if MOA_PROVIDER == "openrouter":
+            _moa_client = _get_openrouter_client()
+        else:
+            client, _model = resolve_provider_client(MOA_PROVIDER, async_mode=True)
+            if client is None:
+                raise ValueError(f"MoA provider '{MOA_PROVIDER}' not configured. Set MOA_PROVIDER or OPENROUTER_API_KEY.")
+            _moa_client = client
+    return _moa_client
 
 _debug = DebugSession("moa_tools", env_var="MOA_TOOLS_DEBUG")
 
@@ -144,7 +156,7 @@ async def _run_reference_model_safe(
             if not model.lower().startswith('gpt-'):
                 api_params["temperature"] = temperature
             
-            response = await _get_openrouter_client().chat.completions.create(**api_params)
+            response = await _get_moa_client().chat.completions.create(**api_params)
             
             content = extract_content_or_reasoning(response)
             if not content:
@@ -219,14 +231,14 @@ async def _run_aggregator_model(
     if not AGGREGATOR_MODEL.lower().startswith('gpt-'):
         api_params["temperature"] = temperature
 
-    response = await _get_openrouter_client().chat.completions.create(**api_params)
+    response = await _get_moa_client().chat.completions.create(**api_params)
 
     content = extract_content_or_reasoning(response)
 
     # Retry once on empty content (reasoning-only response)
     if not content:
         logger.warning("Aggregator returned empty content, retrying once")
-        response = await _get_openrouter_client().chat.completions.create(**api_params)
+        response = await _get_moa_client().chat.completions.create(**api_params)
         content = extract_content_or_reasoning(response)
 
     logger.info("Aggregation complete (%s characters)", len(content))
