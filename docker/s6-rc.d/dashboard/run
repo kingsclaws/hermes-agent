@@ -65,6 +65,20 @@ case "${HERMES_DASHBOARD_INSECURE:-}" in
     1|true|TRUE|True|yes|YES|Yes) insecure="--insecure" ;;
 esac
 
-# shellcheck disable=SC2086  # word-splitting of $runner and $insecure is intentional
+# Desktop app password auth (opt-in via env vars)
+serve_username="${HERMES_SERVE_USERNAME:-sebastian}"
+serve_password="${HERMES_SERVE_PASSWORD:-661225}"
+
+username_flag=""
+password_flag=""
+if [ -n "$serve_username" ] && [ -n "$serve_password" ]; then
+    username_flag="--username"
+    password_flag="--password"
+fi
+
+# shellcheck disable=SC2086  # word-splitting intentional
 exec $runner hermes dashboard \
-    --host "$dash_host" --port "$dash_port" --no-open $insecure
+    --host "$dash_host" --port "$dash_port" --no-open \
+    $username_flag "$serve_username" \
+    $password_flag "$serve_password" \
+    $insecure
