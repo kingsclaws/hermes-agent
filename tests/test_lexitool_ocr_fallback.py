@@ -78,3 +78,32 @@ def test_expired_precise_token_is_skipped(monkeypatch, tmp_path):
     assert result["ok"] is True
     assert result["api"] == "agent"
     assert "token appears expired" in result["warnings"][0]
+
+
+def test_parse_gradio_sse_data_events():
+    text = (
+        'event: generating\n'
+        'data: ["<p>working</p>", null, "", "", "[]", null]\n\n'
+        'event: complete\n'
+        'data: ["<p>done</p>", null, "", "# OCR text", "[]", null]\n\n'
+        'data: [DONE]\n\n'
+    )
+
+    events = ocr._parse_sse_data_events(text)
+
+    assert events == [
+        ["<p>working</p>", None, "", "", "[]", None],
+        ["<p>done</p>", None, "", "# OCR text", "[]", None],
+    ]
+
+
+def test_markdown_from_gradio_content_list_preserves_pages():
+    content_list = json.dumps([
+        {"type": "text", "page_idx": 0, "text": "第一页第一段"},
+        {"type": "text", "page_idx": 0, "text": "第一页第二段"},
+        {"type": "text", "page_idx": 1, "text": "第二页"},
+    ])
+
+    markdown = ocr._markdown_from_content_list(content_list)
+
+    assert markdown == "<!-- page 1 -->\n第一页第一段\n第一页第二段\n\n<!-- page 2 -->\n第二页"

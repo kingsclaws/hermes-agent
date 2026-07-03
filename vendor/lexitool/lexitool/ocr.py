@@ -12,12 +12,15 @@ Fallback: local Tesseract OCR (if tesseract + pdftoppm are installed).
 from __future__ import annotations
 
 import base64
+import io
 import json
+import mimetypes
 import os
 import shutil
 import subprocess
 import tempfile
 import time
+import zipfile
 import requests
 
 
@@ -78,18 +81,148 @@ def _poll(url: str, headers: dict, field: str = "state",
 
 # ── Local MinerU API (self-hosted, no token) ─────────────────────────────────
 
-LOCAL_MINERU_URL = os.environ.get("MINERU_LOCAL_URL", "http://192.168.11.5:9987")
+_DEFAULT_LOCAL_MINERU_URLS = "http://192.168.11.5:7860,http://192.168.11.5:9987"
+LOCAL_MINERU_URL = os.environ.get("MINERU_LOCAL_URL", "http://192.168.11.5:7860")
+
+
+def _local_mineru_urls() -> list[str]:
+    configured = os.environ.get("MINERU_LOCAL_URLS") or os.environ.get("MINERU_LOCAL_URL")
+    raw = configured or _DEFAULT_LOCAL_MINERU_URLS
+    urls = []
+    for item in raw.split(","):
+        url = item.strip().rstrip("/")
+        if url and url not in urls:
+            urls.append(url)
+    return urls
+
+
+def _gradio_language(language: str) -> str:
+    mapping = {
+        "ch": "ch (Chinese, English, Japanese, Chinese Traditional, Latin)",
+        "zh": "ch (Chinese, English, Japanese, Chinese Traditional, Latin)",
+        "zh-cn": "ch (Chinese, English, Japanese, Chinese Traditional, Latin)",
+        "ch_server": "ch_server (Chinese, English, Japanese, Chinese Traditional, Latin)",
+        "en": "ch (Chinese, English, Japanese, Chinese Traditional, Latin)",
+        "eng": "ch (Chinese, English, Japanese, Chinese Traditional, Latin)",
+    }
+    return mapping.get(str(language or "ch").strip(), str(language or "ch").strip())
+
+
+def _page_range_end(page_range: str | None) -> int:
+    if not page_range:
+        return int(os.environ.get("MINERU_GRADIO_MAX_PAGES", "1000"))
+    nums: list[int] = []
+    for part in str(page_range).split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            _, end = part.split("-", 1)
+            part = end
+        try:
+            nums.append(int(part))
+        except ValueError:
+            pass
+    return max(nums) if nums else int(os.environ.get("MINERU_GRADIO_MAX_PAGES", "1000"))
+
+
+def _parse_sse_data_events(text: str) -> list[object]:
+    events: list[object] = []
+    for block in text.split("\n\n"):
+        data_lines = []
+        for line in block.splitlines():
+            if line.startswith("data:"):
+                data_lines.append(line[5:].strip())
+        if not data_lines:
+            continue
+        data = "\n".join(data_lines)
+        if data == "[DONE]":
+            continue
+        try:
+            events.append(json.loads(data))
+        except Exception:
+            continue
+    return events
+
+
+def _download_markdown_from_gradio_zip(file_obj: object) -> str | None:
+    if not isinstance(file_obj, dict):
+        return None
+    url = file_obj.get("url")
+    if not url:
+        return None
+    try:
+        r = requests.get(str(url), timeout=60)
+        r.raise_for_status()
+        z = zipfile.ZipFile(io.BytesIO(r.content))
+        for name in z.namelist():
+            lower = name.lower()
+            if lower.endswith(".md") or lower.endswith(".markdown"):
+                return z.read(name).decode("utf-8", errors="replace")
+    except Exception:
+        return None
+    return None
+
+
+def _markdown_from_content_list(value: object) -> str | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        data = json.loads(value)
+    except Exception:
+        return None
+    if not isinstance(data, list):
+        return None
+    lines: list[str] = []
+    current_page = None
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        text = str(item.get("text") or "").strip()
+        if not text:
+            continue
+        page = item.get("page_idx")
+        if page is not None and page != current_page:
+            current_page = page
+            if lines:
+                lines.append("")
+            lines.append(f"<!-- page {int(page) + 1} -->")
+        lines.append(text)
+    return "\n".join(lines).strip() or None
 
 
 class LocalMinerUAPI:
-    """Self-hosted MinerU FastAPI instance — synchronous, no polling needed."""
+    """Self-hosted MinerU instance.
+
+    Supports both the old FastAPI ``/file_parse`` service and MinerU 3's
+    Gradio app at ``/convert_to_markdown_stream``.
+    """
 
     def __init__(self, base_url: str = None):
         self.base_url = (base_url or LOCAL_MINERU_URL).rstrip("/")
 
     def parse_file(self, file_path: str, language: str = "ch",
                    page_range: str = None, timeout: int = _DEFAULT_TIMEOUT) -> str | None:
-        """POST file to /file_parse, return markdown text or None."""
+        """POST file to local MinerU, return markdown text or None."""
+        if self._looks_like_gradio(timeout=10):
+            md = self._parse_gradio(file_path, language=language, page_range=page_range, timeout=timeout)
+            if md:
+                return md
+        return self._parse_file_parse(file_path, language=language, page_range=page_range, timeout=timeout)
+
+    def _looks_like_gradio(self, timeout: int = 10) -> bool:
+        try:
+            r = requests.get(f"{self.base_url}/config", timeout=timeout)
+            if r.status_code != 200:
+                return False
+            data = r.json()
+            return data.get("api_prefix") == "/gradio_api" and "dependencies" in data
+        except Exception:
+            return False
+
+    def _parse_file_parse(self, file_path: str, language: str = "ch",
+                          page_range: str = None, timeout: int = _DEFAULT_TIMEOUT) -> str | None:
+        """POST file to legacy /file_parse, return markdown text or None."""
         start_page = 0
         end_page = 99999
         if page_range:
@@ -122,6 +255,82 @@ class LocalMinerUAPI:
             return None
         except Exception:
             return None
+
+    def _parse_gradio(self, file_path: str, language: str = "ch",
+                      page_range: str = None, timeout: int = _DEFAULT_TIMEOUT) -> str | None:
+        """Use MinerU 3 Gradio API: upload -> call -> SSE result."""
+        filename = os.path.basename(file_path)
+        mime_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+        with open(file_path, "rb") as f:
+            upload = requests.post(
+                f"{self.base_url}/gradio_api/upload",
+                files={"files": (filename, f, mime_type)},
+                timeout=min(timeout, 120),
+            )
+        upload.raise_for_status()
+        uploaded = upload.json()
+        if not uploaded:
+            return None
+        remote_path = uploaded[0]
+        file_data = {
+            "path": remote_path,
+            "orig_name": filename,
+            "mime_type": mime_type,
+            "meta": {"_type": "gradio.FileData"},
+        }
+        backend = os.environ.get("MINERU_GRADIO_BACKEND", "hybrid-engine")
+        effort = os.environ.get("MINERU_GRADIO_EFFORT", "medium")
+        server_url = os.environ.get("MINERU_GRADIO_SERVER_URL", "http://localhost:30000")
+        force_ocr = os.environ.get("MINERU_GRADIO_FORCE_OCR", "").lower() in {"1", "true", "yes", "on"}
+        image_analysis = os.environ.get("MINERU_GRADIO_IMAGE_ANALYSIS", "true").lower() not in {"0", "false", "no", "off"}
+        data = [
+            file_data,
+            _page_range_end(page_range),
+            force_ocr,
+            True,   # formula_enable
+            True,   # table_enable
+            image_analysis,
+            effort,
+            _gradio_language(language),
+            backend,
+            server_url,
+        ]
+        call = requests.post(
+            f"{self.base_url}/gradio_api/call/convert_to_markdown_stream",
+            json={"data": data},
+            timeout=min(timeout, 120),
+        )
+        call.raise_for_status()
+        event_id = call.json().get("event_id")
+        if not event_id:
+            return None
+        stream = requests.get(
+            f"{self.base_url}/gradio_api/call/convert_to_markdown_stream/{event_id}",
+            timeout=timeout,
+        )
+        stream.raise_for_status()
+        events = _parse_sse_data_events(stream.text)
+        if not events:
+            return None
+        final = events[-1]
+        if not isinstance(final, list):
+            return None
+        # Return tuple: [status_html, zip_file, md_rendering, md_text,
+        # content_list_json, preview_pdf].
+        md_text = ""
+        if len(final) > 3 and isinstance(final[3], str) and final[3].strip():
+            md_text = final[3]
+        elif len(final) > 2 and isinstance(final[2], str) and final[2].strip():
+            md_text = final[2]
+        if md_text:
+            return md_text
+        if len(final) > 1:
+            md_text = _download_markdown_from_gradio_zip(final[1])
+            if md_text:
+                return md_text
+        if len(final) > 4:
+            return _markdown_from_content_list(final[4])
+        return None
 
 
 # ── Agent API (free, no token) ──────────────────────────────────────────────
@@ -362,11 +571,13 @@ def parse_pdf(
         md_text = None
 
         # 1) Local self-hosted MinerU (fastest, no token)
-        local = LocalMinerUAPI()
-        md_text = local.parse_file(file_path, language=language,
-                                   page_range=page_range, timeout=timeout)
-        if md_text:
-            api_used = "local"
+        for local_url in _local_mineru_urls():
+            local = LocalMinerUAPI(local_url)
+            md_text = local.parse_file(file_path, language=language,
+                                       page_range=page_range, timeout=timeout)
+            if md_text:
+                api_used = "local"
+                break
 
         # 2) Remote PreciseAPI (best quality, needs token)
         if md_text is None and token and prefer_precise:
