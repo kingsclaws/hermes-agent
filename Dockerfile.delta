@@ -4,8 +4,10 @@
 # Build:
 #   docker build -f Dockerfile.delta -t lex-hermes .
 
-FROM localhost:6678/lex-hermes:latest
+ARG BASE_IMAGE=localhost:6678/lex-hermes:latest
+FROM ${BASE_IMAGE}
 
+ENV UV_HTTP_TIMEOUT=120
 ENV VIRTUAL_ENV=/opt/hermes/.venv
 ENV PATH="/opt/hermes/.venv/bin:/opt/hermes/bin:${PATH}"
 
@@ -17,7 +19,17 @@ RUN uv pip install --no-cache /opt/lexitool
 
 # ── Update hermes-agent source ──
 COPY . /opt/lex-hermes
-RUN uv pip install --no-cache -e ".[web]"
+RUN find /opt/lex-hermes \
+      \( -path '*/node_modules' -o -path '*/.git' -o -path '*/release' -o -path '*/dist' \) -prune -o \
+      -type d -exec chmod a+rx {} + -o \
+      -type f \( \
+        -name '*.py' -o -name '*.pyi' -o -name '*.json' -o -name '*.yaml' -o -name '*.yml' -o \
+        -name '*.toml' -o -name '*.js' -o -name '*.ts' -o -name '*.tsx' -o -name '*.css' -o \
+        -name '*.html' -o -name '*.md' -o -name '*.sh' \
+      \) -exec chmod a+r {} + && \
+    find /opt/lex-hermes -type f -name '*.sh' -exec chmod a+rx {} +
+RUN uv pip install --no-cache setuptools wheel
+RUN uv pip install --no-cache --no-build-isolation -e ".[web]"
 
 # ── Pre-compile bytecode ──
 RUN python3 -m compileall -q -f /opt/lex-hermes/ 2>/dev/null || true

@@ -492,14 +492,9 @@ def _find_coordinator_session(db, project: dict, session_id: str = "") -> dict |
     # This column survives compression (propagated to new session automatically).
     if project_id:
         try:
-            conn = db._conn if hasattr(db, "_conn") else None
-            if conn:
-                row = conn.execute(
-                    "SELECT id FROM sessions WHERE coordinator_for = ? AND ended_at IS NULL ORDER BY started_at DESC LIMIT 1",
-                    (project_id,),
-                ).fetchone()
-                if row:
-                    return db.get_session(row[0])
+            session = db.get_project_coordinator_session(project_id)
+            if session:
+                return session
         except Exception:
             pass
 
@@ -512,27 +507,15 @@ def _find_coordinator_session(db, project: dict, session_id: str = "") -> dict |
     return sorted(scored, key=lambda item: item[1], reverse=True)[0][0]
 
 
-def _bind_coordinator_session(project_id: str | None, session_id: str, project_name: str = "") -> None:
+def _bind_coordinator_session(project_id: str | None, session_id: str, project_name: str = "") -> bool:
     """Bind session to project via coordinator_for column (survives compression)."""
     if not project_id or not session_id:
-        return
+        return False
     try:
-        db_path = _shared_project_db_path()
-        conn = sqlite3.connect(str(db_path))
-        # Clear any existing binding for this project (one project = one coordinator)
-        conn.execute(
-            "UPDATE sessions SET coordinator_for = NULL WHERE coordinator_for = ?",
-            (project_id,),
-        )
-        # Set the binding
-        conn.execute(
-            "UPDATE sessions SET coordinator_for = ? WHERE id = ?",
-            (project_id, session_id),
-        )
-        conn.commit()
-        conn.close()
+        db = _project_session_db()
+        return bool(db.bind_project_coordinator(project_id, session_id))
     except Exception:
-        pass
+        return False
 
 
 def _dispatch_to_session(*, session_id: str, task: str, project: dict, route_id: str, async_mode: bool) -> dict:
@@ -1245,19 +1228,15 @@ def project_create_handler(args: dict, **kwargs) -> str:
         if args.get("bind_session", True):
             session_id = os.environ.get("HERMES_SESSION_ID", "")
             if session_id:
-                _bind_coordinator_session(project_id, session_id, project["name"])
-                # Set session title
-                try:
-                    conn = sqlite3.connect(str(_shared_project_db_path()))
-                    conn.execute(
-                        "UPDATE sessions SET title = ? WHERE id = ?",
-                        (f"[{project['name']}] coordinator", session_id),
-                    )
-                    conn.commit()
-                    conn.close()
-                except Exception:
-                    pass
-                bind_info = {"session_id": session_id, "bound": True}
+                bound = _bind_coordinator_session(project_id, session_id, project["name"])
+                if bound:
+                    # Best-effort readability only; coordinator_for is the durable binding.
+                    try:
+                        db = _project_session_db()
+                        db.set_session_title(session_id, f"[{project['name']}] coordinator")
+                    except Exception:
+                        pass
+                bind_info = {"session_id": session_id, "bound": bool(bound)}
 
         return json.dumps({
             "success": True,
@@ -1268,7 +1247,7 @@ def project_create_handler(args: dict, **kwargs) -> str:
             "bind_session": bind_info,
             "message": (
                 f"Project '{project['name']}' registered at {project['path']}."
-                + (f" Session {session_id} bound as coordinator." if bind_info else "")
+                + (f" Session {session_id} bound as coordinator." if bind_info and bind_info.get("bound") else "")
                 + (" Init workflow started." if init_result and init_result.get("success") else "")
             ),
         }, ensure_ascii=False)
@@ -2133,24 +2112,24 @@ def project_bind_session_handler(args: dict, **kwargs) -> str:
              "hint": "Use project_list to see registered projects."}
         )
 
-    # Update the binding (title-based, survives compression)
-    _bind_coordinator_session(project["id"], session_id, project["name"])
+    bound = _bind_coordinator_session(project["id"], session_id, project["name"])
+    if not bound:
+        return json.dumps(
+            {
+                "success": False,
+                "error": f"Session not found or could not be bound: {session_id}",
+                "project_id": project["id"],
+                "project_name": project["name"],
+            },
+            ensure_ascii=False,
+        )
 
-    # Also set session title to include project name for readability
+    # Best-effort readability only; coordinator_for is the durable binding.
     try:
-        conn = sqlite3.connect(str(_shared_project_db_path()))
-        current = conn.execute(
-            "SELECT title FROM sessions WHERE id = ?", (session_id,)
-        ).fetchone()
-        current_title = current[0] if current else ""
+        current_title = db.get_session_title(session_id) or ""
         new_title = f"[{project['name']}] coordinator"
         if current_title != new_title:
-            conn.execute(
-                "UPDATE sessions SET title = ? WHERE id = ?",
-                (new_title, session_id),
-            )
-            conn.commit()
-        conn.close()
+            db.set_session_title(session_id, new_title)
     except Exception:
         pass
 

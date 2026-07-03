@@ -48,6 +48,48 @@ def test_project_create_starts_init_workflow(tmp_path, monkeypatch):
     assert any(src["priority"] == "core" for src in sources)
 
 
+def test_project_create_auto_binds_current_session(tmp_path, monkeypatch):
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("HERMES_PROFILE", "default")
+    monkeypatch.setenv("HERMES_SESSION_ID", "coord-create")
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+    project_dir = tmp_path / "Bound Matter"
+    project_dir.mkdir()
+    (project_dir / "项目概述.md").write_text("初始化资料\n", encoding="utf-8")
+
+    import hermes_state
+
+    hermes_state.DEFAULT_DB_PATH = home / "state.db"
+
+    from hermes_state import SessionDB
+    from tools import project_management_tool as pm
+
+    db = SessionDB(db_path=home / "state.db")
+    db.create_session("coord-create", source="cli", model="test-model")
+    db.close()
+
+    out = json.loads(pm.project_create_handler({
+        "name": "Bound Matter",
+        "path": str(project_dir),
+        "client": "Client B",
+        "goal": "bind test",
+        "auto_init": False,
+    }))
+
+    assert out["success"] is True
+    assert out["bind_session"] == {"session_id": "coord-create", "bound": True}
+
+    db = SessionDB(db_path=home / "state.db")
+    try:
+        assert db.get_session("coord-create")["coordinator_for"] == out["project_id"]
+        assert db.get_project_coordinator_session(out["project_id"])["id"] == "coord-create"
+    finally:
+        db.close()
+
+
 def test_project_management_toolset_exposes_init_tools():
     import tools.project_management_tool  # noqa: F401
     from tools.registry import registry

@@ -145,7 +145,14 @@ def test_review_defaults_include_xref_and_merge_machine_findings(tmp_path, monke
     monkeypatch.setattr("tools.legal_orchestration_tool.delegate_task", _fake_delegate_task)
 
     raw = _handle_legal_orchestrate(
-        {"task_type": "review", "document_path": "agreement.docx", "project_dir": str(tmp_path)},
+        {
+            "task_type": "review",
+            "document_path": "agreement.docx",
+            "project_dir": str(tmp_path),
+            "mode": "direct",
+            "allow_direct": True,
+            "direct_reason": "unit test direct review path",
+        },
         parent_agent=_StubAgent(),
     )
 
@@ -156,6 +163,81 @@ def test_review_defaults_include_xref_and_merge_machine_findings(tmp_path, monke
         "review_xref",
     ]
     assert any(item["title"] == "Dead internal cross-reference: 第9条" for item in payload["findings"])
+
+
+def test_legal_orchestrate_defaults_to_kanban(tmp_path, monkeypatch):
+    calls = {"tasks": []}
+
+    def _fake_board(args, **kwargs):
+        assert args["project_path"] == str(tmp_path)
+        return json.dumps({"success": True, "board": {"id": "board-1"}})
+
+    def _fake_task(args, **kwargs):
+        calls["tasks"].append(args)
+        return json.dumps({"success": True, "task": {"id": f"tsk-{len(calls['tasks'])}", "title": args["title"]}})
+
+    monkeypatch.setattr("tools.kanban_toolset.kanban_board_create_handler", _fake_board)
+    monkeypatch.setattr("tools.kanban_toolset.kanban_task_create_handler", _fake_task)
+
+    raw = _handle_legal_orchestrate(
+        {
+            "task_type": "review_content",
+            "document_path": "agreement.docx",
+            "project_dir": str(tmp_path),
+        },
+        parent_agent=_StubAgent(),
+    )
+
+    payload = json.loads(raw)
+    assert payload["success"] is True
+    assert payload["mode"] == "kanban"
+    assert payload["tasks_created"] == 1
+    assert calls["tasks"][0]["assignee"] == "hpswarm-reviewer-content"
+
+
+def test_legal_orchestrate_blocks_direct_without_bypass(tmp_path):
+    raw = _handle_legal_orchestrate(
+        {
+            "task_type": "review",
+            "document_path": "agreement.docx",
+            "project_dir": str(tmp_path),
+            "mode": "direct",
+        },
+        parent_agent=_StubAgent(),
+    )
+
+    payload = json.loads(raw)
+    assert payload["error"]
+    assert "defaults to Kanban" in payload["error"]
+
+
+def test_legal_orchestrate_allows_direct_inside_kanban_worker(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_KANBAN_TASK", "tsk-1")
+    monkeypatch.setattr(
+        "tools.legal_orchestration_tool.delegate_task",
+        lambda **kwargs: json.dumps({
+            "results": [
+                {
+                    "status": "completed",
+                    "summary": json.dumps({"status": "completed", "summary": "ok", "findings": []}),
+                }
+            ]
+        }),
+    )
+
+    raw = _handle_legal_orchestrate(
+        {
+            "task_type": "review_content",
+            "document_path": "agreement.docx",
+            "project_dir": str(tmp_path),
+            "mode": "direct",
+        },
+        parent_agent=_StubAgent(),
+    )
+
+    payload = json.loads(raw)
+    assert payload["status"] in {"completed", "failed"}
+    assert payload["task_type"] == "review_content"
 
 
 def test_scorecard_gate_blocks_failed_scorecard(tmp_path, monkeypatch):

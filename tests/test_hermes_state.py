@@ -1531,6 +1531,12 @@ class TestSchemaInit:
         columns = {row[1] for row in cursor.fetchall()}
         assert "title" in columns
 
+    def test_coordinator_for_column_exists(self, db):
+        """Project coordinator routing uses sessions.coordinator_for."""
+        cursor = db._conn.execute("PRAGMA table_info(sessions)")
+        columns = {row[1] for row in cursor.fetchall()}
+        assert "coordinator_for" in columns
+
     def test_topic_mode_schema_is_not_auto_migrated_on_open(self, tmp_path):
         """Opening an old DB should not add topic-mode columns until /topic opts in.
 
@@ -1978,6 +1984,41 @@ class TestSchemaInit:
                     f"Column {col_name} declared in SCHEMA_SQL for {table_name} "
                     f"but missing from live DB. Live columns: {live_cols}"
                 )
+
+    def test_reconciliation_adds_coordinator_for_to_legacy_sessions(self, tmp_path):
+        """Opening an existing DB adds the coordinator routing column."""
+        old_db = tmp_path / "legacy-coordinator.db"
+        import sqlite3
+
+        conn = sqlite3.connect(old_db)
+        conn.executescript(
+            """
+            CREATE TABLE schema_version (version INTEGER NOT NULL);
+            INSERT INTO schema_version VALUES (11);
+            CREATE TABLE sessions (
+                id TEXT PRIMARY KEY,
+                source TEXT NOT NULL,
+                started_at REAL NOT NULL
+            );
+            CREATE TABLE messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL REFERENCES sessions(id),
+                role TEXT NOT NULL,
+                content TEXT,
+                timestamp REAL NOT NULL
+            );
+            """
+        )
+        conn.close()
+
+        db = SessionDB(db_path=old_db)
+        columns = {
+            row[1]
+            for row in db._conn.execute("PRAGMA table_info(sessions)").fetchall()
+        }
+        db.close()
+
+        assert "coordinator_for" in columns
 
 
 class TestTitleUniqueness:

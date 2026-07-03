@@ -256,6 +256,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     handoff_error TEXT,
     project_id TEXT,
     project_cwd TEXT,
+    coordinator_for TEXT,
     FOREIGN KEY (parent_session_id) REFERENCES sessions(id)
 );
 
@@ -831,6 +832,15 @@ class SessionDB:
             )
         except sqlite3.OperationalError as exc:
             logger.debug("idx_messages_platform_msg_id create skipped: %s", exc)
+
+        try:
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_sessions_coordinator_for "
+                "ON sessions(coordinator_for, ended_at, started_at DESC) "
+                "WHERE coordinator_for IS NOT NULL"
+            )
+        except sqlite3.OperationalError as exc:
+            logger.debug("idx_sessions_coordinator_for create skipped: %s", exc)
 
         # ── Schema version bookkeeping ─────────────────────────────────
         # Bump to current so future data migrations (if any) can gate on
@@ -3016,6 +3026,50 @@ class SessionDB:
                 (project_id, limit),
             ).fetchall()
         return [dict(r) for r in rows]
+
+    def bind_project_coordinator(self, project_id: str, session_id: str) -> bool:
+        """Bind one live coordinator session to a project.
+
+        ``sessions.coordinator_for`` is intentionally stored on the session
+        rather than the project row because compression rotates session IDs.
+        The compression path propagates this column to the continuation
+        session, so the current coordinator can be resolved by querying live
+        sessions for the project binding.
+        """
+        if not project_id or not session_id:
+            return False
+
+        def _do(conn):
+            cursor = conn.execute(
+                "SELECT 1 FROM sessions WHERE id = ?",
+                (session_id,),
+            )
+            if cursor.fetchone() is None:
+                return False
+            conn.execute(
+                "UPDATE sessions SET coordinator_for = NULL WHERE coordinator_for = ?",
+                (project_id,),
+            )
+            cursor = conn.execute(
+                "UPDATE sessions SET coordinator_for = ? WHERE id = ?",
+                (project_id, session_id),
+            )
+            return cursor.rowcount > 0
+
+        return bool(self._execute_write(_do))
+
+    def get_project_coordinator_session(self, project_id: str) -> Optional[Dict[str, Any]]:
+        """Return the current live coordinator session for a project, if any."""
+        if not project_id:
+            return None
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM sessions "
+                "WHERE coordinator_for = ? AND ended_at IS NULL "
+                "ORDER BY started_at DESC LIMIT 1",
+                (project_id,),
+            ).fetchone()
+        return dict(row) if row else None
 
     def create_project_init_run(
         self,

@@ -41,8 +41,10 @@ def test_memory_schema_is_well_formed():
     assert params["type"] == "object"
     assert params["required"] == ["action", "target"]
     # Nested ``enum`` on property values is fine — only top-level is forbidden.
-    assert params["properties"]["action"]["enum"] == ["add", "replace", "remove"]
+    assert params["properties"]["action"]["enum"] == ["add", "replace", "remove", "batch"]
     assert params["properties"]["target"]["enum"] == ["memory", "user"]
+    assert params["properties"]["scope"]["enum"] == ["global", "project"]
+    assert params["properties"]["operations"]["items"]["required"] == ["action"]
 
 
 def test_memory_schema_is_json_serializable():

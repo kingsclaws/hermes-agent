@@ -1,7 +1,11 @@
 from pathlib import Path
 
 from hermes_state import SessionDB
-from tools.project_management_tool import apply_project_binding, resolve_selected_project
+from tools.project_management_tool import (
+    apply_project_binding,
+    project_bind_session_handler,
+    resolve_selected_project,
+)
 
 
 class _StubAgent:
@@ -89,5 +93,56 @@ def test_delete_session_orphans_subagent_runs(tmp_path):
             ("run-1",),
         ).fetchone()
         assert row["parent_session_id"] is None
+    finally:
+        db.close()
+
+
+def test_project_bind_session_sets_coordinator_for(tmp_path, monkeypatch):
+    db_path = tmp_path / "state.db"
+    db = SessionDB(db_path=db_path)
+    try:
+        db.create_session("coord-1", source="cli", model="test-model")
+        project_root = tmp_path / "deal-d"
+        project_root.mkdir()
+        project_id = db.create_project("Deal D", str(project_root), "Client D", "Coordinate")
+
+        monkeypatch.setenv("HERMES_PROJECTS_DB_PATH", str(db_path))
+        monkeypatch.setenv("HERMES_SESSION_ID", "coord-1")
+
+        import json
+
+        result = json.loads(project_bind_session_handler({"project_name": "Deal D"}))
+
+        assert result["success"] is True
+        assert result["project_id"] == project_id
+        session = db.get_session("coord-1")
+        assert session["coordinator_for"] == project_id
+        assert db.get_project_coordinator_session(project_id)["id"] == "coord-1"
+    finally:
+        db.close()
+
+
+def test_project_bind_session_replaces_old_coordinator(tmp_path, monkeypatch):
+    db_path = tmp_path / "state.db"
+    db = SessionDB(db_path=db_path)
+    try:
+        db.create_session("coord-old", source="cli", model="test-model")
+        db.create_session("coord-new", source="cli", model="test-model")
+        project_root = tmp_path / "deal-e"
+        project_root.mkdir()
+        project_id = db.create_project("Deal E", str(project_root), "Client E", "Coordinate")
+        assert db.bind_project_coordinator(project_id, "coord-old") is True
+
+        monkeypatch.setenv("HERMES_PROJECTS_DB_PATH", str(db_path))
+        monkeypatch.setenv("HERMES_SESSION_ID", "coord-new")
+
+        import json
+
+        result = json.loads(project_bind_session_handler({"project_name": "Deal E"}))
+
+        assert result["success"] is True
+        assert db.get_session("coord-old")["coordinator_for"] is None
+        assert db.get_session("coord-new")["coordinator_for"] == project_id
+        assert db.get_project_coordinator_session(project_id)["id"] == "coord-new"
     finally:
         db.close()

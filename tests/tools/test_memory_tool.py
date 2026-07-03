@@ -352,6 +352,107 @@ class TestMemoryStoreRemove:
         assert result["success"] is False
 
 
+class TestMemoryStoreBatch:
+    def test_batch_remove_then_add_checks_final_budget(self, store):
+        store.add("memory", "stale " + "x" * 430)
+
+        result = store.apply_batch([
+            {"action": "remove", "old_text": "stale"},
+            {"action": "add", "content": "new compact fact"},
+        ])
+
+        assert result["success"] is True
+        assert "new compact fact" in store.memory_entries
+        assert not any("stale" in entry for entry in store.memory_entries)
+
+    def test_batch_failure_leaves_no_partial_writes(self, store):
+        store.add("memory", "keep this")
+        before = list(store.memory_entries)
+
+        result = store.apply_batch([
+            {"action": "add", "content": "would be partial"},
+            {"action": "remove", "old_text": "missing"},
+        ])
+
+        assert result["success"] is False
+        assert "all-or-nothing" in result["error"]
+        assert store.memory_entries == before
+        assert "would be partial" not in (store._path_for("memory").read_text(encoding="utf-8"))
+
+    def test_batch_ambiguous_replace_leaves_no_partial_writes(self, store):
+        store.add("memory", "server A runs nginx")
+        store.add("memory", "server B runs nginx")
+        before = list(store.memory_entries)
+
+        result = store.apply_batch([
+            {"action": "add", "content": "would be partial"},
+            {"action": "replace", "old_text": "nginx", "content": "apache"},
+        ])
+
+        assert result["success"] is False
+        assert "multiple distinct entries" in result["error"]
+        assert store.memory_entries == before
+
+    def test_batch_project_scope_writes_project_memory(self, tmp_path, monkeypatch):
+        global_dir = tmp_path / "home" / "memories"
+        project_dir = tmp_path / "project"
+        project_mem_dir = project_dir / ".hermes-project" / "memories"
+        project_mem_dir.mkdir(parents=True)
+        monkeypatch.setattr("tools.memory_tool.get_memory_dir", lambda: global_dir)
+        store = MemoryStore(memory_char_limit=500, user_char_limit=300, project_dir=str(project_dir))
+        store.load_from_disk()
+
+        result = store.apply_batch([
+            {"action": "add", "scope": "project", "content": "project clause convention"},
+        ])
+
+        assert result["success"] is True
+        assert "project clause convention" in store.project_memory_entries
+        assert "project clause convention" in (project_mem_dir / "MEMORY.md").read_text(encoding="utf-8")
+        assert not (global_dir / "MEMORY.md").exists()
+
+    def test_mixed_global_project_batch_is_all_or_nothing(self, tmp_path, monkeypatch):
+        global_dir = tmp_path / "home" / "memories"
+        project_dir = tmp_path / "project"
+        (project_dir / ".hermes-project" / "memories").mkdir(parents=True)
+        monkeypatch.setattr("tools.memory_tool.get_memory_dir", lambda: global_dir)
+        store = MemoryStore(memory_char_limit=500, user_char_limit=300, project_dir=str(project_dir))
+        store.load_from_disk()
+        store.add("memory", "global keep")
+        store.add("memory", "project keep", scope="project")
+        before_global = list(store.memory_entries)
+        before_project = list(store.project_memory_entries)
+
+        result = store.apply_batch([
+            {"action": "add", "scope": "global", "content": "global partial"},
+            {"action": "add", "scope": "project", "content": "project partial"},
+            {"action": "remove", "scope": "project", "old_text": "missing"},
+        ])
+
+        assert result["success"] is False
+        assert store.memory_entries == before_global
+        assert store.project_memory_entries == before_project
+
+    def test_tool_batch_inherits_top_level_target_and_scope(self, tmp_path, monkeypatch):
+        global_dir = tmp_path / "home" / "memories"
+        project_dir = tmp_path / "project"
+        (project_dir / ".hermes-project" / "memories").mkdir(parents=True)
+        monkeypatch.setattr("tools.memory_tool.get_memory_dir", lambda: global_dir)
+        store = MemoryStore(memory_char_limit=500, user_char_limit=300, project_dir=str(project_dir))
+        store.load_from_disk()
+
+        result = json.loads(memory_tool(
+            action="batch",
+            target="user",
+            scope="project",
+            operations=[{"action": "add", "content": "project user preference"}],
+            store=store,
+        ))
+
+        assert result["success"] is True
+        assert "project user preference" in store.project_user_entries
+
+
 class TestMemoryStorePersistence:
     def test_save_and_load_roundtrip(self, tmp_path, monkeypatch):
         monkeypatch.setattr("tools.memory_tool.get_memory_dir", lambda: tmp_path)

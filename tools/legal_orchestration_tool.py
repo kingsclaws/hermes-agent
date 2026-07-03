@@ -185,10 +185,21 @@ LEGAL_ORCHESTRATE_SCHEMA = {
                 "type": "string",
                 "enum": ["direct", "kanban"],
                 "description": (
-                    "协调模式。'direct'（默认）使用 delegate_task 直接派发子 Agent。"
-                    "'kanban' 使用 kanban_swarm 工具集——在项目 Board 上创建任务，"
+                    "协调模式。默认是 'kanban'：在项目 Board 上创建任务，"
                     "Drafter/Reviewer 通过认领→移交→审批流程协作。"
+                    "'direct' 仅用于 Kanban worker 内部执行或用户明确批准的紧急旁路。"
                 ),
+            },
+            "allow_direct": {
+                "type": "boolean",
+                "description": (
+                    "Emergency bypass for mode='direct'. Default false. "
+                    "Only use after the user explicitly approves bypassing Kanban for this call."
+                ),
+            },
+            "direct_reason": {
+                "type": "string",
+                "description": "Required human-readable reason when allow_direct=true.",
             },
         },
         "required": ["task_type"],
@@ -1024,11 +1035,14 @@ def _handle_kanban_mode(
             if result.get("success"):
                 created_tasks.extend(result.get("tasks", []))
 
-    elif task_type in ("review", "proofread"):
+    elif task_type in ("review", "proofread") or task_type in _REVIEW_TASK_TYPES:
         # Review: create tasks for each review type
-        review_types = args.get("review_types") or [
-            "review_content", "review_format", "review_ts", "review_xref",
-        ]
+        if task_type in _REVIEW_TASK_TYPES:
+            review_types = [task_type]
+        else:
+            review_types = args.get("review_types") or [
+                "review_content", "review_format", "review_ts", "review_xref",
+            ]
         for rt in review_types:
             reviewer_map = {
                 "review_content": "hpswarm-reviewer-content",
@@ -1047,6 +1061,70 @@ def _handle_kanban_mode(
             }, parent_agent=parent_agent))
             if result.get("success"):
                 created_tasks.append(result["task"])
+
+    elif task_type == "template_fill":
+        result = json.loads(kanban_task_create_handler({
+            "project_path": project_path,
+            "title": f"模板填充/清理: {document_path or '文档'}",
+            "description": (
+                f"task_type=template_fill\n"
+                f"document_path={document_path}\n"
+                f"instructions={instructions}\n"
+                "Use native lex_template_audit/lex_template_fill, then read back and hand off."
+            ),
+            "assignee": "hpswarm-drafter",
+            "gates": json.dumps([
+                {"type": "review", "target_pool": "hpswarm-reviewer-format"},
+                {"type": "approve", "target_pool": "hpswarm-coordinator"},
+            ]),
+        }, parent_agent=parent_agent))
+        if result.get("success"):
+            created_tasks.append(result["task"])
+
+    elif task_type == "deliver":
+        result = json.loads(kanban_task_create_handler({
+            "project_path": project_path,
+            "title": f"交付检查: {document_path or project_path}",
+            "description": (
+                f"task_type=deliver\n"
+                f"document_path={document_path}\n"
+                f"instructions={instructions}\n"
+                "Run lex_deliver/evidence coverage checks and report deliverable paths."
+            ),
+            "assignee": "hpswarm-coordinator",
+            "gates": json.dumps([{"type": "approve", "target_pool": "hpswarm-coordinator"}]),
+        }, parent_agent=parent_agent))
+        if result.get("success"):
+            created_tasks.append(result["task"])
+
+    elif task_type == "template_audit":
+        result = json.loads(kanban_task_create_handler({
+            "project_path": project_path,
+            "title": f"模板审计: {document_path or '文档'}",
+            "description": (
+                f"task_type=template_audit\n"
+                f"document_path={document_path}\n"
+                f"instructions={instructions}\n"
+                "Run lex_template_audit and hand off structured findings."
+            ),
+            "assignee": "hpswarm-reviewer-format",
+            "gates": json.dumps([{"type": "approve", "target_pool": "hpswarm-coordinator"}]),
+        }, parent_agent=parent_agent))
+        if result.get("success"):
+            created_tasks.append(result["task"])
+
+    if not created_tasks:
+        return json.dumps({
+            "success": False,
+            "error": f"task_type={task_type} could not be mapped to a Kanban task.",
+            "mode": "kanban",
+            "project_path": project_path,
+            "hint": (
+                "Use task_type=plan/draft/revise/review/proofread/template_fill/"
+                "template_audit/deliver, or call with mode='direct', allow_direct=true "
+                "only after explicit user approval."
+            ),
+        }, ensure_ascii=False)
 
     return json.dumps({
         "success": True,
@@ -1090,7 +1168,9 @@ def _handle_legal_orchestrate(args: dict, **kwargs) -> str:
     learning_workflow_type = workflow_type or ("proofread_review" if task_type == "proofread" else "contract_revision")
     if task_type == "draft_iterative" and not workflow_type:
         learning_workflow_type = "document_drafting"
-    mode = str(args.get("mode") or "direct").strip().lower()
+    mode = str(args.get("mode") or "kanban").strip().lower()
+    if mode not in {"direct", "kanban"}:
+        return tool_error("mode must be 'kanban' or 'direct'.")
 
     # ── Kanban bridge mode ──────────────────────────────────────────────────
     if mode == "kanban":
@@ -1101,6 +1181,16 @@ def _handle_legal_orchestrate(args: dict, **kwargs) -> str:
             instructions=instructions,
             args=args,
             parent_agent=parent_agent,
+        )
+
+    direct_allowed = bool(os.environ.get("HERMES_KANBAN_TASK"))
+    if not direct_allowed:
+        direct_allowed = bool(args.get("allow_direct")) and bool(str(args.get("direct_reason") or "").strip())
+    if not direct_allowed:
+        return tool_error(
+            "legal_orchestrate defaults to Kanban. Direct mode is blocked unless "
+            "this call runs inside a Kanban worker (HERMES_KANBAN_TASK) or the user "
+            "explicitly approves a one-off bypass with allow_direct=true and direct_reason."
         )
 
     if task_type == "deliver":

@@ -36,7 +36,7 @@ import os
 import re
 import tempfile
 import time
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from hermes_constants import get_hermes_home
 from typing import Dict, Any, List, Optional
@@ -512,6 +512,161 @@ class MemoryStore:
 
         return self._success_response(target, "Entry removed.", scope)
 
+    def apply_batch(
+        self,
+        operations: List[Dict[str, Any]],
+        *,
+        default_target: str = "memory",
+        default_scope: str = "global",
+    ) -> Dict[str, Any]:
+        """Apply memory operations atomically across target/scope groups.
+
+        Unlike calling add/replace/remove in a loop, this validates the whole
+        batch against in-memory copies and writes nothing unless every operation
+        is valid and every affected store remains within its final char budget.
+        """
+        if not operations:
+            return {"success": False, "error": "operations list is empty."}
+        if len(operations) > 20:
+            return {"success": False, "error": "Batch limited to 20 operations."}
+
+        normalized: List[Dict[str, Any]] = []
+        affected: set[tuple[str, str]] = set()
+        for index, op in enumerate(operations):
+            if not isinstance(op, dict):
+                return self._batch_error(
+                    f"Operation {index + 1}: operation must be an object.",
+                    affected=affected,
+                )
+
+            action = (op.get("action") or "").strip()
+            target = (op.get("target") or default_target or "memory").strip()
+            scope = (op.get("scope") or default_scope or "global").strip()
+            content = (op.get("content") or "").strip()
+            old_text = (op.get("old_text") or "").strip()
+            pos = f"Operation {index + 1} ({action or 'unknown'})"
+
+            if action not in {"add", "replace", "remove"}:
+                return self._batch_error(
+                    f"{pos}: unknown action. Use add, replace, or remove.",
+                    affected=affected,
+                )
+            if target not in {"memory", "user"}:
+                return self._batch_error(
+                    f"{pos}: invalid target '{target}'. Use memory or user.",
+                    affected=affected,
+                )
+            if scope not in {"global", "project"}:
+                return self._batch_error(
+                    f"{pos}: invalid scope '{scope}'. Use global or project.",
+                    affected=affected,
+                )
+            if scope == "project" and not self._project_mem_dir:
+                return self._batch_error(
+                    f"{pos}: project scope is not available.",
+                    affected=affected,
+                )
+            if action == "add" and not content:
+                return self._batch_error(f"{pos}: content is required.", affected=affected)
+            if action == "replace":
+                if not old_text:
+                    return self._batch_error(f"{pos}: old_text is required.", affected=affected)
+                if not content:
+                    return self._batch_error(
+                        f"{pos}: content is required (use action='remove' to delete).",
+                        affected=affected,
+                    )
+            if action == "remove" and not old_text:
+                return self._batch_error(f"{pos}: old_text is required.", affected=affected)
+
+            if action in {"add", "replace"}:
+                scan_error = _scan_memory_content(content)
+                if scan_error:
+                    return self._batch_error(f"{pos}: {scan_error}", affected=affected)
+
+            key = (target, scope)
+            affected.add(key)
+            normalized.append({
+                "action": action,
+                "target": target,
+                "scope": scope,
+                "content": content,
+                "old_text": old_text,
+                "pos": pos,
+            })
+
+        # Acquire affected file locks in stable order so mixed target/scope
+        # batches cannot deadlock with another batch taking the same locks.
+        paths_by_key = {
+            key: self._resolve_path_for(key[0], key[1])
+            for key in sorted(affected, key=lambda item: (str(self._resolve_path_for(item[0], item[1])), item[0], item[1]))
+        }
+
+        with ExitStack() as stack:
+            for path in sorted(set(paths_by_key.values()), key=lambda p: str(p)):
+                stack.enter_context(self._file_lock(path))
+
+            working: Dict[tuple[str, str], List[str]] = {}
+            for key, path in paths_by_key.items():
+                target, scope = key
+                bak = self._reload_target(target, scope)
+                if bak:
+                    return _drift_error(path, bak)
+                working[key] = list(self._entries_for(target, scope))
+
+            for op in normalized:
+                key = (op["target"], op["scope"])
+                entries = working[key]
+                action = op["action"]
+                content = op["content"]
+                old_text = op["old_text"]
+                pos = op["pos"]
+
+                if action == "add":
+                    if content in entries:
+                        continue
+                    entries.append(content)
+                    continue
+
+                matches = [i for i, entry in enumerate(entries) if old_text in entry]
+                if not matches:
+                    return self._batch_error(
+                        f"{pos}: no entry matched '{old_text}'.",
+                        working=working,
+                    )
+                if len({entries[i] for i in matches}) > 1:
+                    return self._batch_error(
+                        f"{pos}: '{old_text}' matched multiple distinct entries -- be more specific.",
+                        working=working,
+                    )
+
+                if action == "replace":
+                    entries[matches[0]] = content
+                elif action == "remove":
+                    entries.pop(matches[0])
+
+            for (target, scope), entries in working.items():
+                new_total = len(ENTRY_DELIMITER.join(entries)) if entries else 0
+                limit = self._char_limit(target, scope)
+                if new_total > limit:
+                    return self._batch_error(
+                        (
+                            f"After applying all {len(operations)} operations, "
+                            f"{scope}/{target} would be at {new_total:,}/{limit:,} chars -- "
+                            "over the limit. Remove or shorten more entries in the same batch."
+                        ),
+                        working=working,
+                    )
+
+            for (target, scope), entries in working.items():
+                self._set_entries(target, scope, entries)
+                self.save_to_disk(target, scope)
+
+        return self._batch_success_response(
+            f"Applied {len(operations)} operation(s).",
+            affected=affected,
+        )
+
     def format_for_system_prompt(self, target: str) -> Optional[str]:
         """
         Return the frozen snapshot for system prompt injection.
@@ -556,6 +711,50 @@ class MemoryStore:
         if message:
             resp["message"] = message
         return resp
+
+    def _batch_success_response(
+        self,
+        message: str,
+        *,
+        affected: set[tuple[str, str]],
+    ) -> Dict[str, Any]:
+        stores = {}
+        for target, scope in sorted(affected):
+            stores[f"{scope}/{target}"] = self._success_response(target, scope=scope)
+        return {
+            "success": True,
+            "batch": True,
+            "message": message,
+            "stores": stores,
+        }
+
+    def _batch_error(
+        self,
+        message: str,
+        *,
+        affected: Optional[set[tuple[str, str]]] = None,
+        working: Optional[Dict[tuple[str, str], List[str]]] = None,
+    ) -> Dict[str, Any]:
+        stores = {}
+        keys = set(affected or set())
+        if working:
+            keys.update(working.keys())
+        for target, scope in sorted(keys):
+            entries = list(working[(target, scope)]) if working and (target, scope) in working else list(self._entries_for(target, scope))
+            current = len(ENTRY_DELIMITER.join(entries)) if entries else 0
+            limit = self._char_limit(target, scope)
+            stores[f"{scope}/{target}"] = {
+                "target": target,
+                "scope": scope,
+                "current_entries": entries,
+                "usage": f"{current:,}/{limit:,}",
+            }
+        return {
+            "success": False,
+            "batch": True,
+            "error": message + " No operations were applied (batch is all-or-nothing).",
+            "stores": stores,
+        }
 
     def _render_block(self, target: str, entries: List[str]) -> str:
         """Render a system prompt block with header and usage indicator."""
@@ -724,7 +923,7 @@ def memory_tool(
         return tool_error("Memory is not available. It may be disabled in config or this environment.", success=False)
 
     if action == "batch":
-        return _handle_batch(operations or [], store)
+        return _handle_batch(operations or [], store, default_target=target, default_scope=scope)
 
     if target not in {"memory", "user"}:
         return tool_error(f"Invalid target '{target}'. Use 'memory' or 'user'.", success=False)
@@ -758,64 +957,20 @@ def memory_tool(
     return json.dumps(result, ensure_ascii=False)
 
 
-def _handle_batch(operations: list, store: "MemoryStore") -> str:
+def _handle_batch(
+    operations: list,
+    store: "MemoryStore",
+    *,
+    default_target: str = "memory",
+    default_scope: str = "global",
+) -> str:
     """Execute multiple memory operations atomically."""
-    if not operations:
-        return tool_error("operations array is required for 'batch' action.", success=False)
-    if len(operations) > 20:
-        return tool_error("Batch limited to 20 operations.", success=False)
-
-    results = []
-    for i, op in enumerate(operations):
-        if not isinstance(op, dict):
-            results.append({"index": i, "success": False, "error": "Operation must be an object"})
-            break
-        act = op.get("action", "")
-        tgt = op.get("target", "memory")
-        scp = op.get("scope", "global")
-        cnt = op.get("content")
-        old = op.get("old_text")
-
-        if tgt not in {"memory", "user"}:
-            results.append({"index": i, "success": False, "error": f"Invalid target '{tgt}'"})
-            break
-        if scp not in {"global", "project"}:
-            results.append({"index": i, "success": False, "error": f"Invalid scope '{scp}'"})
-            break
-        if scp == "project" and not store._project_mem_dir:
-            results.append({"index": i, "success": False, "error": "Project scope not available"})
-            break
-
-        try:
-            if act == "add":
-                if not cnt:
-                    results.append({"index": i, "success": False, "error": "content required"})
-                    break
-                r = store.add(tgt, cnt, scope=scp)
-            elif act == "replace":
-                if not old or not cnt:
-                    results.append({"index": i, "success": False, "error": "old_text and content required"})
-                    break
-                r = store.replace(tgt, old, cnt, scope=scp)
-            elif act == "remove":
-                if not old:
-                    results.append({"index": i, "success": False, "error": "old_text required"})
-                    break
-                r = store.remove(tgt, old, scope=scp)
-            else:
-                results.append({"index": i, "success": False, "error": f"Unknown action '{act}'"})
-                break
-            results.append({"index": i, "success": r.get("success", False), "result": r})
-        except Exception as e:
-            results.append({"index": i, "success": False, "error": str(e)})
-            break
-
-    return json.dumps({
-        "batch": True,
-        "completed": len(results),
-        "total": len(operations),
-        "results": results,
-    }, ensure_ascii=False)
+    result = store.apply_batch(
+        operations,
+        default_target=default_target,
+        default_scope=default_scope,
+    )
+    return json.dumps(result, ensure_ascii=False)
 
 
 def check_memory_requirements() -> bool:
@@ -859,10 +1014,12 @@ MEMORY_SCHEMA = {
         "- Tool/CLI quirks, environment facts, coding patterns → scope=global\n"
         "- Legal review SOPs, contract clause standards tied to one client → scope=project\n\n"
         "ACTIONS: add (new entry), replace (update existing -- old_text identifies it), "
-        "remove (delete -- old_text identifies it), batch (multiple ops in one call).\n\n"
-        "BATCH: Use action='batch' with an 'operations' array. Each element has: "
-        "{action, target, scope, content, old_text}. Operations execute in order; "
-        "if one fails, remaining operations are skipped.\n\n"
+        "remove (delete -- old_text identifies it), batch (multiple ops in one atomic call).\n\n"
+        "BATCH: Prefer action='batch' with an 'operations' array when making multiple "
+        "changes or consolidating memory to fit the char budget. Each element has: "
+        "{action, target?, scope?, content?, old_text?}. The batch is all-or-nothing: "
+        "all operations are validated against the final state before anything is written, "
+        "so one call can remove stale entries and add new entries safely.\n\n"
         "SKIP: trivial/obvious info, things easily re-discovered, raw data dumps, and temporary task state."
     ),
     "parameters": {
@@ -893,7 +1050,11 @@ MEMORY_SCHEMA = {
             },
             "operations": {
                 "type": "array",
-                "description": "For batch action: array of operations. Each has {action, target, scope, content, old_text}.",
+                "description": (
+                    "For batch action: array of operations applied atomically in one call "
+                    "against the final char budget. Each item has {action, target?, scope?, "
+                    "content?, old_text?}. Missing target/scope inherit top-level target/scope."
+                ),
                 "items": {
                     "type": "object",
                     "properties": {
@@ -903,7 +1064,7 @@ MEMORY_SCHEMA = {
                         "content": {"type": "string"},
                         "old_text": {"type": "string"},
                     },
-                    "required": ["action", "target"],
+                    "required": ["action"],
                 },
             },
         },
@@ -930,7 +1091,5 @@ registry.register(
     check_fn=check_memory_requirements,
     emoji="🧠",
 )
-
-
 
 
