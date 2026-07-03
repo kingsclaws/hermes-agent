@@ -525,6 +525,10 @@ def _dispatch_to_session(*, session_id: str, task: str, project: dict, route_id:
         "You are the project coordinator session for this matter. Do not treat "
         "this as a fresh unrelated request. Continue the existing project context, "
         "use project facts/kanban/harness as appropriate.\n\n"
+        "## Project binding — do this first\n\n"
+        f'Call project_bind_session(project_name="{project.get("name")}") '
+        "to register yourself as the coordinator for this project. "
+        "Do NOT use memory to record project binding — it is unreliable.\n\n"
         "## Handoff protocol — read carefully\n\n"
         "After ALL kanban workflow tasks have completed (all gates passed, all "
         "reviewer feedback addressed, deliverable ready), you MUST call:\n\n"
