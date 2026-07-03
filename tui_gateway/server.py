@@ -120,6 +120,8 @@ _methods: dict[str, callable] = {}
 _pending: dict[str, tuple[str, threading.Event]] = {}
 _pending_prompt_payloads: dict[str, tuple[str, dict]] = {}
 _answers: dict[str, str] = {}
+_recorded_repos: list[dict] = []
+_active_project_override: str | None = None
 _db = None
 _db_error: str | None = None
 _stdout_lock = threading.Lock()
@@ -582,6 +584,59 @@ def _project_path(project: dict | None) -> str:
     return str(project.get("path") or project.get("directory") or project.get("cwd") or "")
 
 
+def _norm_path(value: str | None) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    try:
+        return str(Path(raw).expanduser().resolve())
+    except Exception:
+        return raw.rstrip("/\\")
+
+
+def _path_under(parent: str, child: str) -> bool:
+    p = _norm_path(parent)
+    c = _norm_path(child)
+    if not p or not c:
+        return False
+    return c == p or c.startswith(p.rstrip("/\\") + os.sep)
+
+
+def _match_project_by_cwd(cwd: str | None) -> dict | None:
+    """Find the best Lex project for a cwd by longest project path prefix."""
+    target = _norm_path(cwd)
+    if not target:
+        return None
+    db = _get_db()
+    if db is None:
+        return None
+    try:
+        projects = db.list_projects()
+    except Exception:
+        return None
+    best: dict | None = None
+    best_len = -1
+    for project in projects:
+        for candidate in (
+            project.get("cwd"),
+            project.get("path"),
+            project.get("directory"),
+            project.get("management_dir"),
+        ):
+            path = _norm_path(str(candidate or ""))
+            if path and _path_under(path, target) and len(path) > best_len:
+                best = dict(project)
+                best_len = len(path)
+    return best
+
+
+def _project_from_cwd_param(params: dict) -> dict | None:
+    cwd = str(params.get("cwd") or "").strip() if isinstance(params, dict) else ""
+    if not cwd:
+        return None
+    return _match_project_by_cwd(cwd)
+
+
 def _apply_project_context(session: dict, project: dict | None, agent=None, db_session_id: str | None = None) -> None:
     """Attach selected project to the gateway session, agent, and session DB."""
     if not project:
@@ -589,6 +644,8 @@ def _apply_project_context(session: dict, project: dict | None, agent=None, db_s
     session["project_context"] = project
     project_id = str(project.get("id") or "").strip()
     project_path = _project_path(project)
+    if project_path and not session.get("cwd"):
+        session["cwd"] = project_path
     if agent is None:
         agent = session.get("agent")
     if agent is not None:
@@ -607,6 +664,232 @@ def _apply_project_context(session: dict, project: dict | None, agent=None, db_s
                 db.set_session_project(db_session_id, project_id, project_cwd=project_path)
             except Exception:
                 logger.debug("failed to link session %s to project %s", db_session_id, project_id, exc_info=True)
+
+
+def _float_ts(value, default: float = 0.0) -> float:
+    try:
+        return float(value or default)
+    except (TypeError, ValueError):
+        return default
+
+
+def _project_info(project: dict) -> dict:
+    project_id = str(project.get("id") or project.get("name") or uuid.uuid4().hex)
+    name = str(project.get("name") or project_id)
+    path = _norm_path(project.get("cwd") or project.get("path") or project.get("directory"))
+    created = _float_ts(project.get("created_at") or project.get("created"))
+    return {
+        "id": project_id,
+        "slug": project_id,
+        "name": name,
+        "description": str(project.get("goal") or project.get("notes") or "") or None,
+        "icon": None,
+        "color": None,
+        "board_slug": project_id,
+        "primary_path": path or None,
+        "archived": str(project.get("status") or "").upper() == "ARCHIVED",
+        "created_at": created,
+        "folders": [
+            {
+                "path": path,
+                "label": name,
+                "is_primary": True,
+                "added_at": created,
+            }
+        ] if path else [],
+    }
+
+
+def _session_row_for_desktop(session: dict, *, current: bool = False) -> dict:
+    cwd = _norm_path(session.get("project_cwd") or session.get("cwd"))
+    return {
+        "archived": False,
+        "cwd": cwd or None,
+        "ended_at": session.get("ended_at"),
+        "git_branch": session.get("git_branch") or None,
+        "git_repo_root": session.get("git_repo_root") or None,
+        "id": str(session.get("id") or ""),
+        "_lineage_root_id": session.get("_lineage_root_id"),
+        "input_tokens": int(session.get("input_tokens") or 0),
+        "is_active": current,
+        "last_active": float(session.get("last_active") or session.get("started_at") or 0),
+        "message_count": int(session.get("message_count") or 0),
+        "model": session.get("model"),
+        "output_tokens": int(session.get("output_tokens") or 0),
+        "parent_session_id": session.get("parent_session_id"),
+        "preview": session.get("preview") or "",
+        "source": session.get("source") or "",
+        "started_at": float(session.get("started_at") or 0),
+        "title": session.get("title") or "",
+        "tool_call_count": int(session.get("tool_call_count") or 0),
+        "handoff_platform": session.get("handoff_platform"),
+    }
+
+
+def _project_session_rows(project: dict, *, limit: int = 1000) -> list[dict]:
+    db = _get_db()
+    if db is None:
+        return []
+    project_id = str(project.get("id") or "")
+    project_path = _project_path(project)
+    try:
+        rows = db.list_sessions_rich(
+            limit=limit,
+            offset=0,
+            include_children=False,
+            order_by_last_active=True,
+        )
+    except Exception:
+        return []
+    matched: list[dict] = []
+    for row in rows:
+        row_project = str(row.get("project_id") or "")
+        row_cwd = str(row.get("project_cwd") or "")
+        if row_project == project_id or (project_path and row_cwd and _path_under(project_path, row_cwd)):
+            matched.append(row)
+    return matched
+
+
+def _repo_status(path: str) -> tuple[str | None, str | None]:
+    """Best-effort git repo root + branch for a project path."""
+    if not path:
+        return None, None
+    try:
+        root = subprocess.run(
+            ["git", "-C", path, "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+        if root.returncode != 0:
+            return None, None
+        branch = subprocess.run(
+            ["git", "-C", path, "branch", "--show-current"],
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+        return root.stdout.strip() or path, branch.stdout.strip() or None
+    except Exception:
+        return None, None
+
+
+def _project_tree_node(project: dict, *, sessions: list[dict] | None = None, preview_limit: int = 3) -> dict:
+    info = _project_info(project)
+    path = info.get("primary_path")
+    rows = sessions if sessions is not None else _project_session_rows(project)
+    session_rows = [_session_row_for_desktop(row) for row in rows]
+    repo_root, branch = _repo_status(path or "")
+    repo_path = repo_root or path
+    lane_id = f"{repo_path or info['id']}::branch::{branch or ''}"
+    repo = {
+        "id": repo_path or info["id"],
+        "label": Path(repo_path).name if repo_path else info["name"],
+        "path": repo_path,
+        "sessionCount": len(session_rows),
+        "groups": [
+            {
+                "id": lane_id,
+                "label": branch or "main",
+                "path": repo_path,
+                "sessions": session_rows,
+                "isMain": True,
+                "isHome": True,
+                "mode": "workspace",
+                "totalCount": len(session_rows),
+            }
+        ],
+    }
+    last_active = max((float(row.get("last_active") or row.get("started_at") or 0) for row in rows), default=0)
+    return {
+        "id": info["id"],
+        "label": info["name"],
+        "path": path,
+        "color": info.get("color"),
+        "icon": info.get("icon"),
+        "archived": info.get("archived", False),
+        "isAuto": False,
+        "repos": [repo] if repo_path or session_rows else [],
+        "sessionCount": len(session_rows),
+        "lastActive": last_active,
+        "previewSessions": session_rows[:preview_limit],
+    }
+
+
+def _active_project_id() -> str | None:
+    if _active_project_override:
+        return _active_project_override
+    for session in _sessions.values():
+        project = session.get("project_context")
+        if isinstance(project, dict) and project.get("id"):
+            return str(project.get("id"))
+    return None
+
+
+def _projects_payload() -> dict:
+    db = _get_db()
+    projects = db.list_projects() if db is not None else []
+    return {
+        "projects": [_project_info(dict(project)) for project in projects],
+        "active_id": _active_project_id(),
+    }
+
+
+def _all_desktop_sessions(limit: int = 2000) -> list[dict]:
+    db = _get_db()
+    if db is None:
+        return []
+    try:
+        return db.list_sessions_rich(
+            limit=limit,
+            offset=0,
+            include_children=False,
+            order_by_last_active=True,
+        )
+    except Exception:
+        return []
+
+
+def _repo_auto_project(repo: dict, sessions: list[dict], preview_limit: int = 3) -> dict:
+    root = _norm_path(repo.get("root") or repo.get("path"))
+    label = str(repo.get("label") or (Path(root).name if root else "Repository"))
+    session_rows = [
+        _session_row_for_desktop(row)
+        for row in sessions
+        if root and _path_under(root, str(row.get("project_cwd") or row.get("cwd") or ""))
+    ]
+    repo_root, branch = _repo_status(root)
+    repo_path = repo_root or root
+    lane_id = f"{repo_path}::branch::{branch or ''}"
+    return {
+        "id": repo_path,
+        "label": label,
+        "path": repo_path,
+        "isAuto": True,
+        "repos": [
+            {
+                "id": repo_path,
+                "label": label,
+                "path": repo_path,
+                "sessionCount": len(session_rows),
+                "groups": [
+                    {
+                        "id": lane_id,
+                        "label": branch or "main",
+                        "path": repo_path,
+                        "sessions": session_rows,
+                        "isMain": True,
+                        "isHome": True,
+                        "mode": "workspace",
+                        "totalCount": len(session_rows),
+                    }
+                ],
+            }
+        ],
+        "sessionCount": len(session_rows),
+        "lastActive": max((float(s.get("last_active") or s.get("started_at") or 0) for s in session_rows), default=0),
+        "previewSessions": session_rows[:preview_limit],
+    }
 
 
 def _project_system_context(project: dict | None) -> str | None:
@@ -743,7 +1026,7 @@ def _start_agent_build(sid: str, session: dict) -> None:
             _sessions[sid]["_notif_stop"] = _start_notification_poller(sid, _sessions[sid])
             _notify_session_boundary("on_session_reset", key)
 
-            info = _session_info(agent)
+            info = _session_info(agent, cwd=current.get("cwd"))
             warn = _probe_credentials(agent)
             if warn:
                 info["credential_warning"] = warn
@@ -1331,7 +1614,7 @@ def _apply_model_switch(sid: str, session: dict, raw_input: str) -> dict:
             api_mode=result.api_mode,
         )
         _restart_slash_worker(session)
-        _emit("session.info", sid, _session_info(agent))
+        _emit("session.info", sid, _session_info(agent, cwd=session.get("cwd")))
 
     os.environ["HERMES_MODEL"] = result.new_model
     os.environ["HERMES_INFERENCE_MODEL"] = result.new_model
@@ -1581,7 +1864,7 @@ def _current_profile_name() -> str:
         return "default"
 
 
-def _session_info(agent) -> dict:
+def _session_info(agent, cwd: str | None = None) -> dict:
     reasoning_config = getattr(agent, "reasoning_config", None)
     reasoning_effort = ""
     if (
@@ -1597,7 +1880,7 @@ def _session_info(agent) -> dict:
         "fast": service_tier == "priority",
         "tools": {},
         "skills": {},
-        "cwd": os.getenv("TERMINAL_CWD", os.getcwd()),
+        "cwd": cwd or os.getenv("TERMINAL_CWD", os.getcwd()),
         "version": "",
         "release_date": "",
         "update_behind": None,
@@ -2067,7 +2350,7 @@ def _apply_personality_to_session(
         with session["history_lock"]:
             session["history"].append({"role": "user", "content": marker})
             session["history_version"] = int(session.get("history_version", 0)) + 1
-        info = _session_info(agent)
+        info = _session_info(agent, cwd=session.get("cwd"))
         _emit("session.info", sid, info)
         return False, info
     return False, None
@@ -2154,7 +2437,7 @@ def _reset_session_agent(sid: str, session: dict) -> dict:
     with session["history_lock"]:
         session["history"] = []
         session["history_version"] = int(session.get("history_version", 0)) + 1
-    info = _session_info(new_agent)
+    info = _session_info(new_agent, cwd=session.get("cwd"))
     _emit("session.info", sid, info)
     _restart_slash_worker(session)
     return info
@@ -2272,7 +2555,7 @@ def _init_session(sid: str, key: str, agent, history: list, cols: int = 80):
     _wire_callbacks(sid)
     _sessions[sid]["_notif_stop"] = _start_notification_poller(sid, _sessions[sid])
     _notify_session_boundary("on_session_reset", key)
-    _emit("session.info", sid, _session_info(agent))
+    _emit("session.info", sid, _session_info(agent, cwd=_sessions.get(sid, {}).get("cwd")))
 
 
 def _new_session_key() -> str:
@@ -2491,6 +2774,203 @@ def _inflight_snapshot(session: dict) -> dict | None:
     }
 
 
+# ── Methods: projects ────────────────────────────────────────────────
+
+
+@method("projects.list")
+def _(rid, params: dict) -> dict:
+    try:
+        return _ok(rid, _projects_payload())
+    except Exception as exc:
+        logger.exception("projects.list failed")
+        return _err(rid, 5100, str(exc))
+
+
+@method("projects.tree")
+def _(rid, params: dict) -> dict:
+    preview_limit = int(params.get("preview_limit", 3) or 3)
+    try:
+        db = _get_db()
+        lex_projects = [dict(project) for project in (db.list_projects() if db is not None else [])]
+        sessions = _all_desktop_sessions()
+        nodes = [
+            _project_tree_node(project, sessions=_project_session_rows(project), preview_limit=preview_limit)
+            for project in lex_projects
+        ]
+        explicit_paths = [
+            _project_path(project)
+            for project in lex_projects
+            if _project_path(project)
+        ]
+        for repo in list(_recorded_repos):
+            root = _norm_path(repo.get("root") or repo.get("path"))
+            if not root or any(_path_under(path, root) or _path_under(root, path) for path in explicit_paths):
+                continue
+            nodes.append(_repo_auto_project(repo, sessions, preview_limit=preview_limit))
+        nodes.sort(key=lambda node: float(node.get("lastActive") or 0), reverse=True)
+        scoped_ids = [
+            session["id"]
+            for node in nodes
+            for repo in node.get("repos", [])
+            for group in repo.get("groups", [])
+            for session in group.get("sessions", [])
+            if session.get("id")
+        ]
+        return _ok(rid, {"projects": nodes, "active_id": _active_project_id(), "scoped_session_ids": scoped_ids})
+    except Exception as exc:
+        logger.exception("projects.tree failed")
+        return _err(rid, 5101, str(exc))
+
+
+@method("projects.project_sessions")
+def _(rid, params: dict) -> dict:
+    project_id = str(params.get("project_id") or "").strip()
+    if not project_id:
+        return _err(rid, 4006, "project_id required")
+    try:
+        db = _get_db()
+        project = db.get_project(project_id) if db is not None else None
+        if project:
+            return _ok(rid, {"project": _project_tree_node(dict(project), preview_limit=1000)})
+        for repo in _recorded_repos:
+            root = _norm_path(repo.get("root") or repo.get("path"))
+            if root == _norm_path(project_id):
+                return _ok(rid, {"project": _repo_auto_project(repo, _all_desktop_sessions(), preview_limit=1000)})
+        return _ok(rid, {"project": None})
+    except Exception as exc:
+        logger.exception("projects.project_sessions failed")
+        return _err(rid, 5102, str(exc))
+
+
+@method("projects.create")
+def _(rid, params: dict) -> dict:
+    name = str(params.get("name") or "").strip()
+    if not name:
+        return _err(rid, 4006, "name required")
+    folders = params.get("folders") if isinstance(params.get("folders"), list) else []
+    primary_path = _norm_path(params.get("primary_path"))
+    if not primary_path and folders:
+        first = folders[0]
+        primary_path = _norm_path(first.get("path") if isinstance(first, dict) else first)
+    if not primary_path:
+        primary_path = _norm_path(os.getenv("TERMINAL_CWD", os.getcwd()))
+    try:
+        db = _get_db()
+        if db is None:
+            return _db_unavailable_error(rid, code=5103)
+        existing = db.get_project_by_path(primary_path) or db.get_project(name)
+        project_id = existing["id"] if existing else db.create_project(
+            name=name,
+            path=primary_path,
+            client="",
+            goal=str(params.get("description") or ""),
+            cwd=primary_path,
+        )
+        project = db.get_project(project_id)
+        return _ok(rid, {"project": _project_info(dict(project)) if project else None})
+    except Exception as exc:
+        logger.exception("projects.create failed")
+        return _err(rid, 5103, str(exc))
+
+
+@method("projects.update")
+def _(rid, params: dict) -> dict:
+    project_id = str(params.get("id") or "").strip()
+    if not project_id:
+        return _err(rid, 4006, "id required")
+    try:
+        db = _get_db()
+        if db is None:
+            return _db_unavailable_error(rid, code=5104)
+        fields = {}
+        if "name" in params:
+            fields["name"] = str(params.get("name") or "").strip()
+        if "description" in params:
+            fields["goal"] = str(params.get("description") or "")
+        if fields:
+            db.update_project(project_id, **fields)
+        return _ok(rid, _projects_payload())
+    except Exception as exc:
+        logger.exception("projects.update failed")
+        return _err(rid, 5104, str(exc))
+
+
+@method("projects.delete")
+def _(rid, params: dict) -> dict:
+    project_id = str(params.get("id") or "").strip()
+    if not project_id:
+        return _err(rid, 4006, "id required")
+    try:
+        db = _get_db()
+        if db is None:
+            return _db_unavailable_error(rid, code=5105)
+        db.delete_project(project_id)
+        return _ok(rid, _projects_payload())
+    except Exception as exc:
+        logger.exception("projects.delete failed")
+        return _err(rid, 5105, str(exc))
+
+
+@method("projects.add_folder")
+def _(rid, params: dict) -> dict:
+    project_id = str(params.get("id") or "").strip()
+    path = _norm_path(params.get("path"))
+    if not project_id or not path:
+        return _err(rid, 4006, "id and path required")
+    try:
+        db = _get_db()
+        if db is None:
+            return _db_unavailable_error(rid, code=5106)
+        project = db.get_project(project_id)
+        if not project:
+            return _err(rid, 4040, "project not found")
+        if params.get("is_primary") or not project.get("cwd"):
+            db.update_project(project_id, cwd=path, path=path)
+        return _ok(rid, {"project": _project_info(dict(db.get_project(project_id)))})
+    except Exception as exc:
+        logger.exception("projects.add_folder failed")
+        return _err(rid, 5106, str(exc))
+
+
+@method("projects.record_repos")
+def _(rid, params: dict) -> dict:
+    global _recorded_repos
+    repos = params.get("repos") if isinstance(params.get("repos"), list) else []
+    cleaned = []
+    seen = set()
+    for repo in repos:
+        if not isinstance(repo, dict):
+            continue
+        root = _norm_path(repo.get("root") or repo.get("path"))
+        if not root or root in seen:
+            continue
+        seen.add(root)
+        cleaned.append({"root": root, "label": str(repo.get("label") or Path(root).name)})
+    _recorded_repos = cleaned[:500]
+    return _ok(rid, {"ok": True, "count": len(_recorded_repos)})
+
+
+@method("projects.set_active")
+def _(rid, params: dict) -> dict:
+    global _active_project_override
+    project_id = str(params.get("id") or params.get("project_id") or "").strip()
+    db = _get_db()
+    if db is not None and project_id:
+        try:
+            if db.get_project(project_id) is None:
+                known_repo_ids = {
+                    _norm_path(repo.get("root") or repo.get("path"))
+                    for repo in _recorded_repos
+                    if isinstance(repo, dict)
+                }
+                if _norm_path(project_id) not in known_repo_ids:
+                    return _err(rid, 4040, "project not found")
+        except Exception:
+            logger.debug("projects.set_active validation failed", exc_info=True)
+    _active_project_override = project_id or None
+    return _ok(rid, {"active_id": project_id or None})
+
+
 # ── Methods: session ─────────────────────────────────────────────────
 
 
@@ -2500,7 +2980,8 @@ def _(rid, params: dict) -> dict:
     key = _new_session_key()
     cols = int(params.get("cols", 80))
     _enable_gateway_prompts()
-    project_context = _project_context_from_params(params)
+    project_context = _project_context_from_params(params) or _project_from_cwd_param(params)
+    cwd = _norm_path(params.get("cwd")) or _project_path(project_context) or os.getenv("TERMINAL_CWD", os.getcwd())
 
     ready = threading.Event()
     now = time.time()
@@ -2521,6 +3002,7 @@ def _(rid, params: dict) -> dict:
         "last_active": now,
         "pending_title": None,
         "project_context": project_context,
+        "cwd": cwd,
         "running": False,
         "session_key": key,
         "show_reasoning": _load_show_reasoning(),
@@ -2552,10 +3034,11 @@ def _(rid, params: dict) -> dict:
                 "model": _resolve_model(),
                 "tools": {},
                 "skills": {},
-                "cwd": os.getenv("TERMINAL_CWD", os.getcwd()),
+                "cwd": cwd,
                 "lazy": True,
                 "profile_name": _current_profile_name(),
             },
+            "stored_session_id": key,
         },
     )
 
@@ -2694,7 +3177,7 @@ def _(rid, params: dict) -> dict:
             "project": project_context,
             "message_count": len(messages),
             "messages": messages,
-            "info": _session_info(agent),
+            "info": _session_info(agent, cwd=(session or {}).get("cwd") if session else None),
         },
     )
 
@@ -2766,9 +3249,9 @@ def _session_live_item(sid: str, session: dict, current_sid: str = "") -> dict:
 def _fallback_session_info(session: dict) -> dict:
     agent = session.get("agent")
     if agent is not None:
-        return _session_info(agent)
+        return _session_info(agent, cwd=session.get("cwd"))
     return {
-        "cwd": os.getenv("TERMINAL_CWD", os.getcwd()),
+        "cwd": session.get("cwd") or os.getenv("TERMINAL_CWD", os.getcwd()),
         "lazy": True,
         "model": _resolve_model(),
         "skills": {},
@@ -3131,7 +3614,7 @@ def _(rid, params: dict) -> dict:
             summary = summarize_manual_compression(
                 before_messages, messages, before_tokens, after_tokens
             )
-            info = _session_info(agent)
+            info = _session_info(agent, cwd=session.get("cwd"))
             _emit("session.info", sid, info)
             return _ok(
                 rid,
@@ -4498,7 +4981,7 @@ def _(rid, params: dict) -> dict:
             _emit(
                 "session.info",
                 params.get("session_id", ""),
-                _session_info(agent),
+                _session_info(agent, cwd=(_sessions.get(params.get("session_id", "")) or {}).get("cwd")),
             )
         return _ok(rid, {"key": key, "value": nv})
 
@@ -4988,7 +5471,7 @@ def _(rid, params: dict) -> dict:
             agent = session["agent"]
             if hasattr(agent, "refresh_tools"):
                 agent.refresh_tools()
-            _emit("session.info", params.get("session_id", ""), _session_info(agent))
+            _emit("session.info", params.get("session_id", ""), _session_info(agent, cwd=session.get("cwd")))
 
         # Honor `always=true` by persisting the opt-out to config.
         if bool(params.get("always", False)):
@@ -6157,14 +6640,14 @@ def _mirror_slash_side_effects(sid: str, session: dict, command: str) -> str:
         elif name == "compress" and agent:
             _compress_session_history(session, arg)
             _sync_session_key_after_compress(sid, session)
-            _emit("session.info", sid, _session_info(agent))
+            _emit("session.info", sid, _session_info(agent, cwd=session.get("cwd")))
         elif name == "fast" and agent:
             mode = arg.lower()
             if mode in {"fast", "on"}:
                 agent.service_tier = "priority"
             elif mode in {"normal", "off"}:
                 agent.service_tier = None
-            _emit("session.info", sid, _session_info(agent))
+            _emit("session.info", sid, _session_info(agent, cwd=session.get("cwd")))
         elif name == "reload-mcp" and agent and hasattr(agent, "reload_mcp_tools"):
             agent.reload_mcp_tools()
         elif name == "stop":
