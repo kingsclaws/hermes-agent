@@ -494,10 +494,19 @@ def _dispatch_to_session(*, session_id: str, task: str, project: dict, route_id:
         "[lex-master route]\n"
         f"Project: {project.get('name')} ({project.get('id')})\n"
         f"Project path: {project.get('path') or project.get('cwd') or ''}\n"
+        f"Route ID: {route_id}\n"
         "You are the project coordinator session for this matter. Do not treat "
         "this as a fresh unrelated request. Continue the existing project context, "
-        "use project facts/kanban/harness as appropriate, and report progress/results "
-        "back in this session.\n\n"
+        "use project facts/kanban/harness as appropriate.\n\n"
+        "## Handoff protocol — read carefully\n\n"
+        "After ALL kanban workflow tasks have completed (all gates passed, all "
+        "reviewer feedback addressed, deliverable ready), you MUST call:\n\n"
+        f'    lex_master_route(action="report", route_id="{route_id}",\n'
+        '        status="done"|"blocked"|"failed",\n'
+        '        summary="One-sentence what was accomplished.",\n'
+        '        details="Full findings / deliverables / file paths.")\n\n'
+        "Do NOT skip this step. It is the only way lex-master learns the result.\n"
+        "Call it ONCE when the full workflow finishes, not after each sub-task.\n\n"
         f"User request from lex-master:\n{task.strip()}\n"
     )
     cmd = ["hermes", "-p", "default", "--resume", session_id, "-z", prompt]
@@ -1785,11 +1794,43 @@ def lex_master_route_handler(args: dict, **kwargs) -> str:
                 record["log_tail"] = text[-4000:]
             except Exception:
                 pass
+        # Also check for a coordinator report file
+        report_path = _route_dir() / f"{route_id}.report.json"
+        if report_path.is_file():
+            try:
+                report = json.loads(report_path.read_text(encoding="utf-8"))
+                record["report"] = report
+            except Exception:
+                pass
         return json.dumps({"success": True, "route": record}, ensure_ascii=False)
+
+    if action == "report":
+        route_id = str(args.get("route_id") or "").strip()
+        if not route_id:
+            return json.dumps({"success": False, "error": "route_id is required for report"}, ensure_ascii=False)
+        route_path = _route_dir() / f"{route_id}.json"
+        if not route_path.is_file():
+            return json.dumps({"success": False, "error": f"route not found: {route_id}"}, ensure_ascii=False)
+        summary = str(args.get("summary") or args.get("result") or "").strip()
+        status_report = str(args.get("status") or "done").strip()
+        report = {
+            "route_id": route_id,
+            "status": status_report or "done",
+            "summary": summary,
+            "reported_at": time.time(),
+            "details": str(args.get("details") or "")[:2000],
+        }
+        report_path = _route_dir() / f"{route_id}.report.json"
+        report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        return json.dumps({
+            "success": True,
+            "message": "Report saved. lex-master can now read it via lex_master_route(action='status', route_id='...').",
+            "report": report,
+        }, ensure_ascii=False)
 
     if action not in {"resolve", "dispatch"}:
         return json.dumps(
-            {"success": False, "error": "action must be list_projects, resolve, dispatch, or status"},
+            {"success": False, "error": "action must be list_projects, resolve, dispatch, status, or report"},
             ensure_ascii=False,
         )
 
