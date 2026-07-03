@@ -99,6 +99,7 @@ PROJECT_CREATE_SCHEMA = {
             "reader_pool": {"type": "string", "description": "Assignee profile for file digest tasks. Default hpswarm-reviewer-content."},
             "synthesis_pool": {"type": "string", "description": "Assignee profile for synthesis task. Default lex-coordinator."},
             "max_core_tasks": {"type": "integer", "description": "Max core read tasks to create this run. Default 50."},
+            "bind_session": {"type": "boolean", "description": "Bind the current session as the project's coordinator session. Default true."},
         },
         "required": ["name"],
     },
@@ -1219,14 +1220,35 @@ def project_create_handler(args: dict, **kwargs) -> str:
             }
             init_result = json.loads(project_init_start_handler(init_args, **kwargs))
 
+        # Bind current session as coordinator (default true)
+        bind_info = None
+        if args.get("bind_session", True):
+            session_id = os.environ.get("HERMES_SESSION_ID", "")
+            if session_id:
+                _bind_coordinator_session(project_id, session_id)
+                # Set session title
+                try:
+                    conn = sqlite3.connect(str(_shared_project_db_path()))
+                    conn.execute(
+                        "UPDATE sessions SET title = ? WHERE id = ?",
+                        (f"[{project['name']}] coordinator", session_id),
+                    )
+                    conn.commit()
+                    conn.close()
+                except Exception:
+                    pass
+                bind_info = {"session_id": session_id, "bound": True}
+
         return json.dumps({
             "success": True,
             "project_id": project_id,
             "project": project,
             "auto_init": bool(args.get("auto_init", True)),
             "init": init_result,
+            "bind_session": bind_info,
             "message": (
                 f"Project '{project['name']}' registered at {project['path']}."
+                + (f" Session {session_id} bound as coordinator." if bind_info else "")
                 + (" Init workflow started." if init_result and init_result.get("success") else "")
             ),
         }, ensure_ascii=False)
