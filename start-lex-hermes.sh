@@ -335,8 +335,13 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-echo "[lex-hermes] Starting dashboard on port 9119..."
-hermes dashboard --host 0.0.0.0 --insecure --tui &
+SERVE_HOST="${HERMES_SERVE_HOST:-0.0.0.0}"
+SERVE_PORT="${HERMES_SERVE_PORT:-9119}"
+SERVE_USERNAME="${HERMES_SERVE_USERNAME:-sebastian}"
+SERVE_PASSWORD="${HERMES_SERVE_PASSWORD:-661225}"
+
+echo "[lex-hermes] Starting official serve backend on ${SERVE_HOST}:${SERVE_PORT}..."
+hermes serve --host "$SERVE_HOST" --port "$SERVE_PORT" --username "$SERVE_USERNAME" --password "$SERVE_PASSWORD" --tui &
 DASH_PID=$!
 
 wait "$DASH_PID"

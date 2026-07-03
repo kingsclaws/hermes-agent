@@ -10199,6 +10199,7 @@ def _coalesce_session_name_args(argv: list) -> list:
         "uninstall",
         "profile",
         "dashboard",
+        "serve",
         "honcho",
         "claw",
         "plugins",
@@ -10987,7 +10988,19 @@ def cmd_dashboard(args):
         open_browser=not args.no_open,
         allow_public=getattr(args, "insecure", False),
         embedded_chat=embedded_chat,
+        username=getattr(args, "username", "") or "",
+        password=getattr(args, "password", "") or "",
     )
+
+
+def cmd_serve(args):
+    """Start the headless desktop/web backend server."""
+    args.no_open = True
+    args.stop = False
+    args.status = False
+    if not hasattr(args, "tui"):
+        args.tui = False
+    return cmd_dashboard(args)
 
 
 def cmd_completion(args, parser=None):
@@ -11053,7 +11066,7 @@ _BUILTIN_SUBCOMMANDS = frozenset(
     {
         "acp", "auth", "backup", "bundles", "checkpoints", "claw", "completion",
         "computer-use",
-        "config", "cron", "curator", "dashboard", "debug", "doctor",
+        "config", "cron", "curator", "dashboard", "serve", "debug", "doctor",
         "dump", "fallback", "gateway", "hooks", "import", "insights",
         "backoffice",
         "kanban", "login", "logout", "logs", "lsp", "mcp", "memory", "migrate",
@@ -14248,6 +14261,16 @@ Examples:
             "where npm may not be available. Pre-build with: cd web && npm run build"
         ),
     )
+    dashboard_parser.add_argument(
+        "--username",
+        default="",
+        help="Register a local username/password dashboard auth provider for public binds",
+    )
+    dashboard_parser.add_argument(
+        "--password",
+        default="",
+        help="Password for --username dashboard auth provider",
+    )
     # Lifecycle flags — mutually exclusive with each other and with the
     # start-a-server flags above (if both are passed, --stop / --status win
     # because they exit before the server is started).  The dashboard has
@@ -14265,6 +14288,47 @@ Examples:
         help="List running hermes dashboard processes and exit",
     )
     dashboard_parser.set_defaults(func=cmd_dashboard)
+
+    # =========================================================================
+    # serve command — official desktop/headless backend entry
+    # =========================================================================
+    serve_parser = subparsers.add_parser(
+        "serve",
+        help="Start the headless desktop/web backend server",
+        description="Launch the Hermes backend server used by the desktop app and remote web UI",
+    )
+    serve_parser.add_argument(
+        "--port", type=int, default=9119, help="Port (default 9119)"
+    )
+    serve_parser.add_argument(
+        "--host", default="127.0.0.1", help="Host (default 127.0.0.1)"
+    )
+    serve_parser.add_argument(
+        "--insecure",
+        action="store_true",
+        help="Allow binding to non-localhost without the dashboard auth gate",
+    )
+    serve_parser.add_argument(
+        "--skip-build",
+        action="store_true",
+        help="Skip the web UI build step and serve the existing dist directly",
+    )
+    serve_parser.add_argument(
+        "--tui",
+        action="store_true",
+        help="Expose the in-browser Chat tab (embedded `hermes --tui` via PTY/WebSocket)",
+    )
+    serve_parser.add_argument(
+        "--username",
+        default="",
+        help="Register a local username/password dashboard auth provider",
+    )
+    serve_parser.add_argument(
+        "--password",
+        default="",
+        help="Password for --username dashboard auth provider",
+    )
+    serve_parser.set_defaults(func=cmd_serve)
 
     # =========================================================================
     # logs command

@@ -8678,6 +8678,8 @@ def start_server(
     allow_public: bool = False,
     *,
     embedded_chat: bool = False,
+    username: str = "",
+    password: str = "",
 ):
     """Start the web UI server."""
     import uvicorn
@@ -8690,6 +8692,14 @@ def start_server(
     # uses this to decide whether to refuse the bind, log the gate-on
     # banner, and enable uvicorn proxy_headers.
     app.state.auth_required = should_require_auth(host, allow_public)
+
+    if username and password:
+        from hermes_cli.dashboard_auth import register_provider
+        from hermes_cli.dashboard_auth.password_provider import StaticPasswordDashboardAuthProvider
+
+        register_provider(
+            StaticPasswordDashboardAuthProvider(username=username, password=password)
+        )
 
     if app.state.auth_required:
         # Phase 3.5: the gate engages on non-loopback binds.  The legacy

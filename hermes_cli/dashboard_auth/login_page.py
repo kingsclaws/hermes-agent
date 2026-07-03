@@ -189,6 +189,25 @@ _LOGIN_HTML_TEMPLATE = """\
     gap: 0.75rem;
   }}
 
+  .password-form {{
+    display: grid;
+    gap: 0.75rem;
+  }}
+
+  .password-form input {{
+    width: 100%;
+    padding: 0.85rem 0.9rem;
+    background: color-mix(in srgb, #ffffff 4%, var(--background-base));
+    color: var(--foreground);
+    border: 1px solid var(--hairline-strong);
+    font: inherit;
+    outline: none;
+  }}
+
+  .password-form input:focus {{
+    border-color: var(--midground);
+  }}
+
   /* Provider button — mirrors DS Button (default variant):
      amber surface, dark text, uppercase + wide tracking, inset bevel. */
   .provider-btn {{
@@ -376,9 +395,21 @@ def render_login_html(*, next_path: str = "") -> str:
 
     buttons = []
     for p in providers:
-        buttons.append(
-            f'      <a class="provider-btn" '
-            f'href="/auth/login?provider={html.escape(p.name, quote=True)}{next_qs}">'
-            f'Sign in with {html.escape(p.display_name)}</a>'
-        )
+        if getattr(p, "supports_password", False):
+            next_value = html.escape(next_path, quote=True)
+            buttons.append(
+                f'      <form class="password-form" method="post" action="/auth/password">'
+                f'<input type="hidden" name="provider" value="{html.escape(p.name, quote=True)}">'
+                f'<input type="hidden" name="next" value="{next_value}">'
+                f'<input name="username" autocomplete="username" placeholder="Username" required>'
+                f'<input name="password" type="password" autocomplete="current-password" placeholder="Password" required>'
+                f'<button class="provider-btn" type="submit">Sign in with {html.escape(p.display_name)}</button>'
+                f'</form>'
+            )
+        else:
+            buttons.append(
+                f'      <a class="provider-btn" '
+                f'href="/auth/login?provider={html.escape(p.name, quote=True)}{next_qs}">'
+                f'Sign in with {html.escape(p.display_name)}</a>'
+            )
     return _LOGIN_HTML_TEMPLATE.format(provider_buttons="\n".join(buttons))

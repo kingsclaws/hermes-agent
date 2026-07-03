@@ -18,6 +18,7 @@ from __future__ import annotations
 import logging
 import time
 from typing import Any
+from urllib.parse import parse_qs
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
@@ -154,10 +155,72 @@ async def api_auth_providers() -> Any:
         )
     return {
         "providers": [
-            {"name": p.name, "display_name": p.display_name}
+            {
+                "name": p.name,
+                "display_name": p.display_name,
+                "supports_password": bool(getattr(p, "supports_password", False)),
+            }
             for p in providers
         ],
     }
+
+
+@router.post("/auth/password", name="auth_password")
+async def auth_password(request: Request):
+    raw = (await request.body()).decode("utf-8", errors="replace")
+    form = {k: v[-1] if v else "" for k, v in parse_qs(raw, keep_blank_values=True).items()}
+    provider_name = form.get("provider", "")
+    username = form.get("username", "")
+    password = form.get("password", "")
+    next_target = _validate_post_login_target(form.get("next", ""))
+
+    p = get_provider(provider_name)
+    if p is None or not getattr(p, "supports_password", False):
+        raise HTTPException(status_code=404, detail=f"Unknown password provider: {provider_name!r}")
+
+    complete_password_login = getattr(p, "complete_password_login", None)
+    if not callable(complete_password_login):
+        raise HTTPException(status_code=501, detail="Password login is not implemented by this provider")
+
+    try:
+        session = complete_password_login(username=username, password=password)
+    except InvalidCodeError:
+        audit_log(
+            AuditEvent.LOGIN_FAILURE,
+            provider=provider_name,
+            reason="invalid_password",
+            ip=_client_ip(request),
+        )
+        raise HTTPException(status_code=401, detail="Invalid username or password")
+    except ProviderError as e:
+        audit_log(
+            AuditEvent.LOGIN_FAILURE,
+            provider=provider_name,
+            reason="provider_unreachable",
+            ip=_client_ip(request),
+        )
+        raise HTTPException(status_code=503, detail=f"Provider unreachable: {e}")
+
+    audit_log(
+        AuditEvent.LOGIN_SUCCESS,
+        provider=provider_name,
+        user_id=session.user_id,
+        email=session.email,
+        org_id=session.org_id,
+        ip=_client_ip(request),
+    )
+    expires_in = max(60, session.expires_at - int(time.time()))
+    resp = RedirectResponse(url=next_target or "/", status_code=302)
+    set_session_cookies(
+        resp,
+        access_token=session.access_token,
+        refresh_token=session.refresh_token,
+        access_token_expires_in=expires_in,
+        use_https=detect_https(request),
+        prefix=_prefix(request),
+    )
+    clear_pkce_cookie(resp, prefix=_prefix(request))
+    return resp
 
 
 # ---------------------------------------------------------------------------
