@@ -2947,6 +2947,7 @@ class SessionDB:
         allowed = {
             "name", "client", "goal", "path", "cwd", "status", "notes",
             "harness_version", "last_harness_migration_at",
+            "coordinator_session_id",
         }
         updates = {k: v for k, v in fields.items() if k in allowed}
         if not updates:
