@@ -488,7 +488,8 @@ def _find_coordinator_session(db, project: dict, session_id: str = "") -> dict |
 
     project_id = project.get("id", "")
 
-    # 1. coordinator_for column (survives compression — propagated automatically)
+    # Primary: sessions.coordinator_for == project_id
+    # This column survives compression (propagated to new session automatically).
     if project_id:
         try:
             conn = db._conn if hasattr(db, "_conn") else None
@@ -502,17 +503,7 @@ def _find_coordinator_session(db, project: dict, session_id: str = "") -> dict |
         except Exception:
             pass
 
-    # 2. Try bound session ID (fast path, may be stale after compression)
-    bound_id = project.get("coordinator_session_id")
-    if bound_id:
-        try:
-            s = db.get_session(bound_id)
-            if s and not s.get("ended_at"):
-                return s
-        except Exception:
-            pass
-
-    # 3. Fallback: heuristic scoring (legacy)
+    # Fallback: heuristic scoring (legacy, for projects created before coordinator_for)
     sessions = db.list_sessions_rich(limit=500)
     scored = [(s, _session_score(s, project)) for s in sessions]
     scored = [(s, score) for s, score in scored if score > 0]
@@ -528,7 +519,7 @@ def _bind_coordinator_session(project_id: str | None, session_id: str, project_n
     try:
         db_path = _shared_project_db_path()
         conn = sqlite3.connect(str(db_path))
-        # Clear any existing binding for this project
+        # Clear any existing binding for this project (one project = one coordinator)
         conn.execute(
             "UPDATE sessions SET coordinator_for = NULL WHERE coordinator_for = ?",
             (project_id,),
@@ -538,16 +529,6 @@ def _bind_coordinator_session(project_id: str | None, session_id: str, project_n
             "UPDATE sessions SET coordinator_for = ? WHERE id = ?",
             (project_id, session_id),
         )
-        conn.execute(
-            "UPDATE projects SET coordinator_session_id = ? WHERE id = ?",
-            (session_id, project_id),
-        )
-        # Set title so we can find it after compression rotates the ID
-        if project_name:
-            conn.execute(
-                "UPDATE sessions SET title = ? WHERE id = ?",
-                (_coordinator_title(project_name), session_id),
-            )
         conn.commit()
         conn.close()
     except Exception:
