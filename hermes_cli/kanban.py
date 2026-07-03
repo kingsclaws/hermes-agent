@@ -738,6 +738,18 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
         help="With --state-type: keep runs whose column equals this value",
     )
 
+    # --- trace (workflow / lifecycle audit) ---
+    p_trace = sub.add_parser(
+        "trace",
+        help="Show task execution trace across parent/child, review, and runs",
+    )
+    p_trace.add_argument("task_id")
+    p_trace.add_argument("--json", action="store_true")
+    p_trace.add_argument("--no-related", action="store_true",
+                         help="Only show the selected task, not immediate parents/children")
+    p_trace.add_argument("--event-limit", type=int, default=80)
+    p_trace.add_argument("--run-limit", type=int, default=40)
+
     # --- heartbeat (worker liveness signal) ---
     p_hb = sub.add_parser(
         "heartbeat",
@@ -962,6 +974,7 @@ def kanban_command(args: argparse.Namespace) -> int:
         "stats":    _cmd_stats,
         "log":      _cmd_log,
         "runs":     _cmd_runs,
+        "trace":    _cmd_trace,
         "heartbeat": _cmd_heartbeat,
         "assignees": _cmd_assignees,
         "notify-subscribe":   _cmd_notify_subscribe,
@@ -2544,6 +2557,79 @@ def _cmd_runs(args: argparse.Namespace) -> int:
             print(f"     → {summary}")
         if r.error:
             print(f"     ✖ {r.error[:100]}")
+    return 0
+
+
+def _cmd_trace(args: argparse.Namespace) -> int:
+    try:
+        with kb.connect_closing() as conn:
+            trace = kb.task_trace(
+                conn,
+                args.task_id,
+                include_related=not args.no_related,
+                event_limit=max(0, int(args.event_limit)),
+                run_limit=max(0, int(args.run_limit)),
+                board=getattr(args, "board", None),
+            )
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+
+    if getattr(args, "json", False):
+        print(json.dumps(trace, indent=2, ensure_ascii=False))
+        return 0
+
+    print(f"Trace for {trace['task_id']}")
+    print()
+    print("Tasks:")
+    for tid in trace["related_task_ids"]:
+        task = trace["tasks"].get(tid)
+        if not task:
+            continue
+        print(
+            f"  {_STATUS_ICONS.get(task['status'], '?')} {tid:<10} "
+            f"{task['status']:<9} @{task.get('assignee') or '-'}  {task['title']}"
+        )
+        if task.get("latest_summary"):
+            print(f"      summary: {str(task['latest_summary']).splitlines()[0][:180]}")
+        if task.get("parents"):
+            print(f"      parents: {', '.join(task['parents'])}")
+        if task.get("children"):
+            print(f"      children: {', '.join(task['children'])}")
+        print(f"      log: {task['log_path']}")
+
+    if trace["runs"]:
+        print()
+        print("Runs:")
+        for run in trace["runs"]:
+            elapsed = (
+                f"{max(0, int(run['ended_at']) - int(run['started_at']))}s"
+                if run.get("ended_at") else "active"
+            )
+            outcome = run.get("outcome") or run.get("status") or "active"
+            print(
+                f"  #{run['id']:<3} {run['task_id']:<10} {outcome:<16} "
+                f"@{run.get('profile') or '-'} {elapsed} {_fmt_ts(run['started_at'])}"
+            )
+            if run.get("summary"):
+                print(f"      → {str(run['summary']).splitlines()[0][:180]}")
+            if run.get("error"):
+                print(f"      ! {str(run['error']).splitlines()[0][:180]}")
+
+    if trace["events"]:
+        print()
+        print("Events:")
+        for event in trace["events"]:
+            payload = event.get("payload")
+            payload_text = (
+                " " + json.dumps(payload, ensure_ascii=False)
+                if payload else ""
+            )
+            run_tag = f" [run {event['run_id']}]" if event.get("run_id") else ""
+            print(
+                f"  [{_fmt_ts(event['created_at'])}] {event['task_id']:<10}"
+                f"{run_tag} {event['kind']}{payload_text}"
+            )
     return 0
 
 

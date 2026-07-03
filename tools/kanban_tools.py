@@ -160,6 +160,12 @@ def _route_completion_through_review_gates(
                 payload,
                 run_id=expected_run_id,
             )
+            kb.emit_task_lifecycle(
+                conn,
+                task_id,
+                "task_review_gate_approved",
+                payload | {"run_id": expected_run_id},
+            )
             next_index = gate_index + 1
             if next_index >= len(gates):
                 return None
@@ -211,6 +217,18 @@ def _route_completion_through_review_gates(
                     "source": "kanban_complete",
                 },
                 run_id=run_id,
+            )
+            kb.emit_task_lifecycle(
+                conn,
+                task_id,
+                "task_review_requested",
+                {
+                    "gate_index": next_index,
+                    "gate": next_gate,
+                    "assignee": next_reviewer,
+                    "source": "kanban_complete",
+                    "run_id": run_id,
+                },
             )
             return {
                 "ok": True,
@@ -264,6 +282,18 @@ def _route_completion_through_review_gates(
                 "source": "kanban_complete",
             },
             run_id=run_id,
+        )
+        kb.emit_task_lifecycle(
+            conn,
+            task_id,
+            "task_review_requested",
+            {
+                "gate_index": gate_index,
+                "gate": current_gate,
+                "assignee": current_reviewer,
+                "source": "kanban_complete",
+                "run_id": run_id,
+            },
         )
         return {
             "ok": True,
@@ -676,6 +706,44 @@ def _handle_list(args: dict, **kw) -> str:
     except Exception as e:
         logger.exception("kanban_list failed")
         return tool_error(f"kanban_list: {e}")
+
+
+def _handle_trace(args: dict, **kw) -> str:
+    """Return a compact lifecycle trace for a task and its immediate graph."""
+    guard = _require_orchestrator_tool("kanban_trace")
+    if guard:
+        return guard
+    task_id = args.get("task_id")
+    if not task_id:
+        return tool_error("task_id is required")
+    include_related, bool_error = _parse_bool_arg(args, "include_related", default=True)
+    if bool_error:
+        return tool_error(bool_error)
+    try:
+        event_limit = int(args.get("event_limit") or 80)
+        run_limit = int(args.get("run_limit") or 40)
+    except (TypeError, ValueError):
+        return tool_error("event_limit and run_limit must be integers")
+    board = args.get("board")
+    try:
+        kb, conn = _connect(board=board)
+        try:
+            trace = kb.task_trace(
+                conn,
+                str(task_id),
+                include_related=include_related,
+                event_limit=max(0, event_limit),
+                run_limit=max(0, run_limit),
+                board=board,
+            )
+            return json.dumps(trace, ensure_ascii=False)
+        finally:
+            conn.close()
+    except ValueError as e:
+        return tool_error(f"kanban_trace: {e}")
+    except Exception as e:
+        logger.exception("kanban_trace failed")
+        return tool_error(f"kanban_trace: {e}")
 
 
 def _handle_complete(args: dict, **kw) -> str:
@@ -1178,7 +1246,7 @@ KANBAN_LIST_SCHEMA = {
                 "type": "string",
                 "enum": [
                     "triage", "todo", "ready", "running",
-                    "blocked", "done", "archived",
+                    "blocked", "review", "done", "archived",
                 ],
                 "description": "Optional task status filter.",
             },
@@ -1197,6 +1265,37 @@ KANBAN_LIST_SCHEMA = {
             "board": _board_schema_prop(),
         },
         "required": [],
+    },
+}
+
+KANBAN_TRACE_SCHEMA = {
+    "name": "kanban_trace",
+    "description": (
+        "Show the execution trace for a Kanban task: immediate parent/child "
+        "tasks, statuses, assignees, run history, lifecycle events, review "
+        "gate handoffs, summaries, and worker log paths. Use this when a "
+        "coordinator needs to know whether drafter/reviewer actually claimed "
+        "or completed routed work."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "task_id": {"type": "string", "description": "Task id to trace."},
+            "include_related": {
+                "type": "boolean",
+                "description": "Include immediate parents/children. Defaults to true.",
+            },
+            "event_limit": {
+                "type": "integer",
+                "description": "Max recent events to return. Defaults to 80.",
+            },
+            "run_limit": {
+                "type": "integer",
+                "description": "Max recent runs to return. Defaults to 40.",
+            },
+            "board": _board_schema_prop(),
+        },
+        "required": ["task_id"],
     },
 }
 
@@ -1566,6 +1665,15 @@ registry.register(
     handler=_handle_list,
     check_fn=_check_kanban_orchestrator_mode,
     emoji="📋",
+)
+
+registry.register(
+    name="kanban_trace",
+    toolset="kanban",
+    schema=KANBAN_TRACE_SCHEMA,
+    handler=_handle_trace,
+    check_fn=_check_kanban_orchestrator_mode,
+    emoji="🧭",
 )
 
 registry.register(

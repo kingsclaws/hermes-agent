@@ -92,12 +92,22 @@ from toolsets import get_toolset_names
 
 _log = logging.getLogger(__name__)
 
+_KANBAN_LIFECYCLE_HOOKS = {
+    "task_claimed": "kanban_task_claimed",
+    "task_review_claimed": "kanban_task_review_claimed",
+    "task_review_requested": "kanban_task_review_requested",
+    "task_review_gate_approved": "kanban_task_review_gate_approved",
+    "task_completed": "kanban_task_completed",
+    "task_blocked": "kanban_task_blocked",
+    "task_unblocked": "kanban_task_unblocked",
+}
 
-def _fire_kanban_hook(hook_name: str, **kwargs: Any) -> None:
+
+def _fire_kanban_hook(hook_name: str, payload: dict[str, Any]) -> None:
     """Fire a kanban lifecycle hook without blocking or raising."""
     try:
         from hermes_cli.plugins import invoke_hook
-        invoke_hook(hook_name, **kwargs)
+        invoke_hook(hook_name, payload=payload)
     except Exception:
         _log.debug("kanban hook %s dispatch failed", hook_name, exc_info=True)
 
@@ -1779,23 +1789,46 @@ def _new_task_id() -> str:
 
 
 def _notify_task_lifecycle(conn, task_id: str, event: str, data: dict) -> None:
-    """Fire lifecycle hook for kanban task state transitions.
-    Registered plugins (backoffice relay, workflow orchestrator) react to these.
-    Writes to task_events table AND logs for container-level monitoring."""
-    import json
+    """Emit the canonical lifecycle signal for kanban task state transitions.
+
+    The signal has three consumers and they must stay in lock-step:
+    persistent ``task_events`` for trace/UI, structured logs for container
+    monitoring, and the v0.18 plugin hook bus for backoffice/workflow plugins.
+    """
     try:
         task = get_task(conn, task_id)
-        if not task: return
-        payload = json.dumps({"event": event, "task_id": task_id, "task_title": task.title,
-                             "task_status": task.status, "data": data}, ensure_ascii=False)
+        if not task:
+            return
+        payload = {
+            "event": event,
+            "task_id": task_id,
+            "task_title": task.title,
+            "task_status": task.status,
+            "assignee": task.assignee,
+            "data": data or {},
+        }
         # Write to task_events table for persistence
         try:
-            _append_event(conn, task_id, event, {"task_title": task.title, "data": data})
-        except Exception: pass
+            _append_event(conn, task_id, event, {"task_title": task.title, "data": data or {}})
+        except Exception:
+            pass
         # Structured log for container monitoring + backoffice
-        logger.info("KANBAN_LIFECYCLE %s", payload)
+        _log.info("KANBAN_LIFECYCLE %s", json.dumps(payload, ensure_ascii=False))
+        hook_name = _KANBAN_LIFECYCLE_HOOKS.get(event)
+        if hook_name:
+            _fire_kanban_hook(hook_name, payload)
     except Exception as e:
-        logger.debug("kanban lifecycle notify: %s", e)
+        _log.debug("kanban lifecycle notify: %s", e)
+
+
+def emit_task_lifecycle(conn: sqlite3.Connection, task_id: str, event: str, data: Optional[dict] = None) -> None:
+    """Public best-effort lifecycle bridge for non-kernel kanban transitions.
+
+    Most state changes go through kanban_db helpers. Lex review-gate routing
+    lives in ``tools.kanban_tools`` because it is model-tool specific, but it
+    still needs the same durable trace/log signal as core transitions.
+    """
+    _notify_task_lifecycle(conn, task_id, event, data or {})
 
 
 def _claimer_id() -> str:
@@ -2771,7 +2804,7 @@ def claim_task(
             run_id=run_id,
         )
         task = get_task(conn, task_id)
-        _fire_kanban_hook("kanban_task_claimed", task_id=task_id, claimer=lock)
+        _notify_task_lifecycle(conn, task_id, "task_claimed", {"lock": lock, "expires": expires, "run_id": run_id})
         return task
 
 
@@ -2846,6 +2879,12 @@ def claim_review_task(
             {"lock": lock, "expires": expires, "run_id": run_id,
              "source_status": "review"},
             run_id=run_id,
+        )
+        _notify_task_lifecycle(
+            conn,
+            task_id,
+            "task_review_claimed",
+            {"lock": lock, "expires": expires, "run_id": run_id},
         )
         return get_task(conn, task_id)
 
@@ -3375,6 +3414,7 @@ def complete_task(
             completed_payload,
             run_id=run_id,
         )
+        _notify_task_lifecycle(conn, task_id, "task_completed", completed_payload | {"run_id": run_id})
     # Prose-scan the summary + result for t_<hex> references that do
     # not resolve. Advisory — does not block the completion. Runs in
     # its own txn so the completion itself is already durable by the
@@ -3405,7 +3445,6 @@ def complete_task(
     recompute_ready(conn)
     # Clean up the scratch workspace and any stale tmux session for the worker.
     _cleanup_workspace(conn, task_id)
-    _fire_kanban_hook("kanban_task_completed", task_id=task_id, result=result, summary=summary)
     return True
 
 def _is_managed_scratch_path(p: Path) -> bool:
@@ -3759,7 +3798,7 @@ def block_task(
                 summary=reason,
             )
         _append_event(conn, task_id, "blocked", {"reason": reason}, run_id=run_id)
-        _fire_kanban_hook("kanban_task_blocked", task_id=task_id, reason=reason)
+        _notify_task_lifecycle(conn, task_id, "task_blocked", {"reason": reason, "run_id": run_id})
         return True
 
 
@@ -3887,6 +3926,7 @@ def unblock_task(conn: sqlite3.Connection, task_id: str) -> bool:
             conn, task_id, "unblocked",
             {"status": new_status} if new_status != "ready" else None,
         )
+        _notify_task_lifecycle(conn, task_id, "task_unblocked", {"status": new_status})
         return True
 
 
@@ -7066,3 +7106,95 @@ def latest_summaries(
         ids,
     ).fetchall()
     return {r["task_id"]: r["summary"] for r in rows}
+
+
+def task_trace(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    include_related: bool = True,
+    event_limit: int = 80,
+    run_limit: int = 40,
+    board: Optional[str] = None,
+) -> dict[str, Any]:
+    """Return an auditable execution trace for a task and its immediate graph.
+
+    This is intentionally read-only and compact enough for CLI/TUI/WebUI and
+    model tools. It answers the operational question: "who claimed this, what
+    happened next, and did reviewer/coordinator handoff occur?"
+    """
+    root = get_task(conn, task_id)
+    if root is None:
+        raise ValueError(f"no such task: {task_id}")
+
+    related_ids: list[str] = [task_id]
+    if include_related:
+        for tid in [*parent_ids(conn, task_id), *child_ids(conn, task_id)]:
+            if tid not in related_ids:
+                related_ids.append(tid)
+
+    tasks: dict[str, dict[str, Any]] = {}
+    summaries = latest_summaries(conn, related_ids)
+    for tid in related_ids:
+        task = get_task(conn, tid)
+        if task is None:
+            continue
+        tasks[tid] = {
+            "id": task.id,
+            "title": task.title,
+            "status": task.status,
+            "assignee": task.assignee,
+            "tenant": task.tenant,
+            "session_id": task.session_id,
+            "workspace_kind": task.workspace_kind,
+            "workspace_path": task.workspace_path,
+            "worker_pid": task.worker_pid,
+            "current_run_id": task.current_run_id,
+            "latest_summary": summaries.get(tid),
+            "parents": parent_ids(conn, tid),
+            "children": child_ids(conn, tid),
+            "log_path": str(worker_log_path(tid, board=board)),
+        }
+
+    events = list_events_for_tasks(conn, related_ids)
+    if event_limit > 0:
+        events = events[-event_limit:]
+
+    runs: list[Run] = []
+    for tid in related_ids:
+        runs.extend(list_runs(conn, tid))
+    runs.sort(key=lambda r: (r.started_at, r.id))
+    if run_limit > 0:
+        runs = runs[-run_limit:]
+
+    return {
+        "task_id": task_id,
+        "related_task_ids": related_ids,
+        "tasks": tasks,
+        "events": [
+            {
+                "id": e.id,
+                "task_id": e.task_id,
+                "kind": e.kind,
+                "payload": e.payload,
+                "run_id": e.run_id,
+                "created_at": e.created_at,
+            }
+            for e in events
+        ],
+        "runs": [
+            {
+                "id": r.id,
+                "task_id": r.task_id,
+                "profile": r.profile,
+                "status": r.status,
+                "outcome": r.outcome,
+                "summary": r.summary,
+                "error": r.error,
+                "worker_pid": r.worker_pid,
+                "started_at": r.started_at,
+                "ended_at": r.ended_at,
+            }
+            for r in runs
+        ],
+    }

@@ -135,6 +135,7 @@ def test_kanban_tools_visible_with_toolset_config(monkeypatch, tmp_path):
     kanban = {n for n in names if n and n.startswith("kanban_")}
     expected = {
         "kanban_list",
+        "kanban_trace",
         "kanban_show", "kanban_complete", "kanban_block", "kanban_heartbeat",
         "kanban_comment", "kanban_create", "kanban_link",
         "kanban_unblock",
@@ -290,6 +291,26 @@ def test_list_rejects_bad_include_archived(monkeypatch, worker_env):
     assert "include_archived must be" in json.loads(out).get("error", "")
 
 
+def test_list_can_filter_review_tasks(monkeypatch, worker_env):
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    from hermes_cli import kanban_db as kb
+    from tools import kanban_tools as kt
+
+    with kb.connect() as conn:
+        with kb.write_txn(conn):
+            conn.execute(
+                "UPDATE tasks SET status = 'review', assignee = ? WHERE id = ?",
+                ("hpswarm-reviewer-content", worker_env),
+            )
+
+    out = kt._handle_list({
+        "status": "review",
+        "assignee": "hpswarm-reviewer-content",
+    })
+    d = json.loads(out)
+    assert [t["id"] for t in d["tasks"]] == [worker_env]
+
+
 def test_complete_happy_path(worker_env):
     from tools import kanban_tools as kt
     out = kt._handle_complete({
@@ -311,11 +332,18 @@ def test_complete_happy_path(worker_env):
         conn.close()
 
 
-def test_complete_routes_swarm_gate_to_review(worker_env):
+def test_complete_routes_swarm_gate_to_review(worker_env, monkeypatch):
     """swarm-created tasks with review gates must not go directly done."""
     from hermes_cli import kanban_db as kb
     from tools import kanban_tools as kt
 
+    hook_calls: list[tuple[str, dict]] = []
+
+    def fake_invoke_hook(hook_name, **kwargs):
+        hook_calls.append((hook_name, kwargs))
+        return []
+
+    monkeypatch.setattr("hermes_cli.plugins.invoke_hook", fake_invoke_hook)
     gates = [{"type": "review", "target_pool": "hpswarm-reviewer-content"}]
     body = (
         "draft this file\n\n"
@@ -348,16 +376,29 @@ def test_complete_routes_swarm_gate_to_review(worker_env):
         assert run.outcome == "handoff_review"
         events = kb.list_events(conn, worker_env)
         assert any(e.kind == "review_requested" for e in events)
+        assert any(e.kind == "task_review_requested" for e in events)
         assert not any(e.kind == "completed" for e in events)
     finally:
         conn.close()
+    assert any(name == "kanban_task_review_requested" for name, _ in hook_calls)
+    payload = next(kwargs["payload"] for name, kwargs in hook_calls if name == "kanban_task_review_requested")
+    assert payload["event"] == "task_review_requested"
+    assert payload["task_status"] == "review"
+    assert payload["assignee"] == "hpswarm-reviewer-content"
 
 
-def test_reviewer_complete_final_gate_marks_done(worker_env):
+def test_reviewer_complete_final_gate_marks_done(worker_env, monkeypatch):
     """Reviewer completion after the final gate is the only path to done."""
     from hermes_cli import kanban_db as kb
     from tools import kanban_tools as kt
 
+    hook_calls: list[tuple[str, dict]] = []
+
+    def fake_invoke_hook(hook_name, **kwargs):
+        hook_calls.append((hook_name, kwargs))
+        return []
+
+    monkeypatch.setattr("hermes_cli.plugins.invoke_hook", fake_invoke_hook)
     gates = [{"type": "review", "target_pool": "hpswarm-reviewer-content"}]
     body = (
         "draft this file\n\n"
@@ -395,9 +436,32 @@ def test_reviewer_complete_final_gate_marks_done(worker_env):
         assert task.status == "done"
         events = kb.list_events(conn, worker_env)
         assert any(e.kind == "review_gate_approved" for e in events)
+        assert any(e.kind == "task_review_gate_approved" for e in events)
         assert any(e.kind == "completed" for e in events)
+        assert any(e.kind == "task_completed" for e in events)
     finally:
         conn.close()
+    names = [name for name, _ in hook_calls]
+    assert "kanban_task_review_requested" in names
+    assert "kanban_task_review_claimed" in names
+    assert "kanban_task_review_gate_approved" in names
+    assert "kanban_task_completed" in names
+
+
+def test_trace_shows_review_gate_lifecycle(monkeypatch, worker_env):
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    from hermes_cli import kanban_db as kb
+    from tools import kanban_tools as kt
+
+    with kb.connect() as conn:
+        trace = kb.task_trace(conn, worker_env)
+    assert trace["tasks"][worker_env]["status"] == "running"
+
+    out = kt._handle_trace({"task_id": worker_env})
+    d = json.loads(out)
+    assert d["task_id"] == worker_env
+    assert d["tasks"][worker_env]["status"] == "running"
+    assert any(e["kind"] == "claimed" for e in d["events"])
 
 
 def test_project_init_source_task_requires_native_digest(worker_env, monkeypatch, tmp_path):
@@ -1875,7 +1939,7 @@ def test_board_param_rejects_invalid_slug(multi_board_env):
 
 
 def test_board_param_in_all_schemas():
-    """All nine kanban_* tool schemas must expose an optional ``board``
+    """All kanban_* tool schemas must expose an optional ``board``
     parameter. This pins the contract surfaced to the LLM — adding a
     new kanban tool without ``board`` will fail CI immediately."""
     from tools import kanban_tools as kt
@@ -1883,6 +1947,7 @@ def test_board_param_in_all_schemas():
     schemas = [
         kt.KANBAN_SHOW_SCHEMA,
         kt.KANBAN_LIST_SCHEMA,
+        kt.KANBAN_TRACE_SCHEMA,
         kt.KANBAN_COMPLETE_SCHEMA,
         kt.KANBAN_BLOCK_SCHEMA,
         kt.KANBAN_HEARTBEAT_SCHEMA,

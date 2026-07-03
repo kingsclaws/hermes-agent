@@ -659,12 +659,8 @@ def update_task(task_id: str, payload: UpdateTaskBody, board: Optional[str] = Qu
                     summary=payload.summary,
                     metadata=payload.metadata,
                 )
-                if ok:
-                    _emit_task_lifecycle_event(conn, task_id, "task_completed", payload)
             elif s == "blocked":
                 ok = kanban_db.block_task(conn, task_id, reason=payload.block_reason)
-                if ok:
-                    _emit_task_lifecycle_event(conn, task_id, "task_blocked", payload)
             elif s == "scheduled":
                 ok = kanban_db.schedule_task(conn, task_id, reason=payload.block_reason)
             elif s == "ready":
@@ -672,8 +668,6 @@ def update_task(task_id: str, payload: UpdateTaskBody, board: Optional[str] = Qu
                 current = kanban_db.get_task(conn, task_id)
                 if current and current.status in ("blocked", "scheduled"):
                     ok = kanban_db.unblock_task(conn, task_id)
-                    if ok:
-                        _emit_task_lifecycle_event(conn, task_id, "task_unblocked", payload)
                 else:
                     # Direct status write for drag-drop (todo -> ready etc).
                     ok = _set_status_direct(conn, task_id, "ready")
@@ -768,21 +762,6 @@ def delete_task(task_id: str, board: Optional[str] = Query(None)):
         return {"deleted": True, "task_id": task_id}
     finally:
         conn.close()
-
-
-def _emit_task_lifecycle_event(conn, task_id: str, event: str, payload) -> None:
-    """Fire a task lifecycle hook event for backoffice relay + workflow orchestration."""
-    import json, threading
-    task = kanban_db.get_task(conn, task_id)
-    if not task:
-        return
-    def _do():
-        try:
-            from hermes_cli.kanban_db import _notify_task_lifecycle
-            _notify_task_lifecycle(conn, task_id, event, {"status": task.status, "title": task.title})
-        except Exception:
-            pass
-    threading.Thread(target=_do, daemon=True).start()
 
 
 def _parents_blocking_ready(

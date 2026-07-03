@@ -192,6 +192,9 @@ def register(ctx: Any) -> None:
     ctx.register_hook("kanban_task_blocked", _on_kanban_task_blocked)
     ctx.register_hook("kanban_task_completed", _on_kanban_task_completed)
     ctx.register_hook("kanban_task_claimed", _on_kanban_task_lifecycle)
+    ctx.register_hook("kanban_task_review_claimed", _on_kanban_task_lifecycle)
+    ctx.register_hook("kanban_task_review_requested", _on_kanban_task_lifecycle)
+    ctx.register_hook("kanban_task_review_gate_approved", _on_kanban_task_lifecycle)
     ctx.register_hook("kanban_task_unblocked", _on_kanban_task_lifecycle)
 
 
@@ -778,16 +781,36 @@ def _on_transform_tool_result(
         return None
 
 
-def _on_kanban_task_completed(payload: Dict[str, Any]) -> None:
+def _normalize_kanban_payload(
+    payload: Optional[Dict[str, Any]] = None,
+    **kwargs: Any,
+) -> Dict[str, Any]:
+    if isinstance(payload, dict):
+        return payload
+    task_id = str(kwargs.get("task_id") or "")
+    data = dict(kwargs)
+    return {
+        "event": data.get("event", "unknown"),
+        "task_id": task_id,
+        "task_title": data.get("task_title", ""),
+        "task_status": data.get("task_status", ""),
+        "assignee": data.get("assignee"),
+        "data": data,
+    }
+
+
+def _on_kanban_task_completed(payload: Optional[Dict[str, Any]] = None, **kwargs: Any) -> None:
     """Kanban task completed — check workflow graph for next steps."""
+    payload = _normalize_kanban_payload(payload, **kwargs)
     task_id = str(payload.get("task_id", ""))
     title = str(payload.get("task_title", ""))
     logger.info("backoffice: task completed id=%s title=%s", task_id, title)
     # Write a lightweight completion record — no full issue needed
     _write_task_event("completed", payload)
 
-def _on_kanban_task_lifecycle(payload: Dict[str, Any]) -> None:
+def _on_kanban_task_lifecycle(payload: Optional[Dict[str, Any]] = None, **kwargs: Any) -> None:
     """Generic lifecycle event — log for audit trail."""
+    payload = _normalize_kanban_payload(payload, **kwargs)
     task_id = str(payload.get("task_id", ""))
     event = str(payload.get("event", "unknown"))
     logger.info("backoffice: task lifecycle event=%s id=%s", event, task_id)
@@ -807,7 +830,18 @@ def _write_task_event(event: str, payload: Dict[str, Any]) -> None:
     except Exception:
         pass
 
-def _on_kanban_task_blocked(task_id: str = "", reason: str = "", **kwargs: Any) -> None:
+def _on_kanban_task_blocked(
+    payload: Optional[Dict[str, Any]] = None,
+    task_id: str = "",
+    reason: str = "",
+    **kwargs: Any,
+) -> None:
+    payload = _normalize_kanban_payload(payload, task_id=task_id, reason=reason, **kwargs)
+    task_id = str(payload.get("task_id") or task_id or "")
+    data = payload.get("data")
+    if isinstance(data, dict):
+        reason = str(data.get("reason") or reason or "")
+    reason = reason or json.dumps(payload, ensure_ascii=False, default=str)
     reason_text = reason or json.dumps(kwargs, ensure_ascii=False, default=str)
     if not re.search(r"tool|lexitool|ocr|gateway|dispatcher|worker|permission|import|module|容器|权限", reason_text, re.IGNORECASE):
         return

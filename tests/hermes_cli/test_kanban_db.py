@@ -795,6 +795,48 @@ def test_block_then_unblock(kanban_home):
         assert kb.get_task(conn, t).status == "ready"
 
 
+def test_lifecycle_events_fire_official_plugin_hooks(kanban_home, monkeypatch):
+    calls: list[tuple[str, dict]] = []
+
+    def fake_invoke_hook(hook_name, **kwargs):
+        calls.append((hook_name, kwargs))
+        return []
+
+    monkeypatch.setattr("hermes_cli.plugins.invoke_hook", fake_invoke_hook)
+    with kb.connect() as conn:
+        claimed = kb.create_task(conn, title="claimed", assignee="worker")
+        kb.claim_task(conn, claimed)
+
+        completed = kb.create_task(conn, title="completed", assignee="worker")
+        kb.claim_task(conn, completed)
+        assert kb.complete_task(conn, completed, summary="done")
+
+        blocked = kb.create_task(conn, title="blocked", assignee="worker")
+        kb.claim_task(conn, blocked)
+        assert kb.block_task(conn, blocked, reason="dispatcher issue")
+        assert kb.unblock_task(conn, blocked)
+
+        review = kb.create_task(conn, title="review", assignee="reviewer")
+        _set_task_status(conn, review, "review")
+        assert kb.claim_review_task(conn, review) is not None
+
+    names = [name for name, _ in calls]
+    assert "kanban_task_claimed" in names
+    assert "kanban_task_completed" in names
+    assert "kanban_task_blocked" in names
+    assert "kanban_task_unblocked" in names
+    assert "kanban_task_review_claimed" in names
+
+    for name, kwargs in calls:
+        assert set(kwargs) == {"payload"}
+        payload = kwargs["payload"]
+        assert payload["event"].startswith("task_")
+        assert payload["task_id"]
+        assert payload["task_title"]
+        assert "task_status" in payload
+        assert "data" in payload
+
+
 def test_unblock_resets_failure_counters(kanban_home):
     """unblock_task must reset consecutive_failures and last_failure_error."""
     with kb.connect() as conn:
@@ -2655,7 +2697,7 @@ def test_resolve_hermes_argv_module_actually_runs():
         f"`{' '.join(argv)} --version` failed (rc={r.returncode}); "
         f"stderr={r.stderr[:200]!r}"
     )
-    assert "Hermes Agent" in r.stdout, f"unexpected output: {r.stdout[:200]!r}"
+    assert "Lex-Hermes" in r.stdout, f"unexpected output: {r.stdout[:200]!r}"
 
 
 # ---------------------------------------------------------------------------

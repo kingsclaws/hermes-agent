@@ -61,6 +61,7 @@ RUN set -e; \
     cp run_agent.py /opt/hermes/run_agent.py; \
     cp cli.py /opt/hermes/cli.py; \
     cp hermes_cli/main.py /opt/hermes/hermes_cli/main.py; \
+    cp hermes_cli/banner.py /opt/hermes/hermes_cli/banner.py; \
     cp hermes_cli/backoffice.py /opt/hermes/hermes_cli/backoffice.py; \
     cp hermes_cli/plugins.py /opt/hermes/hermes_cli/plugins.py; \
     cp hermes_cli/tools_config.py /opt/hermes/hermes_cli/tools_config.py; \
@@ -82,6 +83,8 @@ RUN set -e; \
     mkdir -p /opt/hermes/plugins/backoffice-issue-relay; \
     cp plugins/backoffice-issue-relay/plugin.yaml /opt/hermes/plugins/backoffice-issue-relay/plugin.yaml; \
     cp plugins/backoffice-issue-relay/__init__.py /opt/hermes/plugins/backoffice-issue-relay/__init__.py; \
+    mkdir -p /opt/hermes/plugins/kanban/dashboard; \
+    cp plugins/kanban/dashboard/plugin_api.py /opt/hermes/plugins/kanban/dashboard/plugin_api.py; \
     mkdir -p /opt/hermes/plugins/legal-drafting-gate; \
     cp plugins/legal-drafting-gate/plugin.yaml /opt/hermes/plugins/legal-drafting-gate/plugin.yaml; \
     cp plugins/legal-drafting-gate/__init__.py /opt/hermes/plugins/legal-drafting-gate/__init__.py; \
@@ -120,6 +123,7 @@ RUN set -e; \
     cp run_agent.py /opt/lex-hermes/run_agent.py; \
     cp cli.py /opt/lex-hermes/cli.py; \
     cp hermes_cli/main.py /opt/lex-hermes/hermes_cli/main.py; \
+    cp hermes_cli/banner.py /opt/lex-hermes/hermes_cli/banner.py; \
     cp hermes_cli/backoffice.py /opt/lex-hermes/hermes_cli/backoffice.py; \
     cp hermes_cli/plugins.py /opt/lex-hermes/hermes_cli/plugins.py; \
     cp hermes_cli/tools_config.py /opt/lex-hermes/hermes_cli/tools_config.py; \
@@ -141,6 +145,8 @@ RUN set -e; \
     mkdir -p /opt/lex-hermes/plugins/backoffice-issue-relay; \
     cp plugins/backoffice-issue-relay/plugin.yaml /opt/lex-hermes/plugins/backoffice-issue-relay/plugin.yaml; \
     cp plugins/backoffice-issue-relay/__init__.py /opt/lex-hermes/plugins/backoffice-issue-relay/__init__.py; \
+    mkdir -p /opt/lex-hermes/plugins/kanban/dashboard; \
+    cp plugins/kanban/dashboard/plugin_api.py /opt/lex-hermes/plugins/kanban/dashboard/plugin_api.py; \
     mkdir -p /opt/lex-hermes/plugins/legal-drafting-gate; \
     cp plugins/legal-drafting-gate/plugin.yaml /opt/lex-hermes/plugins/legal-drafting-gate/plugin.yaml; \
     cp plugins/legal-drafting-gate/__init__.py /opt/lex-hermes/plugins/legal-drafting-gate/__init__.py; \
@@ -253,6 +259,7 @@ RUN set -e; \
       toolsets.py \
       hermes_state.py \
       hermes_cli/main.py \
+      hermes_cli/banner.py \
       hermes_cli/backoffice.py \
       hermes_cli/plugins.py \
       tools/legal_evidence_gate.py \
