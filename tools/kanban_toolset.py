@@ -141,6 +141,41 @@ or equivalent evidence coverage table. Any conclusion that materials are
 
 # ── DB helpers ─────────────────────────────────────────────────────────────────
 
+def _resolve_coordinator_session_for_project(project_path: str) -> str | None:
+    """Find the coordinator session for a project via coordinator_for column.
+
+    Returns the session_id of the active coordinator, or None if not found.
+    This ensures kanban task notifications go to the project coordinator,
+    not to whoever created the task (which might be lex-master).
+    """
+    try:
+        from hermes_state import SessionDB
+        from tools.project_management_tool import _shared_project_db_path, _resolve_project
+        db = SessionDB(db_path=_shared_project_db_path())
+        # Find project by path
+        projects = db.list_projects()
+        project = None
+        for p in projects:
+            p_path = str(p.get("path") or p.get("cwd") or "")
+            if p_path and (p_path == project_path or project_path.startswith(p_path)):
+                project = p
+                break
+        if not project:
+            return None
+        # Look up coordinator_for
+        conn = db._conn if hasattr(db, "_conn") else None
+        if conn:
+            row = conn.execute(
+                "SELECT id FROM sessions WHERE coordinator_for = ? AND ended_at IS NULL ORDER BY started_at DESC LIMIT 1",
+                (project["id"],),
+            ).fetchone()
+            if row:
+                return row[0]
+    except Exception:
+        pass
+    return None
+
+
 def _now() -> int:
     return int(time.time())
 
@@ -987,6 +1022,13 @@ def kanban_task_create_handler(args: dict, **kwargs) -> str:
         parent_agent = kwargs.get("parent_agent")
         if not session_id and parent_agent is not None:
             session_id = getattr(parent_agent, "session_id", None)
+
+        # Route notifications to the project's coordinator session, not the
+        # current agent. This ensures lex-master dispatches wake the project
+        # coordinator, not lex-master itself.
+        coordinator_session_id = _resolve_coordinator_session_for_project(project_path)
+        if coordinator_session_id:
+            session_id = coordinator_session_id
 
         conn = kb.connect(board=meta["slug"])
         try:
