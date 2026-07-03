@@ -2042,3 +2042,91 @@ registry.register(
     handler=lambda args, **kw: lex_master_route_handler(args, **kw),
     emoji="🧭",
 )
+
+# ── project_bind_session ─────────────────────────────────────────────────
+
+PROJECT_BIND_SESSION_SCHEMA = {
+    "name": "project_bind_session",
+    "description": (
+        "Bind the current session as the coordinator session for a project. "
+        "After binding, all future dispatches to this project will use this session. "
+        "Call this when you are the project coordinator and want to ensure "
+        "lex-master routes tasks to YOUR session (not a random one). "
+        "Also sets the session title to include the project name for readability."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "project_name": {
+                "type": "string",
+                "description": "Project name or partial match.",
+            },
+        },
+        "required": ["project_name"],
+    },
+}
+
+
+def project_bind_session_handler(args: dict, **kwargs) -> str:
+    """Bind current session as the coordinator session for a project."""
+    project_name = str(args.get("project_name") or "").strip()
+    if not project_name:
+        return json.dumps({"success": False, "error": "project_name is required"})
+
+    session_id = os.environ.get("HERMES_SESSION_ID", "")
+    if not session_id:
+        return json.dumps(
+            {"success": False, "error": "HERMES_SESSION_ID not set — cannot determine current session."}
+        )
+
+    db = _project_session_db()
+    project = _resolve_project(project_name)
+    if not project:
+        return json.dumps(
+            {"success": False, "error": f"Project not found: {project_name}",
+             "hint": "Use project_list to see registered projects."}
+        )
+
+    # Update the binding
+    _bind_coordinator_session(project["id"], session_id)
+
+    # Also set session title to include project name for readability
+    try:
+        conn = sqlite3.connect(str(_shared_project_db_path()))
+        current = conn.execute(
+            "SELECT title FROM sessions WHERE id = ?", (session_id,)
+        ).fetchone()
+        current_title = current[0] if current else ""
+        new_title = f"[{project['name']}] coordinator"
+        if current_title != new_title:
+            conn.execute(
+                "UPDATE sessions SET title = ? WHERE id = ?",
+                (new_title, session_id),
+            )
+            conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+    return json.dumps(
+        {
+            "success": True,
+            "project_id": project["id"],
+            "project_name": project["name"],
+            "session_id": session_id,
+            "message": (
+                f"Session {session_id} is now the coordinator for '{project['name']}'. "
+                f"Future dispatches will use this session."
+            ),
+        },
+        ensure_ascii=False,
+    )
+
+
+registry.register(
+    name="project_bind_session",
+    toolset="project_management",
+    schema=PROJECT_BIND_SESSION_SCHEMA,
+    handler=lambda args, **kw: project_bind_session_handler(args, **kw),
+    emoji="🔗",
+)
