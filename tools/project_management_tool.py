@@ -474,13 +474,29 @@ def _session_score(session: dict, project: dict) -> int:
     return score
 
 
+def _coordinator_title(project_name: str) -> str:
+    """Canonical title for a project's coordinator session."""
+    return f"[{project_name}] coordinator"
+
+
 def _find_coordinator_session(db, project: dict, session_id: str = "") -> dict | None:
     if session_id:
         try:
             return db.get_session(session_id)
         except Exception:
             return None
-    # Deterministic binding: check projects.coordinator_session_id first
+
+    project_name = project.get("name", "")
+
+    # 1. Try title-based match (survives compression/ID rotation)
+    if project_name:
+        expected_title = _coordinator_title(project_name)
+        sessions = db.list_sessions_rich(limit=500)
+        for s in sessions:
+            if s.get("title") == expected_title and not s.get("ended_at"):
+                return s
+
+    # 2. Try bound session ID (fast path, may be stale after compression)
     bound_id = project.get("coordinator_session_id")
     if bound_id:
         try:
@@ -489,7 +505,8 @@ def _find_coordinator_session(db, project: dict, session_id: str = "") -> dict |
                 return s
         except Exception:
             pass
-    # Fallback: heuristic scoring (legacy)
+
+    # 3. Fallback: heuristic scoring (legacy)
     sessions = db.list_sessions_rich(limit=500)
     scored = [(s, _session_score(s, project)) for s in sessions]
     scored = [(s, score) for s, score in scored if score > 0]
@@ -498,8 +515,8 @@ def _find_coordinator_session(db, project: dict, session_id: str = "") -> dict |
     return sorted(scored, key=lambda item: item[1], reverse=True)[0][0]
 
 
-def _bind_coordinator_session(project_id: str | None, session_id: str) -> None:
-    """Update projects.coordinator_session_id for deterministic binding."""
+def _bind_coordinator_session(project_id: str | None, session_id: str, project_name: str = "") -> None:
+    """Bind session to project. Sets title for persistence across compression."""
     if not project_id or not session_id:
         return
     try:
@@ -509,6 +526,12 @@ def _bind_coordinator_session(project_id: str | None, session_id: str) -> None:
             "UPDATE projects SET coordinator_session_id = ? WHERE id = ?",
             (session_id, project_id),
         )
+        # Set title so we can find it after compression rotates the ID
+        if project_name:
+            conn.execute(
+                "UPDATE sessions SET title = ? WHERE id = ?",
+                (_coordinator_title(project_name), session_id),
+            )
         conn.commit()
         conn.close()
     except Exception:
@@ -559,7 +582,7 @@ def _dispatch_to_session(*, session_id: str, task: str, project: dict, route_id:
     route_path.write_text(json.dumps(record, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
     # Update project-session binding
-    _bind_coordinator_session(project.get("id"), session_id)
+    _bind_coordinator_session(project.get("id"), session_id, project.get("name", ""))
 
     if async_mode:
         with log_path.open("ab") as log:
@@ -1225,7 +1248,7 @@ def project_create_handler(args: dict, **kwargs) -> str:
         if args.get("bind_session", True):
             session_id = os.environ.get("HERMES_SESSION_ID", "")
             if session_id:
-                _bind_coordinator_session(project_id, session_id)
+                _bind_coordinator_session(project_id, session_id, project["name"])
                 # Set session title
                 try:
                     conn = sqlite3.connect(str(_shared_project_db_path()))
@@ -2113,8 +2136,8 @@ def project_bind_session_handler(args: dict, **kwargs) -> str:
              "hint": "Use project_list to see registered projects."}
         )
 
-    # Update the binding
-    _bind_coordinator_session(project["id"], session_id)
+    # Update the binding (title-based, survives compression)
+    _bind_coordinator_session(project["id"], session_id, project["name"])
 
     # Also set session title to include project name for readability
     try:
