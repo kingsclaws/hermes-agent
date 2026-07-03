@@ -486,15 +486,21 @@ def _find_coordinator_session(db, project: dict, session_id: str = "") -> dict |
         except Exception:
             return None
 
-    project_name = project.get("name", "")
+    project_id = project.get("id", "")
 
-    # 1. Try title-based match (survives compression/ID rotation)
-    if project_name:
-        expected_title = _coordinator_title(project_name)
-        sessions = db.list_sessions_rich(limit=500)
-        for s in sessions:
-            if s.get("title") == expected_title and not s.get("ended_at"):
-                return s
+    # 1. coordinator_for column (survives compression — propagated automatically)
+    if project_id:
+        try:
+            conn = db._conn if hasattr(db, "_conn") else None
+            if conn:
+                row = conn.execute(
+                    "SELECT id FROM sessions WHERE coordinator_for = ? AND ended_at IS NULL ORDER BY started_at DESC LIMIT 1",
+                    (project_id,),
+                ).fetchone()
+                if row:
+                    return db.get_session(row[0])
+        except Exception:
+            pass
 
     # 2. Try bound session ID (fast path, may be stale after compression)
     bound_id = project.get("coordinator_session_id")
@@ -516,12 +522,22 @@ def _find_coordinator_session(db, project: dict, session_id: str = "") -> dict |
 
 
 def _bind_coordinator_session(project_id: str | None, session_id: str, project_name: str = "") -> None:
-    """Bind session to project. Sets title for persistence across compression."""
+    """Bind session to project via coordinator_for column (survives compression)."""
     if not project_id or not session_id:
         return
     try:
         db_path = _shared_project_db_path()
         conn = sqlite3.connect(str(db_path))
+        # Clear any existing binding for this project
+        conn.execute(
+            "UPDATE sessions SET coordinator_for = NULL WHERE coordinator_for = ?",
+            (project_id,),
+        )
+        # Set the binding
+        conn.execute(
+            "UPDATE sessions SET coordinator_for = ? WHERE id = ?",
+            (project_id, session_id),
+        )
         conn.execute(
             "UPDATE projects SET coordinator_session_id = ? WHERE id = ?",
             (session_id, project_id),

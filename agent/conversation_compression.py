@@ -405,6 +405,24 @@ def compress_context(
                     )
             except Exception:
                 pass
+            # Propagate coordinator_for binding (survives compression)
+            try:
+                import sqlite3 as _sqlite3
+                _db_path = str(agent._session_db._db_path) if hasattr(agent._session_db, "_db_path") else None
+                if _db_path:
+                    _conn = _sqlite3.connect(_db_path)
+                    _row = _conn.execute(
+                        "SELECT coordinator_for FROM sessions WHERE id = ?", (old_session_id,)
+                    ).fetchone()
+                    if _row and _row[0]:
+                        _conn.execute(
+                            "UPDATE sessions SET coordinator_for = ? WHERE id = ?",
+                            (_row[0], agent.session_id),
+                        )
+                        _conn.commit()
+                    _conn.close()
+            except Exception:
+                pass
             # Auto-number the title for the continuation session
             if old_title:
                 try:
