@@ -62,6 +62,7 @@ RUN set -e; \
     cp tools/legal_workflow_tool.py /opt/hermes/tools/legal_workflow_tool.py; \
     cp toolsets.py /opt/hermes/toolsets.py; \
     cp run_agent.py /opt/hermes/run_agent.py; \
+    cp agent/system_prompt.py /opt/hermes/agent/system_prompt.py; \
     cp agent/conversation_compression.py /opt/hermes/agent/conversation_compression.py; \
     cp cli.py /opt/hermes/cli.py; \
     cp hermes_cli/main.py /opt/hermes/hermes_cli/main.py; \
@@ -138,6 +139,7 @@ RUN set -e; \
     cp tools/legal_workflow_tool.py /opt/lex-hermes/tools/legal_workflow_tool.py; \
     cp toolsets.py /opt/lex-hermes/toolsets.py; \
     cp run_agent.py /opt/lex-hermes/run_agent.py; \
+    cp agent/system_prompt.py /opt/lex-hermes/agent/system_prompt.py; \
     cp agent/conversation_compression.py /opt/lex-hermes/agent/conversation_compression.py; \
     cp cli.py /opt/lex-hermes/cli.py; \
     cp hermes_cli/main.py /opt/lex-hermes/hermes_cli/main.py; \

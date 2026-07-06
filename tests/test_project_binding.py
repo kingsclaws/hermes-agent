@@ -3,6 +3,8 @@ from pathlib import Path
 from hermes_state import SessionDB
 from tools.project_management_tool import (
     apply_project_binding,
+    build_selected_project_prompt_context,
+    project_select_handler,
     project_bind_session_handler,
     resolve_selected_project,
 )
@@ -14,6 +16,7 @@ class _StubAgent:
         self.session_id = session_id
         self.terminal_cwd = None
         self.cwd = None
+        self._cached_system_prompt = "cached"
 
 
 def test_session_project_binding_round_trip(tmp_path):
@@ -144,5 +147,67 @@ def test_project_bind_session_replaces_old_coordinator(tmp_path, monkeypatch):
         assert db.get_session("coord-old")["coordinator_for"] is None
         assert db.get_session("coord-new")["coordinator_for"] == project_id
         assert db.get_project_coordinator_session(project_id)["id"] == "coord-new"
+    finally:
+        db.close()
+
+
+def test_project_select_updates_agent_and_session_binding(tmp_path, monkeypatch):
+    db_path = tmp_path / "state.db"
+    db = SessionDB(db_path=db_path)
+    try:
+        db.create_session("sess-select", source="cli", model="test-model")
+        project_root = tmp_path / "deal-f"
+        project_root.mkdir()
+        project_id = db.create_project("Deal F", str(project_root), "Client F", "Select")
+        agent = _StubAgent(db, "sess-select")
+
+        monkeypatch.setenv("HERMES_PROJECTS_DB_PATH", str(db_path))
+        monkeypatch.setenv("HERMES_SESSION_ID", "sess-select")
+
+        import json
+
+        result = json.loads(
+            project_select_handler({"project_name": "Deal F"}, parent_agent=agent)
+        )
+
+        assert result["success"] is True
+        assert agent._selected_project_id == project_id
+        assert agent._selected_project_cwd == str(project_root)
+        assert agent._cached_system_prompt is None
+        session = db.get_session("sess-select")
+        assert session["project_id"] == project_id
+        assert session["project_cwd"] == str(project_root)
+    finally:
+        db.close()
+
+
+def test_build_selected_project_prompt_context_reads_sidecar_artifacts(tmp_path, monkeypatch):
+    db_path = tmp_path / "state.db"
+    db = SessionDB(db_path=db_path)
+    try:
+        db.create_session("sess-context", source="cli", model="test-model")
+        project_root = tmp_path / "deal-g"
+        sidecar = project_root / ".hermes-project"
+        memories = sidecar / "memories"
+        memories.mkdir(parents=True)
+        project_root.mkdir(exist_ok=True)
+        (sidecar / "project-context.md").write_text("项目背景：这是一个并购项目。", encoding="utf-8")
+        (memories / "project_facts.md").write_text("贷款金额：人民币2亿元", encoding="utf-8")
+        (sidecar / "init-impression.md").write_text("初步印象：资料较完整。", encoding="utf-8")
+        (sidecar / "missing-info-list.md").write_text("待补：董事会决议。", encoding="utf-8")
+        (sidecar / "source-inventory.md").write_text("# Source Inventory\n- Total files: 3\n", encoding="utf-8")
+        project_id = db.create_project("Deal G", str(project_root), "Client G", "Context")
+        db.set_session_project("sess-context", project_id, str(project_root))
+        agent = _StubAgent(db, "sess-context")
+
+        monkeypatch.setenv("HERMES_PROJECTS_DB_PATH", str(db_path))
+        text = build_selected_project_prompt_context(agent, session_id="sess-context")
+
+        assert "Active legal project context" in text
+        assert "Deal G" in text
+        assert "项目背景" in text
+        assert "贷款金额：人民币2亿元" in text
+        assert "初步印象" in text
+        assert "待补：董事会决议" in text
     finally:
         db.close()

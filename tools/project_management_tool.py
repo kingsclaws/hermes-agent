@@ -19,6 +19,7 @@ import subprocess
 import time
 import uuid
 from pathlib import Path
+import re
 
 
 def _project_session_db():
@@ -641,6 +642,98 @@ def resolve_selected_project(parent_agent=None, session_id: str | None = None):
             return project
 
     return None
+
+
+def build_selected_project_prompt_context(parent_agent=None, session_id: str | None = None) -> str:
+    """Return a compact prompt block for the active/bound legal project."""
+    project = resolve_selected_project(parent_agent, session_id=session_id)
+    if not project:
+        return ""
+
+    project_path = str(project.get("path") or project.get("cwd") or "").strip()
+    root = Path(project_path).expanduser() if project_path else None
+    sidecar = root / ".hermes-project" if root else None
+
+    lines = [
+        "[Active legal project context]",
+        f"Project: {project.get('name') or project.get('id') or ''}",
+    ]
+    if project.get("client"):
+        lines.append(f"Client: {project.get('client')}")
+    if project.get("status"):
+        lines.append(f"Status: {project.get('status')}")
+    if project_path:
+        lines.append(f"Directory: {project_path}")
+    if project.get("goal"):
+        lines.append(f"Goal: {_compact_text(str(project.get('goal')), 1200)}")
+    if project.get("notes"):
+        lines.append(f"Notes: {_compact_text(str(project.get('notes')), 1200)}")
+
+    if sidecar and sidecar.exists():
+        artifact_paths = {
+            "project_context": sidecar / "project-context.md",
+            "project_facts": sidecar / "memories" / "project_facts.md",
+            "init_impression": sidecar / "init-impression.md",
+            "missing_info_list": sidecar / "missing-info-list.md",
+            "source_inventory": sidecar / "source-inventory.md",
+        }
+        existing = [f"{name}={path}" for name, path in artifact_paths.items() if path.exists()]
+        if existing:
+            lines.extend(["", "Live matter artifacts:", *existing])
+
+        for label, rel in (
+            ("Project context snapshot", artifact_paths["project_context"]),
+            ("Project facts snapshot", artifact_paths["project_facts"]),
+            ("Init impression", artifact_paths["init_impression"]),
+            ("Missing info list", artifact_paths["missing_info_list"]),
+        ):
+            text = _read_prompt_excerpt(rel, limit=5000)
+            if text:
+                lines.extend(["", f"## {label}", text])
+
+        source_summary = _source_inventory_summary(artifact_paths["source_inventory"])
+        if source_summary:
+            lines.extend(["", "## Source inventory summary", source_summary])
+
+    lines.extend(
+        [
+            "",
+            "Project-aware session rules:",
+            "1. Treat this matter as the default project unless the user explicitly switches projects.",
+            "2. Use project_facts as the living fact ledger and keep it updated when facts are confirmed, corrected, or superseded.",
+            "3. Treat init artifacts as live working files, not archival notes.",
+            "4. Before legal drafting/review, reconcile the task against project facts, init impression, and missing-info list.",
+        ]
+    )
+    return "\n".join(line for line in lines if line is not None).strip()
+
+
+def _read_prompt_excerpt(path: Path, *, limit: int = 5000) -> str:
+    try:
+        if not path.exists() or not path.is_file():
+            return ""
+        return _compact_text(path.read_text(encoding="utf-8", errors="replace"), limit)
+    except Exception:
+        return ""
+
+
+def _compact_text(text: str, limit: int) -> str:
+    cleaned = re.sub(r"\n{3,}", "\n\n", str(text or "")).strip()
+    if len(cleaned) <= limit:
+        return cleaned
+    return cleaned[: max(0, limit - 1)].rstrip() + "…"
+
+
+def _source_inventory_summary(path: Path) -> str:
+    raw = _read_prompt_excerpt(path, limit=4000)
+    if not raw:
+        return ""
+    lines = [line.rstrip() for line in raw.splitlines() if line.strip()]
+    if len(lines) <= 18:
+        return "\n".join(lines)
+    head = lines[:10]
+    tail = lines[-6:]
+    return "\n".join(head + ["...", *tail])
 
 
 def _resolve_project_path(name_or_id: str, given_path: str | None) -> str:
@@ -1714,6 +1807,25 @@ def project_select_handler(args: dict, **kwargs) -> str:
     _active_project_name = project["name"]
     _active_project_path = project_path
 
+    parent_agent = kwargs.get("parent_agent")
+    session_id = os.environ.get("HERMES_SESSION_ID", "").strip() or getattr(parent_agent, "session_id", "")
+    if parent_agent is not None:
+        try:
+            parent_agent._selected_project_id = project["id"]
+            parent_agent.selected_project_id = project["id"]
+            parent_agent._selected_project_cwd = project_path
+            parent_agent.selected_project_cwd = project_path
+            parent_agent._selected_project_name = project["name"]
+            parent_agent._cached_system_prompt = None
+        except Exception:
+            pass
+    if session_id:
+        try:
+            db = _project_session_db()
+            db.set_session_project(session_id, project["id"], project_cwd=project_path)
+        except Exception:
+            pass
+
     return json.dumps(
         {
             "success": True,
@@ -2248,6 +2360,19 @@ def project_bind_session_handler(args: dict, **kwargs) -> str:
             db.set_session_title(session_id, new_title)
     except Exception:
         pass
+
+    parent_agent = kwargs.get("parent_agent")
+    if parent_agent is not None:
+        try:
+            project_path = str(project.get("path") or project.get("cwd") or "")
+            parent_agent._selected_project_id = project["id"]
+            parent_agent.selected_project_id = project["id"]
+            parent_agent._selected_project_cwd = project_path
+            parent_agent.selected_project_cwd = project_path
+            parent_agent._selected_project_name = project["name"]
+            parent_agent._cached_system_prompt = None
+        except Exception:
+            pass
 
     return json.dumps(
         {

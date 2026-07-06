@@ -325,6 +325,18 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
         if context_files_prompt:
             context_parts.append(context_files_prompt)
 
+    try:
+        from tools.project_management_tool import build_selected_project_prompt_context
+
+        selected_project_prompt = build_selected_project_prompt_context(
+            parent_agent=agent,
+            session_id=getattr(agent, "session_id", None),
+        )
+        if selected_project_prompt:
+            context_parts.append(selected_project_prompt)
+    except Exception:
+        pass
+
     # ── Volatile tier (changes per session/turn — never cached) ───
     volatile_parts: List[str] = []
 
