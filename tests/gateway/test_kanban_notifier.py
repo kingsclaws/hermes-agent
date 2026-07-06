@@ -331,6 +331,51 @@ def test_kanban_notifier_binds_unhosted_internal_session(tmp_path, monkeypatch):
     assert tid in injected[0].text
 
 
+def test_kanban_notifier_skips_session_wake_after_collect_receipt(tmp_path, monkeypatch):
+    """A terminal task already collected by the coordinator must not wake again."""
+    db_path = tmp_path / "session-wake-collected.db"
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(db_path))
+    kb.init_db()
+
+    conn = kb.connect()
+    try:
+        tid = kb.create_task(
+            conn,
+            title="already collected",
+            assignee="worker",
+            workspace_kind="dir",
+            workspace_path=str(tmp_path),
+            session_id="coord-session-1",
+        )
+        assert kb.subscribe_session("coord-session-1", tid)
+        kb.complete_task(conn, tid, summary="worker finished")
+        assert kb.record_collection_receipt(
+            conn,
+            task_id=tid,
+            session_id="coord-session-1",
+            status="done",
+        ) is True
+    finally:
+        conn.close()
+
+    runner = GatewayRunner.__new__(GatewayRunner)
+    runner._running = True
+    runner.adapters = {}
+    runner._kanban_sub_fail_counts = {}
+    runner.session_store = FakeSessionStore("coord-session-1")
+    injected = []
+
+    async def fake_handle_message(event):
+        injected.append(event)
+        return "ok"
+
+    runner._handle_message = fake_handle_message
+
+    asyncio.run(_run_one_notifier_tick(monkeypatch, runner))
+
+    assert injected == []
+
+
 def test_notifier_redelivers_same_kind_on_dispatch_cycle(tmp_path, monkeypatch):
     """A retry cycle (crashed → reclaimed → crashed) notifies the user twice.
 

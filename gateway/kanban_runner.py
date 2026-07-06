@@ -635,6 +635,31 @@ class KanbanMixin:
             or ""
         )
 
+        if status in {"done", "blocked", "archived"}:
+            try:
+                from hermes_cli import kanban_db as _kb
+
+                conn = _kb.connect(board=board)
+                try:
+                    if _kb.has_collection_receipt(
+                        conn,
+                        task_id=task_id,
+                        session_id=session_id,
+                        status=status,
+                    ):
+                        logger.info(
+                            "kanban session-wake: skip duplicate wake for task %s session %s status %s",
+                            task_id, session_id, status,
+                        )
+                        return
+                finally:
+                    conn.close()
+            except Exception as exc:
+                logger.debug(
+                    "kanban session-wake: receipt check failed for %s/%s: %s",
+                    task_id, session_id, exc,
+                )
+
         if kind == "completed":
             reason = "已完成（done）"
             detail = str(payload.get("summary") or "").strip()

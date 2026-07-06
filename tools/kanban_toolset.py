@@ -1650,6 +1650,18 @@ def kanban_task_collect_handler(args: dict, **kwargs) -> str:
                 return json.dumps({"success": False, "error": f"任务未找到: {task_id}"}, ensure_ascii=False)
             events = kb.list_events(conn, task_id)
             comments = kb.list_comments(conn, task_id)
+            session_id = os.environ.get("HERMES_SESSION_ID", "") or ""
+            parent_agent = kwargs.get("parent_agent")
+            if not session_id and parent_agent is not None:
+                session_id = getattr(parent_agent, "session_id", "") or ""
+            if session_id and task.status in {"done", "blocked", "archived"}:
+                kb.record_collection_receipt(
+                    conn,
+                    task_id=task_id,
+                    session_id=session_id,
+                    status=task.status,
+                    source="swarm_task_collect",
+                )
         finally:
             conn.close()
 

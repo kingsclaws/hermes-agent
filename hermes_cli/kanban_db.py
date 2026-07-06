@@ -2475,6 +2475,67 @@ def _append_event(
     )
 
 
+def has_collection_receipt(
+    conn: sqlite3.Connection,
+    *,
+    task_id: str,
+    session_id: str,
+    status: str,
+) -> bool:
+    """Return True iff this session already collected this task at this status.
+
+    ``swarm_task_collect`` writes a lightweight ``collected`` event once the
+    coordinator has processed a terminal wake. The gateway wake path consults
+    that receipt to suppress duplicate auto-notifications for the same
+    task/session/status tuple.
+    """
+    rows = conn.execute(
+        "SELECT payload FROM task_events WHERE task_id = ? AND kind = 'collected' ORDER BY id DESC",
+        (task_id,),
+    ).fetchall()
+    for row in rows:
+        try:
+            payload = json.loads(row["payload"] or "{}")
+        except Exception:
+            payload = {}
+        if (
+            str(payload.get("session_id") or "") == session_id
+            and str(payload.get("status") or "") == status
+        ):
+            return True
+    return False
+
+
+def record_collection_receipt(
+    conn: sqlite3.Connection,
+    *,
+    task_id: str,
+    session_id: str,
+    status: str,
+    source: str = "swarm_task_collect",
+) -> bool:
+    """Persist an idempotent coordinator receipt for a processed terminal wake."""
+    with write_txn(conn):
+        if has_collection_receipt(
+            conn,
+            task_id=task_id,
+            session_id=session_id,
+            status=status,
+        ):
+            return False
+        _append_event(
+            conn,
+            task_id,
+            "collected",
+            {
+                "session_id": session_id,
+                "status": status,
+                "source": source,
+            },
+        )
+    return True
+
+
 def _end_run(
     conn: sqlite3.Connection,
     task_id: str,

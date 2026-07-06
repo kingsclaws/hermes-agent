@@ -7,6 +7,7 @@ from tools.legal_evidence_gate import (
 from tools.kanban_tools import _handle_complete
 from tools.kanban_toolset import (
     kanban_task_approve_handler,
+    kanban_task_collect_handler,
     kanban_task_create_handler,
     kanban_task_read_handler,
 )
@@ -171,3 +172,56 @@ def test_swarm_task_read_routes_to_official_board_from_project_path(monkeypatch,
     assert data["success"] is True
     assert data["task"]["id"] == task_id
     assert data["board"]["slug"] == board
+
+
+def test_swarm_task_collect_records_terminal_receipt_once(monkeypatch, tmp_path):
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    project = tmp_path / "legal-project"
+    project.mkdir()
+    monkeypatch.setenv("HERMES_KANBAN_HOME", str(home))
+    monkeypatch.setenv("HERMES_SESSION_ID", "coord-session-collect")
+
+    create_out = kanban_task_create_handler({
+        "project_path": str(project),
+        "title": "Collect once",
+        "description": "Verify receipt dedupe.",
+        "assignee": "hpswarm-reviewer-content",
+    })
+    create_data = json.loads(create_out)
+    assert create_data["success"] is True
+    task_id = create_data["task"]["id"]
+    board = create_data["board"]["slug"]
+
+    conn = kb.connect(board=board)
+    try:
+        assert kb.complete_task(conn, task_id, summary="worker finished") is True
+    finally:
+        conn.close()
+
+    first = json.loads(kanban_task_collect_handler({
+        "task_id": task_id,
+        "project_path": str(project),
+    }))
+    second = json.loads(kanban_task_collect_handler({
+        "task_id": task_id,
+        "project_path": str(project),
+    }))
+
+    assert first["success"] is True
+    assert second["success"] is True
+
+    conn = kb.connect(board=board)
+    try:
+        events = kb.list_events(conn, task_id)
+    finally:
+        conn.close()
+
+    collected = [
+        e for e in events
+        if e.kind == "collected"
+        and isinstance(e.payload, dict)
+        and e.payload.get("session_id") == "coord-session-collect"
+        and e.payload.get("status") == "done"
+    ]
+    assert len(collected) == 1
