@@ -170,6 +170,19 @@ TOOLSETS = {
         "includes": []
     },
     
+    "research": {
+        "description": (
+            "Deep research orchestration: plan subquestions, collect sources "
+            "with authority tiers, synthesize findings, generate reports, "
+            "and update project facts."
+        ),
+        "tools": [
+            "research_plan", "research_run", "research_collect",
+            "research_synthesize", "research_report", "research_update_facts",
+        ],
+        "includes": [],
+    },
+
     "vision": {
         "description": "Image analysis and vision tools",
         "tools": ["vision_analyze"],
