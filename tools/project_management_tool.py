@@ -990,6 +990,100 @@ def _write_project_source_digest_mirror(
     return str(out_path)
 
 
+def _sync_source_digest_project_facts(project_dir: str, source: dict, digest: dict) -> list[dict]:
+    from hermes_cli.project_commands import project_facts
+
+    updates: list[dict] = []
+    rel_path = str(source.get("rel_path") or source.get("path") or "").strip() or "source"
+    fact_prefix = rel_path.replace("/", " > ")
+
+    read_method = str(digest.get("read_method") or source.get("read_method") or "").strip()
+    if read_method:
+        updates.append(
+            project_facts(
+                project_dir,
+                "upsert",
+                category="init_reading",
+                key=f"{rel_path}.read_method",
+                value=read_method,
+                source="project_source_digest",
+                confidence="high",
+                status="confirmed",
+                tags=["project_init", "source_digest"],
+            )
+        )
+    coverage = str(digest.get("read_coverage") or "").strip()
+    if coverage:
+        updates.append(
+            project_facts(
+                project_dir,
+                "upsert",
+                category="init_reading",
+                key=f"{rel_path}.read_coverage",
+                value=coverage,
+                source="project_source_digest",
+                confidence="high",
+                status="confirmed",
+                tags=["project_init", "source_digest"],
+            )
+        )
+
+    for index, raw in enumerate(digest.get("key_facts") or [], start=1):
+        value = str(raw).strip()
+        if not value:
+            continue
+        updates.append(
+            project_facts(
+                project_dir,
+                "upsert",
+                category="init_source_fact",
+                key=f"{rel_path}.fact.{index}",
+                value={"source_file": rel_path, "fact": value},
+                source="project_source_digest",
+                confidence="medium",
+                status="confirmed",
+                tags=["project_init", "source_digest", "candidate_fact"],
+            )
+        )
+
+    for index, raw in enumerate(digest.get("open_questions") or [], start=1):
+        value = str(raw).strip()
+        if not value:
+            continue
+        updates.append(
+            project_facts(
+                project_dir,
+                "upsert",
+                category="init_open_question",
+                key=f"{rel_path}.question.{index}",
+                value={"source_file": rel_path, "question": value},
+                source="project_source_digest",
+                confidence="medium",
+                status="needs_confirmation",
+                tags=["project_init", "source_digest", "open_question"],
+            )
+        )
+
+    for index, raw in enumerate(digest.get("issues") or [], start=1):
+        value = str(raw).strip()
+        if not value:
+            continue
+        updates.append(
+            project_facts(
+                project_dir,
+                "upsert",
+                category="init_issue",
+                key=f"{rel_path}.issue.{index}",
+                value={"source_file": rel_path, "issue": value},
+                source="project_source_digest",
+                confidence="medium",
+                status="needs_confirmation",
+                tags=["project_init", "source_digest", "issue"],
+            )
+        )
+    return updates
+
+
 def _resolve_project_for_digest(args: dict, db) -> tuple[dict | None, dict | None, str]:
     project = None
     project_name = str(args.get("project_name") or "").strip()
@@ -1375,6 +1469,12 @@ def project_source_digest_handler(args: dict, **kwargs) -> str:
     if error:
         return json.dumps({"success": False, "error": error}, ensure_ascii=False)
     assert project is not None and source is not None
+    try:
+        from hermes_cli.project_commands import _ensure_legal_harness_files
+
+        _ensure_legal_harness_files(str(project.get("path") or project.get("cwd") or ""))
+    except Exception:
+        pass
 
     coverage = str(args.get("read_coverage") or "").strip().lower()
     if coverage not in {"full", "partial", "failed"}:
@@ -1436,6 +1536,20 @@ def project_source_digest_handler(args: dict, **kwargs) -> str:
             created_by=os.environ.get("HERMES_PROFILE") or os.environ.get("USER") or "agent",
         )
         mirror_path = _write_project_source_digest_mirror(project, source, digest_id, digest)
+        fact_updates = _sync_source_digest_project_facts(str(project.get("path") or project.get("cwd") or ""), source, digest)
+        try:
+            from tools.legal_workflow_learning import learn_from_findings, project_init_findings
+
+            init_learning = learn_from_findings(
+                findings=project_init_findings(source=source, digest=digest),
+                workflow_type="project_init",
+                scope="project",
+                run_id=run_id or None,
+                document_path=str(source.get("path") or ""),
+                enabled=True,
+            )
+        except Exception as exc:
+            init_learning = {"enabled": True, "error": str(exc), "candidates": []}
         # Refresh source inventory status without touching other init mirrors.
         sources = db.list_project_sources(project["id"], run_id=run_id or None)
         if sources:
@@ -1447,6 +1561,8 @@ def project_source_digest_handler(args: dict, **kwargs) -> str:
             "source_id": source["id"],
             "run_id": run_id,
             "read_coverage": coverage,
+            "fact_updates": fact_updates,
+            "init_learning": init_learning,
             "mirror_path": mirror_path,
             "message": "Source digest recorded. kanban_complete may now close this init.source_digest task if evidence gate also passes.",
         }, ensure_ascii=False)

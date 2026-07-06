@@ -479,6 +479,9 @@ def _collect_findings_from_workflow(workflow: Dict[str, Any]) -> List[Dict[str, 
         learning = result.get("learning")
         if isinstance(learning, dict) and isinstance(learning.get("findings"), list):
             findings.extend(item for item in learning["findings"] if isinstance(item, dict))
+        gate_learning = result.get("gate_learning")
+        if isinstance(gate_learning, dict) and isinstance(gate_learning.get("findings"), list):
+            findings.extend(item for item in gate_learning["findings"] if isinstance(item, dict))
     return findings
 
 
@@ -487,6 +490,10 @@ def _infer_workflow_type(workflow: Dict[str, Any]) -> str:
     instructions = str(workflow.get("instructions") or "").lower()
     step_types = " ".join(str(step.get("type") or "") for step in workflow.get("steps") or [])
     haystack = " ".join([name, instructions, step_types])
+    if any(marker in haystack for marker in ("project init", "project_init", "source_digest", "init.synthesis")):
+        return "project_init"
+    if any(marker in haystack for marker in ("delivery gate", "delivery_gate", "lex_gate_check")):
+        return "delivery_gate"
     if any(marker in haystack for marker in ("translation", "翻译", "bilingual", "lex_translation_review")):
         return "translation_quality_review"
     if any(marker in haystack for marker in ("proofread", "校对", "审校", "lex_proofread")):
@@ -1206,7 +1213,7 @@ LEGAL_WORKFLOW_SCHEMA = {
             "name": {"type": "string"},
             "workflow_type": {
                 "type": "string",
-                "enum": ["contract_revision", "document_drafting", "translation_quality_review", "proofread_review"],
+                "enum": ["contract_revision", "document_drafting", "translation_quality_review", "proofread_review", "project_init", "delivery_gate"],
                 "description": "Default workflow template to create when custom steps are not supplied.",
             },
             "learning_scope": {
@@ -1446,6 +1453,8 @@ def _handle_legal_workflow(args: dict, **kwargs) -> str:
         default_name_by_type = {
             "contract_revision": "法律文书修订 workflow",
             "document_drafting": "法律文书逐段制作 workflow",
+            "delivery_gate": "法律交付门禁 workflow",
+            "project_init": "项目初始化 workflow",
             "proofread_review": "法律文书逐段校对 workflow",
             "translation_quality_review": "中英文翻译质量核对 workflow",
         }
@@ -1687,19 +1696,20 @@ def _handle_legal_workflow(args: dict, **kwargs) -> str:
         if not workflow_type:
             workflow_type = _infer_workflow_type(workflow)
         findings = _collect_findings_from_workflow(workflow)
-        from tools.lex_translation_review_tool import _learn_from_findings
+        from tools.legal_workflow_learning import learn_from_findings
 
-        learning = _learn_from_findings(
+        learning = learn_from_findings(
             findings=findings,
             workflow_type=workflow_type,
             scope=learning_scope,
             run_id=run_id,
             document_path=workflow.get("document_path"),
+            enabled=True,
         )
         return _ok({"status": "learned", "learning": learning, "finding_count": len(findings)})
 
     if action == "list_learning_rules":
-        workflow_type = str(args.get("workflow_type") or "translation_quality_review").strip()
+        workflow_type = str(args.get("workflow_type") or "contract_revision").strip()
         learning_scope = str(args.get("learning_scope") or "global").strip()
         status = str(args.get("status") or "").strip() or None
         rules = db.list_workflow_learning_rules(
@@ -1721,11 +1731,11 @@ def _handle_legal_workflow(args: dict, **kwargs) -> str:
         return _ok({"status": "updated", "rule_id": rule_id, "rule_status": next_status})
 
     if action == "export_learning_sop":
-        workflow_type = str(args.get("workflow_type") or "translation_quality_review").strip()
+        workflow_type = str(args.get("workflow_type") or "contract_revision").strip()
         learning_scope = str(args.get("learning_scope") or "global").strip()
-        from tools.lex_translation_review_tool import _export_learning_sop
+        from tools.legal_workflow_learning import export_learning_sop
 
-        path = _export_learning_sop(workflow_type=workflow_type, scope=learning_scope, db=db)
+        path = export_learning_sop(workflow_type=workflow_type, scope=learning_scope, db=db)
         return _ok({"status": "exported" if path else "error", "path": path})
 
     return tool_error(f"unknown legal_workflow action: {action}")

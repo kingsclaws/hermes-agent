@@ -3,11 +3,17 @@
 from __future__ import annotations
 
 import json
-import hashlib
 import re
 from pathlib import Path
 from typing import Any
 
+from tools.legal_workflow_learning import (
+    export_learning_sop as _generic_export_learning_sop,
+    format_learning_rules as _generic_format_learning_rules,
+    learn_from_findings as _generic_learn_from_findings,
+    learning_candidates_from_findings as _generic_learning_candidates_from_findings,
+    learning_sop_markdown as _generic_learning_sop_markdown,
+)
 from tools.registry import registry, tool_error, tool_result
 
 
@@ -472,44 +478,8 @@ def _extract_json(text: str) -> dict[str, Any] | None:
     return None
 
 
-LOW_RISK_AUTO_ISSUE_TYPES = {
-    "defined_term",
-    "party_name",
-    "cross_reference",
-    "review_xref",
-    "schedule_table",
-    "style_format",
-    "review_format",
-}
-
-LEARNING_CATEGORY_BY_ISSUE_TYPE = {
-    "defined_term": "terminology",
-    "party_name": "terminology",
-    "cross_reference": "reference_format",
-    "review_xref": "reference_format",
-    "schedule_table": "reference_format",
-    "style_format": "format",
-    "review_format": "format",
-    "grammar_spelling": "candidate_language",
-    "number_date_currency": "candidate_precision",
-    "review_content": "candidate_substantive",
-    "review_ts": "candidate_ts_consistency",
-}
-
-
 def _format_learning_rules(rules: list[dict[str, Any]]) -> str:
-    if not rules:
-        return ""
-    lines = [
-        "\nGlobal learned translation QA rules. Apply these as reusable low-risk rules unless task-specific SOP overrides them:",
-    ]
-    for item in rules[:80]:
-        category = str(item.get("category") or "general")
-        title = str(item.get("title") or "Learned rule")
-        rule_text = str(item.get("rule_text") or "").strip()
-        hit_count = item.get("hit_count") or 1
-        lines.append(f"- [{category}; seen {hit_count}x] {title}: {rule_text}")
-    return "\n".join(lines)
+    return _generic_format_learning_rules(rules)
 
 
 def _learn_from_findings(
@@ -520,204 +490,25 @@ def _learn_from_findings(
     run_id: str | None,
     document_path: str | None,
 ) -> dict[str, Any]:
-    candidates = _learning_candidates_from_findings(findings)
-    if not candidates:
-        return {
-            "enabled": True,
-            "event_id": None,
-            "candidates": [],
-            "active_rules": [],
-            "candidate_rules": [],
-            "summary": "No reusable learning candidates extracted.",
-        }
-
-    try:
-        from hermes_state import SessionDB
-
-        db = SessionDB()
-        active_rules: list[dict[str, Any]] = []
-        candidate_rules: list[dict[str, Any]] = []
-        for item in candidates:
-            auto_active = bool(item.get("auto_active"))
-            rule = db.upsert_workflow_learning_rule(
-                workflow_type=workflow_type,
-                scope=scope,
-                category=str(item.get("category") or "general"),
-                rule_key=str(item["rule_key"]),
-                title=str(item.get("title") or "Learned workflow rule"),
-                rule_text=str(item.get("rule_text") or ""),
-                source_issue_type=str(item.get("source_issue_type") or ""),
-                source_run_id=run_id,
-                source_document_path=document_path,
-                status="active" if auto_active else "candidate",
-                confidence=float(item.get("confidence") or 0.5),
-                auto_merged=auto_active,
-            )
-            if rule.get("status") == "active":
-                active_rules.append(rule)
-            else:
-                candidate_rules.append(rule)
-
-        event_id = db.create_workflow_learning_event(
-            workflow_type=workflow_type,
-            scope=scope,
-            run_id=run_id,
-            document_path=document_path,
-            summary=(
-                f"Extracted {len(candidates)} learning candidates; "
-                f"{len(active_rules)} active, {len(candidate_rules)} pending."
-            ),
-            candidate_count=len(candidate_rules),
-            active_count=len(active_rules),
-            payload={"candidates": candidates},
-        )
-        _export_learning_sop(workflow_type=workflow_type, scope=scope, db=db)
-        return {
-            "enabled": True,
-            "event_id": event_id,
-            "candidates": candidates,
-            "active_rules": active_rules,
-            "candidate_rules": candidate_rules,
-            "summary": (
-                f"Extracted {len(candidates)} learning candidates; "
-                f"{len(active_rules)} active, {len(candidate_rules)} pending."
-            ),
-        }
-    except Exception as exc:
-        return {
-            "enabled": True,
-            "error": str(exc),
-            "candidates": candidates,
-            "active_rules": [],
-            "candidate_rules": [],
-        }
+    return _generic_learn_from_findings(
+        findings=findings,
+        workflow_type=workflow_type,
+        scope=scope,
+        run_id=run_id,
+        document_path=document_path,
+        enabled=True,
+    )
 
 
 def _learning_candidates_from_findings(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    candidates: list[dict[str, Any]] = []
-    for item in findings:
-        issue_type = str(item.get("issue_type") or "").strip()
-        if not issue_type:
-            issue_type = str(item.get("review_type") or "").strip()
-        source = str(item.get("source_text") or "").strip()
-        current = str(item.get("translation_text") or "").strip()
-        suggestion = str(item.get("suggestion") or "").strip()
-        finding = str(item.get("finding") or "").strip()
-        if not finding:
-            finding = str(item.get("title") or "").strip()
-        if not suggestion and not finding:
-            continue
-
-        category = LEARNING_CATEGORY_BY_ISSUE_TYPE.get(issue_type, "candidate_substantive")
-        auto_active = issue_type in LOW_RISK_AUTO_ISSUE_TYPES and bool(suggestion)
-        title = _learning_title(issue_type, source, current, suggestion, finding)
-        rule_text = _learning_rule_text(issue_type, source, current, suggestion, finding, auto_active)
-        key_material = "|".join(
-            [
-                "translation_quality_review",
-                category,
-                issue_type,
-                _norm_for_key(current or source or finding),
-                _norm_for_key(suggestion or finding),
-            ]
-        )
-        candidates.append(
-            {
-                "auto_active": auto_active,
-                "category": category,
-                "confidence": 0.85 if auto_active else 0.45,
-                "rule_key": hashlib.sha256(key_material.encode("utf-8")).hexdigest()[:24],
-                "rule_text": rule_text,
-                "source_issue_type": issue_type,
-                "title": title,
-            }
-        )
-    return _dedupe_candidates(candidates)
-
-
-def _learning_title(
-    issue_type: str,
-    source: str,
-    current: str,
-    suggestion: str,
-    finding: str,
-) -> str:
-    label = {
-        "defined_term": "Defined term consistency",
-        "party_name": "Party name consistency",
-        "cross_reference": "Cross-reference wording",
-        "schedule_table": "Schedule/table wording",
-        "style_format": "Style and format",
-    }.get(issue_type, "Translation QA candidate")
-    anchor = suggestion or current or source or finding
-    return f"{label}: {_short(anchor, 80)}"
-
-
-def _learning_rule_text(
-    issue_type: str,
-    source: str,
-    current: str,
-    suggestion: str,
-    finding: str,
-    auto_active: bool,
-) -> str:
-    prefix = "Reusable low-risk rule" if auto_active else "Candidate rule requiring human review"
-    if current and suggestion:
-        return f"{prefix}: when encountering `{current}`, prefer `{suggestion}`. Rationale: {finding}"
-    if source and suggestion:
-        return f"{prefix}: translate/source `{source}` as `{suggestion}` where context matches. Rationale: {finding}"
-    return f"{prefix}: {suggestion or finding}"
-
-
-def _dedupe_candidates(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    result: list[dict[str, Any]] = []
-    seen = set()
-    for item in candidates:
-        key = item["rule_key"]
-        if key in seen:
-            continue
-        seen.add(key)
-        result.append(item)
-    return result
-
-
-def _norm_for_key(value: str) -> str:
-    return re.sub(r"\s+", " ", value.lower()).strip()[:240]
-
-
-def _short(value: str, limit: int) -> str:
-    text = re.sub(r"\s+", " ", str(value or "")).strip()
-    if len(text) <= limit:
-        return text
-    return text[: limit - 1] + "…"
+    return _generic_learning_candidates_from_findings(
+        findings,
+        workflow_type="translation_quality_review",
+    )
 
 
 def _export_learning_sop(*, workflow_type: str, scope: str, db) -> str | None:
-    try:
-        from hermes_constants import get_hermes_home
-
-        out_dir = get_hermes_home() / "workflow-learning"
-        out_dir.mkdir(parents=True, exist_ok=True)
-        out_path = out_dir / f"{workflow_type}.{scope}.md"
-        active = db.list_workflow_learning_rules(
-            workflow_type=workflow_type,
-            scope=scope,
-            status="active",
-            limit=500,
-        )
-        candidates = db.list_workflow_learning_rules(
-            workflow_type=workflow_type,
-            scope=scope,
-            status="candidate",
-            limit=200,
-        )
-        out_path.write_text(
-            _learning_sop_markdown(workflow_type, scope, active, candidates),
-            encoding="utf-8",
-        )
-        return str(out_path)
-    except Exception:
-        return None
+    return _generic_export_learning_sop(workflow_type=workflow_type, scope=scope, db=db)
 
 
 def _learning_sop_markdown(
@@ -726,33 +517,7 @@ def _learning_sop_markdown(
     active: list[dict[str, Any]],
     candidates: list[dict[str, Any]],
 ) -> str:
-    lines = [
-        f"# Workflow Learning SOP: {workflow_type}",
-        "",
-        f"Scope: `{scope}`",
-        "",
-        "This file is generated from workflow learning rules. Active low-risk rules are loaded automatically; candidate rules require review.",
-        "",
-        "## Active Rules",
-        "",
-    ]
-    if not active:
-        lines.append("_No active learned rules yet._")
-    for item in active:
-        lines.append(
-            f"- **{_md(item.get('title'))}** [{_md(item.get('category'))}; seen {item.get('hit_count') or 1}x]\n"
-            f"  {_md(item.get('rule_text'))}"
-        )
-    lines.extend(["", "## Candidate Rules", ""])
-    if not candidates:
-        lines.append("_No candidate rules pending review._")
-    for item in candidates:
-        lines.append(
-            f"- **{_md(item.get('title'))}** [{_md(item.get('category'))}; id `{item.get('id')}`]\n"
-            f"  {_md(item.get('rule_text'))}"
-        )
-    lines.append("")
-    return "\n".join(lines)
+    return _generic_learning_sop_markdown(workflow_type, scope, active, candidates)
 
 
 def _normalize_findings(raw: Any) -> list[dict[str, Any]]:

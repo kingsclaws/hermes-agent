@@ -10,6 +10,11 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
 from tools.delegate_tool import delegate_task
+from tools.legal_workflow_learning import (
+    format_learning_rules,
+    learn_from_findings,
+    scorecard_findings,
+)
 from tools.project_management_tool import resolve_selected_project
 from tools.registry import registry, tool_error
 
@@ -106,7 +111,7 @@ LEGAL_ORCHESTRATE_SCHEMA = {
             },
             "workflow_type": {
                 "type": "string",
-                "enum": ["contract_revision", "document_drafting", "translation_quality_review", "proofread_review"],
+                "enum": ["contract_revision", "document_drafting", "translation_quality_review", "proofread_review", "project_init", "delivery_gate"],
                 "description": "Workflow template to create when task_type=plan.",
             },
             "document_path": {
@@ -235,6 +240,7 @@ def _load_project_context(project_root: Path) -> str:
     pieces: List[str] = []
     for path in (
         project_root / ".hermes-project" / "project-context.md",
+        project_root / ".hermes-project" / "memories" / "project_facts.md",
         project_root / "STANDARDS.md",
         project_root / "AGENTS.md",
     ):
@@ -249,7 +255,6 @@ def _load_project_context(project_root: Path) -> str:
 def _workflow_learning_context(workflow_type: str, learning_scope: str = "global") -> str:
     try:
         from hermes_state import SessionDB
-        from tools.lex_translation_review_tool import _format_learning_rules
 
         rules = SessionDB().list_workflow_learning_rules(
             workflow_type=workflow_type,
@@ -257,7 +262,7 @@ def _workflow_learning_context(workflow_type: str, learning_scope: str = "global
             status="active",
             limit=80,
         )
-        return _format_learning_rules(rules)
+        return format_learning_rules(rules)
     except Exception:
         return ""
 
@@ -271,19 +276,18 @@ def _learn_from_review_findings(
     enabled: bool,
 ) -> Dict[str, Any]:
     if not enabled:
-        return {"enabled": False, "candidates": [], "active_rules": [], "candidate_rules": []}
+        return {"enabled": False, "findings": findings, "candidates": [], "active_rules": [], "candidate_rules": []}
     try:
-        from tools.lex_translation_review_tool import _learn_from_findings
-
-        return _learn_from_findings(
+        return learn_from_findings(
             findings=findings,
             workflow_type=workflow_type,
             scope=learning_scope,
             run_id=None,
             document_path=document_path,
+            enabled=True,
         )
     except Exception as exc:
-        return {"enabled": True, "error": str(exc), "candidates": []}
+        return {"enabled": True, "error": str(exc), "findings": findings, "candidates": []}
 
 
 def _resolve_path_like(value: Optional[str], *, project_root: Path) -> Optional[str]:
@@ -443,6 +447,8 @@ def _run_scorecard_gate(
     document_path: str | None,
     workflow_id: str,
     run_id: str | None,
+    learning_scope: str,
+    enable_learning: bool,
     payload: Dict[str, Any],
 ) -> Dict[str, Any]:
     """Run legal_scorecard as a programmatic gate and merge results into payload.
@@ -475,6 +481,16 @@ def _run_scorecard_gate(
                 f"Scorecard gate failed [{len(sc.get('failures', []))} failure(s)]: {failures_desc}"
             )
             payload["verification_report"] = report
+            gate_findings = scorecard_findings(sc, document_path=document_path)
+            payload["gate_findings"] = gate_findings
+            payload["gate_learning"] = learn_from_findings(
+                findings=gate_findings,
+                workflow_type="delivery_gate",
+                scope=learning_scope,
+                run_id=run_id,
+                document_path=document_path,
+                enabled=enable_learning,
+            )
     except Exception as exc:
         payload["scorecard"] = {
             "ok": False,
@@ -1463,6 +1479,8 @@ def _handle_legal_orchestrate(args: dict, **kwargs) -> str:
             document_path=document_path,
             workflow_id="full_review",
             run_id=review_run_id,
+            learning_scope=learning_scope,
+            enable_learning=enable_learning,
             payload={
                 "document_path": document_path,
                 "findings": findings,
@@ -1544,6 +1562,8 @@ def _handle_legal_orchestrate(args: dict, **kwargs) -> str:
             document_path=document_path,
             workflow_id="contract_revision",
             run_id=run_id,
+            learning_scope=learning_scope,
+            enable_learning=enable_learning,
             payload=result,
         )
         return _tool_ok(result)
@@ -1654,6 +1674,8 @@ def _handle_legal_orchestrate(args: dict, **kwargs) -> str:
                     document_path=document_path,
                     workflow_id="contract_revision",
                     run_id=run_id,
+                    learning_scope=learning_scope,
+                    enable_learning=enable_learning,
                     payload=result,
                 )
                 return _tool_ok(result)
@@ -1732,6 +1754,8 @@ def _handle_legal_orchestrate(args: dict, **kwargs) -> str:
             document_path=document_path,
             workflow_id=learning_workflow_type,
             run_id=delegated.get("run_id") if isinstance(delegated, dict) else None,
+            learning_scope=learning_scope,
+            enable_learning=enable_learning,
             payload={
                 "document_path": document_path,
                 "findings": findings,
@@ -1775,6 +1799,8 @@ def _handle_legal_orchestrate(args: dict, **kwargs) -> str:
         document_path=document_path,
         workflow_id=learning_workflow_type,
         run_id=delegated.get("run_id") if isinstance(delegated, dict) else None,
+        learning_scope=learning_scope,
+        enable_learning=enable_learning,
         payload=payload,
     )
     return _tool_ok(payload)

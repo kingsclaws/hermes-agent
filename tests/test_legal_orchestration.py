@@ -257,6 +257,8 @@ def test_scorecard_gate_blocks_failed_scorecard(tmp_path, monkeypatch):
         document_path="agreement.docx",
         workflow_id="full_review",
         run_id="run-1",
+        learning_scope="global",
+        enable_learning=True,
         payload={"status": "completed", "verification_passed": True},
     )
 
@@ -264,6 +266,31 @@ def test_scorecard_gate_blocks_failed_scorecard(tmp_path, monkeypatch):
     assert payload["verification_passed"] is False
     assert payload["scorecard"]["ok"] is False
     assert "No review plan found." in payload["verification_report"][0]
+    assert payload["gate_learning"]["enabled"] is True
+
+
+def test_scorecard_gate_emits_delivery_gate_learning(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "hermes_cli.project_commands.legal_scorecard",
+        lambda *args, **kwargs: {
+            "ok": False,
+            "status": "failed",
+            "failures": [{"check": "report_paths", "message": "Missing html/docx report paths."}],
+        },
+    )
+
+    payload = _run_scorecard_gate(
+        tmp_path,
+        document_path="agreement.docx",
+        workflow_id="full_review",
+        run_id="run-2",
+        learning_scope="global",
+        enable_learning=True,
+        payload={"status": "completed", "verification_passed": True},
+    )
+
+    assert payload["gate_findings"][0]["issue_type"] == "delivery_artifact"
+    assert payload["gate_learning"]["findings"][0]["title"] == "Delivery gate: report_paths"
 
 
 def test_scorecard_gate_fails_closed_on_exception(tmp_path, monkeypatch):
@@ -277,6 +304,8 @@ def test_scorecard_gate_fails_closed_on_exception(tmp_path, monkeypatch):
         document_path="agreement.docx",
         workflow_id="contract_revision",
         run_id="run-2",
+        learning_scope="global",
+        enable_learning=True,
         payload={"status": "completed", "verification_passed": True},
     )
 

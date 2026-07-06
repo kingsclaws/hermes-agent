@@ -150,3 +150,17 @@ def test_project_source_digest_records_db_and_mirror(tmp_path, monkeypatch):
     updated_source = db.get_project_source(project_id=project_id, source_id=source["id"])
     assert updated_source["read_status"] == "digested"
     assert Path(out["mirror_path"]).is_file()
+    assert out["init_learning"]["enabled"] is True
+    assert out["fact_updates"]
+
+    rules = db.list_workflow_learning_rules(
+        workflow_type="project_init",
+        scope="project",
+        limit=20,
+    )
+    assert any(rule["category"] == "verification" for rule in rules)
+    from hermes_cli.project_commands import project_facts
+
+    fact_list = project_facts(str(project_dir), "list", category="init_reading")
+    assert fact_list["ok"] is True
+    assert any(item["key"].endswith(".read_method") for item in fact_list["facts"])
