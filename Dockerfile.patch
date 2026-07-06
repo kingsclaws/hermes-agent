@@ -56,6 +56,7 @@ RUN set -e; \
     cp tools/memory_tool.py /opt/hermes/tools/memory_tool.py; \
     cp tools/skills_hub.py /opt/hermes/tools/skills_hub.py; \
     cp tools/lexitool_tool.py /opt/hermes/tools/lexitool_tool.py; \
+    cp tools/legal_workflow_learning.py /opt/hermes/tools/legal_workflow_learning.py; \
     cp tools/project_management_tool.py /opt/hermes/tools/project_management_tool.py; \
     cp tools/legal_orchestration_tool.py /opt/hermes/tools/legal_orchestration_tool.py; \
     cp tools/legal_workflow_tool.py /opt/hermes/tools/legal_workflow_tool.py; \
@@ -131,6 +132,7 @@ RUN set -e; \
     cp tools/memory_tool.py /opt/lex-hermes/tools/memory_tool.py; \
     cp tools/skills_hub.py /opt/lex-hermes/tools/skills_hub.py; \
     cp tools/lexitool_tool.py /opt/lex-hermes/tools/lexitool_tool.py; \
+    cp tools/legal_workflow_learning.py /opt/lex-hermes/tools/legal_workflow_learning.py; \
     cp tools/project_management_tool.py /opt/lex-hermes/tools/project_management_tool.py; \
     cp tools/legal_orchestration_tool.py /opt/lex-hermes/tools/legal_orchestration_tool.py; \
     cp tools/legal_workflow_tool.py /opt/lex-hermes/tools/legal_workflow_tool.py; \
@@ -218,6 +220,8 @@ RUN set -e; \
     cp tests/test_project_binding.py /opt/lex-hermes/tests/test_project_binding.py; \
     cp tests/test_legal_orchestration.py /opt/hermes/tests/test_legal_orchestration.py; \
     cp tests/test_legal_orchestration.py /opt/lex-hermes/tests/test_legal_orchestration.py; \
+    cp tests/tools/test_legal_workflow_learning.py /opt/hermes/tests/tools/test_legal_workflow_learning.py; \
+    cp tests/tools/test_legal_workflow_learning.py /opt/lex-hermes/tests/tools/test_legal_workflow_learning.py; \
     cp tests/test_lexitool_ocr_fallback.py /opt/hermes/tests/test_lexitool_ocr_fallback.py; \
     cp tests/test_lexitool_ocr_fallback.py /opt/lex-hermes/tests/test_lexitool_ocr_fallback.py; \
     cp tests/tools/test_memory_tool.py /opt/hermes/tests/tools/test_memory_tool.py; \
