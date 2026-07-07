@@ -1284,3 +1284,140 @@ class GatewayKanbanWatchersMixin:
 
         _release_singleton_lock(self._kanban_dispatcher_lock_handle)
         self._kanban_dispatcher_lock_handle = None
+
+    # ── Lex-Hermes: Coordinator session wake for kanban events ──────────
+    # These methods inject synthetic turns into coordinator sessions when
+    # kanban tasks reach terminal states. This enables non-blocking
+    # dispatch: the coordinator fires off tasks and gets woken up when
+    # they complete, rather than polling.
+
+    def _resolve_coordinator_wake_source(
+        self,
+        session_id: str,
+        *,
+        prefix: str,
+    ):
+        """Return a routing source bound to an existing coordinator session.
+
+        Gateway-hosted messaging sessions already have a SessionEntry whose
+        origin can be reused. CLI/TUI/WebUI coordinator sessions often are not
+        hosted by this gateway process, though their kanban task still records
+        ``session_id``. In that case create a private local wake channel and
+        switch it to the target session ID, mirroring /resume/handoff.
+        """
+        from gateway.session import SessionSource
+        from gateway.platforms.base import Platform
+
+        store = getattr(self, "session_store", None)
+        if store is None:
+            logger.debug("%s: no session_store for %s", prefix, session_id)
+            return None
+
+        try:
+            store._ensure_loaded()
+            with store._lock:  # noqa: SLF001
+                for entry in store._entries.values():  # noqa: SLF001
+                    if getattr(entry, "session_id", None) == session_id:
+                        source = getattr(entry, "origin", None)
+                        if source is not None:
+                            return source
+                        break
+        except Exception as exc:
+            logger.debug("%s: store lookup failed for %s: %s", prefix, session_id, exc)
+            return None
+
+        source = SessionSource(
+            platform=Platform.LOCAL,
+            chat_id=f"kanban-wake:{session_id}",
+            chat_name="Kanban wake",
+            chat_type="dm",
+            user_id="kanban",
+            user_name="Kanban",
+        )
+        try:
+            entry = store.get_or_create_session(source)
+            session_key = getattr(entry, "session_key", None)
+            if not session_key:
+                session_key = store._generate_session_key(source)  # noqa: SLF001
+            switched = store.switch_session(session_key, session_id)
+        except Exception as exc:
+            logger.debug("%s: fallback bind failed for %s: %s", prefix, session_id, exc)
+            return None
+        if switched is None:
+            logger.debug("%s: fallback bind returned no entry for %s", prefix, session_id)
+            return None
+        return getattr(switched, "origin", None) or source
+
+    async def _inject_kanban_session_wake(
+        self,
+        *,
+        event,
+        task,
+        session_id: str,
+        board: str = None,
+    ) -> None:
+        """Inject a synthetic Coordinator turn for a kanban terminal event."""
+        if not session_id:
+            return
+        source = self._resolve_coordinator_wake_source(
+            session_id, prefix="kanban session-wake",
+        )
+        if source is None:
+            logger.debug("kanban session-wake: cannot resolve session %s", session_id)
+            return
+
+        from gateway.platforms.base import MessageEvent, MessageType
+
+        kind = getattr(event, "kind", None) or (event.get("kind") if isinstance(event, dict) else "")
+        payload = getattr(event, "payload", None) or (event.get("payload") if isinstance(event, dict) else {}) or {}
+        task_id = getattr(task, "id", "") or (task.get("id") if isinstance(task, dict) else "")
+        title = getattr(task, "title", "") or (task.get("title") if isinstance(task, dict) else "") or task_id
+        status = getattr(task, "status", "") or (task.get("status") if isinstance(task, dict) else "")
+        project_path = (
+            getattr(task, "workspace_path", "")
+            or (task.get("workspace_path") if isinstance(task, dict) else "")
+            or ""
+        )
+
+        if kind == "completed":
+            reason = "已完成（done）"
+            detail = str(payload.get("summary") or "").strip()
+            action = (
+                f'请运行 swarm_task_collect(task_id="{task_id}", project_path="{project_path}") '
+                "收集 Worker 产物、核对 Evidence Ledger，并向用户汇报结果。"
+            )
+        elif kind == "blocked":
+            reason_text = str(payload.get("reason") or "").strip()
+            reason = f"被阻塞（blocked）{': ' + reason_text if reason_text else ''}"
+            detail = reason_text
+            action = (
+                f'请运行 swarm_task_collect(task_id="{task_id}", project_path="{project_path}") '
+                "查看阻塞原因，向用户汇报并给出下一步建议。"
+            )
+        elif kind in {"gave_up", "crashed", "timed_out"}:
+            reason = {"gave_up": "多次启动失败后放弃", "crashed": "worker 进程崩溃", "timed_out": "worker 超时"}.get(kind, kind)
+            detail = str(payload.get("error") or payload.get("reason") or "").strip()
+            action = (
+                f'请运行 swarm_task_collect(task_id="{task_id}", project_path="{project_path}") '
+                "查看运行历史，决定是否重新分派或向用户请求人工处理。"
+            )
+        else:
+            return
+
+        synth_text = (
+            f"[kanban 自动通知] 任务 {task_id}（{title}）{reason}。\n"
+            f"Board: {board or ''}；状态: {status or kind}。\n"
+            + (f"摘要: {detail[:500]}\n" if detail else "")
+            + action
+        )
+        synth_event = MessageEvent(
+            text=synth_text,
+            message_type=MessageType.TEXT,
+            source=source,
+            internal=True,
+        )
+        logger.info(
+            "kanban session-wake: injecting turn for task %s (%s) into session %s",
+            task_id, kind, session_id,
+        )
+        await self._handle_message(synth_event)
