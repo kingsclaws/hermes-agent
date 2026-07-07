@@ -62,6 +62,23 @@ _TOOLSET_DEFINITIONS = {
         ],
         "includes": [],
     },
+    "lex-docx-worker": {
+        "description": "Full read-write legal document tools for worker sub-agents (Drafter, Reviewer). Includes lex_edit, lex_format, execute_code.",
+        "tools": [
+            "lex_read", "lex_scan", "lex_revision_guard", "lex_stats", "lex_table_list", "lex_edit", "lex_tc", "lex_format",
+            "lex_comment", "lex_list", "lex_ref", "lex_section", "lex_doc", "lex_clause",
+            "lex_corpus", "lex_ocr", "lex_project_init", "lex_diff", "lex_xref_audit",
+            "lex_deliver", "lex_gate_check", "lex_git", "project_facts",
+            "lex_convention_profile", "legal_review_plan", "edit_verification_record",
+            "lex_proofread", "lex_template_audit", "lex_template_fill",
+            "lex_translation_review", "lex_review_workflow", "lex_verify_edits",
+            "legal_harness_migrate", "legal_harness_workflow", "legal_handoff_record",
+            "legal_scorecard", "update_project_state", "get_project_state", "refine_goal",
+            "project_add_task", "project_list_tasks", "project_update_task",
+            "project_delete_task", "lex_heal", "execute_code",
+        ],
+        "includes": ["kanban_swarm"],
+    },
     "lex-docx-coordinator": {
         "description": "Lex DOCX tools plus coordination tools for project coordinators",
         "tools": [
