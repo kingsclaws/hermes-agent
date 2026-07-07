@@ -244,7 +244,7 @@ LEX_READ_SCHEMA = {
             },
             "show_format": {
                 "type": "boolean",
-                "description": "Include format tags. Set false for plain text. Default: true.",
+                "description": "Include format tags ([b], [font:...], etc.). Default: false for lightweight reads. Set true when you need to inspect formatting details.",
             },
             "include_headers_footers": {
                 "type": "boolean",
@@ -281,7 +281,7 @@ def _handle_read(args: dict, **kwargs) -> str:
         paras=args.get("paras"),
         mode=args.get("mode", "full"),
         show_tc=show_tc,
-        show_format=args.get("show_format", True),
+        show_format=args.get("show_format", False),
         include_headers_footers=args.get("include_headers_footers", True),
         include_comments=args.get("include_comments", False),
     )
