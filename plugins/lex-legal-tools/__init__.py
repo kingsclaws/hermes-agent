@@ -44,6 +44,8 @@ _TOOL_MODULES = [
     "tools.kanban_toolset",
     # Research
     "tools.research_tool",
+    # Preview
+    "tools.lex_preview_tool",
 ]
 
 # Toolsets to register via auto_register_toolset
