@@ -26,7 +26,6 @@ logger = logging.getLogger(__name__)
 # the standard registry.register() pattern at module level.
 _TOOL_MODULES = [
     # Lexitool core
-    "tools.lex_docx_tool",
     "tools.lex_heal_tool",
     "tools.lex_proofread_tool",
     "tools.lex_template_tool",
