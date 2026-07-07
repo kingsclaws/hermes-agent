@@ -826,6 +826,22 @@ def compress_context(
                         migrate_goal_to_session(old_session_id, agent.session_id, reason="compression")
                     except Exception as _goal_err:
                         logger.debug("Could not migrate goal on compression: %s", _goal_err)
+                    # Propagate coordinator_for binding (survives compression)
+                    try:
+                        if old_session_id and agent._session_db:
+                            _old = agent._session_db.get_session(old_session_id)
+                            _coordinator_for = (_old or {}).get("coordinator_for")
+                            if _coordinator_for:
+                                import sqlite3 as _sql
+                                _conn = _sql.connect(str(agent._session_db._db_path))
+                                _conn.execute(
+                                    "UPDATE sessions SET coordinator_for = ? WHERE id = ?",
+                                    (_coordinator_for, agent.session_id),
+                                )
+                                _conn.commit()
+                                _conn.close()
+                    except Exception:
+                        pass
                     # Auto-number the title for the continuation session
                     if old_title:
                         try:
