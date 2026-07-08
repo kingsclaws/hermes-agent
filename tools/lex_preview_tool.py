@@ -99,6 +99,151 @@ def _check_pandoc() -> bool:
         return False
 
 
+def _extract_format_map(docx_path: str) -> dict:
+    """Extract per-paragraph formatting from docx XML.
+
+    Returns {para_index: {"font": str, "size_pt": float, "bold": bool,
+    "italic": bool, "line_spacing": str, "alignment": str}} for paragraphs
+    that have explicit formatting.
+    """
+    import zipfile
+    from lxml import etree
+
+    W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+    fmt_map = {}
+
+    try:
+        with zipfile.ZipFile(docx_path) as zf:
+            doc_xml = zf.read("word/document.xml")
+            root = etree.fromstring(doc_xml)
+            body = root.find(f"{W}body")
+            paras = [c for c in body if c.tag == f"{W}p"]
+
+            # Also read styles.xml for default font
+            try:
+                styles_xml = zf.read("word/styles.xml")
+                sroot = etree.fromstring(styles_xml)
+                defaults = sroot.find(f"{W}docDefaults")
+                default_font = ""
+                default_size = 0
+                if defaults is not None:
+                    rprd = defaults.find(f".//{W}rPr")
+                    if rprd is not None:
+                        rf = rprd.find(f"{W}rFonts")
+                        if rf is not None:
+                            default_font = rf.get(f"{W}eastAsia", "") or rf.get(f"{W}ascii", "")
+                        sz = rprd.find(f"{W}sz")
+                        if sz is not None:
+                            default_size = int(sz.get(f"{W}val", 0)) / 2  # half-points to points
+            except Exception:
+                default_font = ""
+                default_size = 0
+
+            for pi, p in enumerate(paras):
+                # Get paragraph-level formatting
+                ppr = p.find(f"{W}pPr")
+                alignment = ""
+                line_spacing = ""
+                if ppr is not None:
+                    jc = ppr.find(f"{W}jc")
+                    if jc is not None:
+                        alignment = jc.get(f"{W}val", "")
+                    spacing = ppr.find(f"{W}spacing")
+                    if spacing is not None:
+                        line_val = spacing.get(f"{W}line", "")
+                        if line_val:
+                            try:
+                                # twips to px (1 twip = 1/20 pt, 1pt = 1.333px)
+                                line_spacing = f"{int(line_val) / 20 * 1.333:.1f}px"
+                            except ValueError:
+                                pass
+
+                # Get run-level formatting from first run with text
+                font = ""
+                size_pt = 0
+                bold = False
+                italic = False
+                for r in p.findall(f"{W}r"):
+                    t = r.find(f"{W}t")
+                    if t is not None and t.text:
+                        rpr = r.find(f"{W}rPr")
+                        if rpr is not None:
+                            rf = rpr.find(f"{W}rFonts")
+                            if rf is not None:
+                                font = rf.get(f"{W}eastAsia", "") or rf.get(f"{W}ascii", "")
+                            sz = rpr.find(f"{W}sz")
+                            if sz is not None:
+                                size_pt = int(sz.get(f"{W}val", 0)) / 2
+                            b = rpr.find(f"{W}b")
+                            bold = b is not None
+                            i = rpr.find(f"{W}i")
+                            italic = i is not None
+                        break
+
+                if font or size_pt or bold or italic or line_spacing or alignment:
+                    fmt_map[pi] = {
+                        "font": font or default_font,
+                        "size_pt": size_pt or default_size,
+                        "bold": bold,
+                        "italic": italic,
+                        "line_spacing": line_spacing,
+                        "alignment": alignment,
+                    }
+    except Exception:
+        pass
+
+    return fmt_map
+
+
+def _inject_format_styles(html: str, fmt_map: dict) -> str:
+    """Inject inline CSS styles into HTML paragraphs based on format map."""
+    import re
+
+    if not fmt_map:
+        return html
+
+    # Match <p> tags and inject styles
+    para_idx = 0
+    def _replace_para(match):
+        nonlocal para_idx
+        tag = match.group(0)
+        idx = para_idx
+        para_idx += 1
+
+        fmt = fmt_map.get(idx)
+        if not fmt:
+            return tag
+
+        styles = []
+        if fmt.get("font"):
+            styles.append(f"font-family: '{fmt['font']}', serif")
+        if fmt.get("size_pt") and fmt["size_pt"] > 0:
+            styles.append(f"font-size: {fmt['size_pt']:.1f}pt")
+        if fmt.get("bold"):
+            styles.append("font-weight: bold")
+        if fmt.get("italic"):
+            styles.append("font-style: italic")
+        if fmt.get("line_spacing"):
+            styles.append(f"line-height: {fmt['line_spacing']}")
+        if fmt.get("alignment"):
+            align_map = {"center": "center", "right": "right", "both": "justify"}
+            if fmt["alignment"] in align_map:
+                styles.append(f"text-align: {align_map[fmt['alignment']]}")
+
+        if not styles:
+            return tag
+
+        style_str = "; ".join(styles)
+        # Insert style attribute into <p> tag
+        if 'style="' in tag:
+            return tag.replace('style="', f'style="{style_str}; ')
+        else:
+            return tag.replace("<p", f'<p style="{style_str}"', 1)
+
+    html = re.sub(r"<p[^>]*>", _replace_para, html)
+    return html
+
+
 def _handle_preview(args: dict, **kwargs) -> str:
     path = args.get("path", "").strip()
     if not path:
@@ -120,6 +265,9 @@ def _handle_preview(args: dict, **kwargs) -> str:
 
     tc_mode = args.get("track_changes", "all")
     output_path = args.get("output", "").strip()
+
+    # Extract formatting from docx XML
+    fmt_map = _extract_format_map(path)
 
     # Build pandoc command
     cmd = [
@@ -144,6 +292,9 @@ def _handle_preview(args: dict, **kwargs) -> str:
             })
 
         html = result.stdout
+
+        # Inject format styles from docx XML
+        html = _inject_format_styles(html, fmt_map)
 
         # Inject our CSS (pandoc's --self-contained includes its own style,
         # but we want our TC styling to take precedence)
