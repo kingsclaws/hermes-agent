@@ -70,15 +70,59 @@ Coordinator 读到大纲后，拆成 3-5 块：
 - 识别需要修改的段落
 - 生成修订计划
 
-### Phase 3: 文本润色
+### Phase 3: 文本润色确认（grill-me）
 
-在注入内容之前，先润色模板文本：
+**不自动润色 — 先跟你确认。**
 
-- 统一术语（如 "甲方"/"乙方"/"丙方" 统一）
+Coordinator 读完 reader 摘要后，生成结构化问题清单，每个问题带建议答案：
+
+```
+## 润色确认清单
+
+### 术语选择
+1. §6 "丙方" → 用简称还是全称？
+   建议：正文用"丙方"，附件用全称。
+   你的选择？
+
+### 格式偏好
+2. 正文字体：宋体还是仿宋？
+   建议：宋体 22pt（合同常用）。
+   你的选择？
+
+### 风险提示
+3. §15 "其他法律咨询服务" 为开放式兜底
+   建议：限定为"就本次银团贷款的相关事项"。
+   你的选择？
+
+### 金额校验
+4. 费用 70,000 元，是否正确？
+```
+
+**设计原则：**
+- 一次一个问题，不一次抛多个
+- Agent 先猜再问 — 能推断的不问，只问真正需要确认的
+- 给建议选项，不是开放问题
+- 你随意回答，Agent 负责精确化：
+  - "用简称" → "丙方"
+  - "太宽了" → "限定服务范围为本次银团贷款相关事项"
+  - "默认" → "宋体 22pt，保持原文格式"
+  - "金额对的" → 确认 70,000 元
+  - "删掉" → Agent 判断是删除空段落还是多余条款
+- 回答后 Agent 确认："好的，按你的意思：丙方用简称，已确认。"
+
+**输出：** `confirmed_revision_plan` — 结构化的修订计划
+
+**工具：** `clarify`（hermes 的问答工具）
+
+### Phase 4: 文本润色执行
+
+根据确认后的修订计划，执行润色：
+
+- 统一术语（"丙方" → 统一简称）
 - 修正错别字
 - 清理空段落
 - 统一格式（字体、字号、行间距）
-- 删除无用的占位符
+- 删除无用的占位符（`【/】`、`【 】`）
 
 **工具：** `lex_edit(tc=True, author="JT")`
 
@@ -117,8 +161,25 @@ Coordinator 读到大纲后，拆成 3-5 块：
 在 `legal_workflow_tool.py` 的 `_default_document_drafting_workflow_steps()` 中：
 
 1. 将 `read-template-structure` 改为 `split-read-phase`
-2. 新增 `text-polish` 步骤（在 drafting 之前）
-3. 重新排序依赖关系
+2. 新增 `text-polish-confirm` 步骤（grill-me 确认）
+3. 新增 `text-polish-execute` 步骤（执行润色）
+4. 重新排序依赖关系
+
+### Step 2: 创建 coordinator 交接 skill
+
+在 `skills/lex-workflow-coordinator/SKILL.md` 中定义 coordinator 的交接协议：
+
+- split-read 时，按标题分块发布 kanban 任务
+- 收到 reader 摘要后，生成 grill-me 问题清单
+- 你回答后，把回答精确化为修订计划
+- 修订计划确认后，执行润色 + 注入
+
+### Step 3: 添加 lex-reader profile
+
+在 `profiles/lex-reader.soul.md` 中定义 reader 角色：
+- 只负责读取和输出结构化摘要
+- 不做任何修改
+- 输出格式固定
 
 ### Step 2: 添加 lex-reader profile
 
