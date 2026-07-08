@@ -11,13 +11,30 @@ Date: 2026-07-07
 
 ## 优化后的 workflow
 
+**两条路径，根据文档复杂度选择：**
+
+| 文档类型 | 流程 | Token 效率 |
+|---------|------|-----------|
+| 复杂文档（100+ 段） | 结构扫描 → split-read → grill-me → clean inject → quicompare | ~4500 tokens/轮 |
+| 简单文档（<50 段） | 直接 TC 注入 | ~2000 tokens/轮 |
+
+### 复杂文档路径
 ```
 1. 结构扫描（轻量）
-2. Split-read（并行）
-3. 文本润色
-4. 内容注入
-5. 校对
-6. 交付
+2. Split-read（并行 kanban）
+3. 文本润色确认（grill-me）
+4. 文本润色执行（精确修改）
+5. 内容注入（clean inject）
+6. 对比验证（quicompare）
+7. 校对（lex_preview）
+8. 交付
+```
+
+### 简单文档路径
+```
+1. 直接 TC 注入（insert_text/replace_text/delete_text）
+2. 校对（lex_preview）
+3. 交付
 ```
 
 ### Phase 1: 结构扫描（轻量）
@@ -203,10 +220,30 @@ Coordinator 读完 reader 摘要后，生成结构化问题清单，每个问题
 - **Kanban 开销**：每块一个 task，小文档可能不值得
 - **Coordinator 聚合**：需要在 context 里放多个摘要，仍有开销
 
+## TC 注入可靠性保证
+
+TC 注入必须满足以下标准：
+
+| 操作 | 要求 |
+|------|------|
+| `insert_text(tc=True)` | 插入标记有 `author` + `date`，Word 正常显示 |
+| `replace_text(tc=True)` | 原文标记为删除，新文标记为插入，Word 正常显示 |
+| `delete_text(tc=True)` | 删除标记完整，Word 正常显示 |
+| `insert_paragraph_block(tc=True)` | 批量插入完整，段落顺序正确 |
+| 不产生空标签 | `_clean_empty_tc_markers` 自动清理 |
+
+**测试用例：**
+- [ ] 插入 10 个字符，验证 TC 标记
+- [ ] 替换一段话，验证删除+插入标记
+- [ ] 删除一个段落，验证删除标记
+- [ ] 批量插入 3 段，验证段落顺序
+- [ ] 所有操作后 Word 正常打开（无"发现无法读取的内容"）
+
 ## 完成标准
 
 - [ ] workflow tool 支持 split-read phase
-- [ ] 文本润色在 drafting 之前
-- [ ] 颐保银团文档测试通过
-- [ ] kanban 任务正确创建和完成
-- [ ] coordinator 能正确聚合 reader 摘要
+- [ ] 文本润色在 drafting 之前（grill-me 确认）
+- [ ] clean inject + quicompare 对比验证
+- [ ] TC 注入可靠性测试通过
+- [ ] 颐保银团文档测试通过（复杂文档路径）
+- [ ] 简单文档测试通过（TC 注入路径）
