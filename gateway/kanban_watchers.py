@@ -19,6 +19,9 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 from agent.i18n import t
+from gateway.config import Platform
+from gateway.session import SessionSource
+from gateway.platforms.base import MessageEvent, MessageType
 
 # Match the logger run.py uses (logging.getLogger(__name__) where __name__ ==
 # "gateway.run") so extracted log records keep their original logger name.
@@ -321,7 +324,11 @@ class GatewayKanbanWatchersMixin:
                     # exists to fix). The helper returns None only when the profile
                     # (or default) genuinely has no adapter for the platform.
                     adapter = self._authorization_adapter(plat, sub_profile or None)
-                    if adapter is None:
+                    # For CLI/TUI sessions, there's no adapter in self.adapters.
+                    # Instead of rewinding, we'll try to inject wake messages
+                    # directly via self._handle_message().
+                    _is_cli_tui = plat in (Platform.LOCAL,)
+                    if adapter is None and not _is_cli_tui:
                         logger.debug(
                             "kanban notifier: adapter %s disconnected before delivery for %s; rewinding claim",
                             platform_str, sub["task_id"],
@@ -412,59 +419,68 @@ class GatewayKanbanWatchersMixin:
                             sub["task_id"], sub["platform"],
                             sub["chat_id"], sub.get("thread_id") or "",
                         )
-                        try:
-                            await adapter.send(
-                                sub["chat_id"], msg, metadata=metadata,
-                            )
+                        # For CLI/TUI sessions, skip notification delivery
+                        # (no adapter to send through). Wake injection below
+                        # will handle it via self._handle_message().
+                        if adapter is None:
                             logger.debug(
-                                "kanban notifier: delivered %s event for %s to %s/%s on board %s",
-                                kind, sub["task_id"], platform_str, sub["chat_id"], board_slug,
+                                "kanban notifier: skipping notification delivery for %s on %s (CLI/TUI session)",
+                                sub["task_id"], platform_str,
                             )
-                            # After delivering the text notification, surface
-                            # any artifact paths the worker referenced in
-                            # ``kanban_complete(summary=..., artifacts=[...])``
-                            # (or the legacy ``result`` field) as native
-                            # uploads. ``extract_local_files`` finds bare
-                            # absolute paths in the summary;
-                            # ``send_document`` / ``send_image_file`` uploads
-                            # them. Only fires on the ``completed`` event so
-                            # we never spam attachments on retries.
-                            if kind == "completed":
-                                try:
-                                    await self._deliver_kanban_artifacts(
-                                        adapter=adapter,
-                                        chat_id=sub["chat_id"],
-                                        metadata=metadata,
-                                        event_payload=getattr(ev, "payload", None),
-                                        task=task,
-                                    )
-                                except Exception as art_exc:
-                                    logger.debug(
-                                        "kanban notifier: artifact delivery for %s failed: %s",
-                                        sub["task_id"], art_exc,
-                                    )
-                            # Reset the failure counter on success.
-                            sub_fail_counts.pop(sub_key, None)
-                        except Exception as exc:
-                            fails = sub_fail_counts.get(sub_key, 0) + 1
-                            sub_fail_counts[sub_key] = fails
-                            logger.warning(
-                                "kanban notifier: send failed for %s on %s "
-                                "(attempt %d/%d): %s",
-                                sub["task_id"], platform_str, fails,
-                                MAX_SEND_FAILURES, exc,
-                            )
-                            if fails >= MAX_SEND_FAILURES:
-                                logger.warning(
-                                    "kanban notifier: dropping subscription "
-                                    "%s on %s after %d consecutive send failures",
-                                    sub["task_id"], platform_str, fails,
+                        else:
+                            try:
+                                await adapter.send(
+                                    sub["chat_id"], msg, metadata=metadata,
                                 )
-                                await asyncio.to_thread(self._kanban_unsub, sub, board_slug)
+                                logger.debug(
+                                    "kanban notifier: delivered %s event for %s to %s/%s on board %s",
+                                    kind, sub["task_id"], platform_str, sub["chat_id"], board_slug,
+                                )
+                                # After delivering the text notification, surface
+                                # any artifact paths the worker referenced in
+                                # ``kanban_complete(summary=..., artifacts=[...])``
+                                # (or the legacy ``result`` field) as native
+                                # uploads. ``extract_local_files`` finds bare
+                                # absolute paths in the summary;
+                                # ``send_document`` / ``send_image_file`` uploads
+                                # them. Only fires on the ``completed`` event so
+                                # we never spam attachments on retries.
+                                if kind == "completed":
+                                    try:
+                                        await self._deliver_kanban_artifacts(
+                                            adapter=adapter,
+                                            chat_id=sub["chat_id"],
+                                            metadata=metadata,
+                                            event_payload=getattr(ev, "payload", None),
+                                            task=task,
+                                        )
+                                    except Exception as art_exc:
+                                        logger.debug(
+                                            "kanban notifier: artifact delivery for %s failed: %s",
+                                            sub["task_id"], art_exc,
+                                        )
+                                # Reset the failure counter on success.
                                 sub_fail_counts.pop(sub_key, None)
-                            else:
-                                await asyncio.to_thread(
-                                    self._kanban_rewind,
+                            except Exception as exc:
+                                fails = sub_fail_counts.get(sub_key, 0) + 1
+                                sub_fail_counts[sub_key] = fails
+                                logger.warning(
+                                    "kanban notifier: send failed for %s on %s "
+                                    "(attempt %d/%d): %s",
+                                    sub["task_id"], platform_str, fails,
+                                    MAX_SEND_FAILURES, exc,
+                                )
+                                if fails >= MAX_SEND_FAILURES:
+                                    logger.warning(
+                                        "kanban notifier: dropping subscription "
+                                        "%s on %s after %d consecutive send failures",
+                                        sub["task_id"], platform_str, fails,
+                                    )
+                                    await asyncio.to_thread(self._kanban_unsub, sub, board_slug)
+                                    sub_fail_counts.pop(sub_key, None)
+                                else:
+                                    await asyncio.to_thread(
+                                        self._kanban_rewind,
                                     sub,
                                     d["cursor"],
                                     d.get("old_cursor", 0),
@@ -545,7 +561,12 @@ class GatewayKanbanWatchersMixin:
                                         source=_source,
                                         internal=True,
                                     )
-                                    await adapter.handle_message(_synth_event)
+                                    # For CLI/TUI sessions, use self._handle_message()
+                                    # to inject directly into the session queue.
+                                    if adapter is None:
+                                        await self._handle_message(_synth_event)
+                                    else:
+                                        await adapter.handle_message(_synth_event)
                                     logger.info(
                                         "kanban notifier: woke agent for %s on %s/%s profile=%s events=%s",
                                         sub["task_id"], platform_str, sub["chat_id"], sub_profile or "default", _wake_kinds,
