@@ -28,21 +28,18 @@ RUN set -e; \
     \
     cp vendor/lexitool/lexitool/edit_ops.py /opt/lexitool/lexitool/edit_ops.py; \
     cp vendor/lexitool/lexitool/markup.py /opt/lexitool/lexitool/markup.py; \
-    cp vendor/lexitool/lexitool/ocr.py /opt/lexitool/lexitool/ocr.py; \
     cp vendor/lexitool/lexitool/ocr_cli.py /opt/lexitool/lexitool/ocr_cli.py; \
     cp vendor/lexitool/lexitool/review_detailed.py /opt/lexitool/lexitool/review_detailed.py; \
     
     \
     cp vendor/lexitool/lexitool/edit_ops.py /opt/hermes/vendor/lexitool/lexitool/edit_ops.py; \
     cp vendor/lexitool/lexitool/markup.py /opt/hermes/vendor/lexitool/lexitool/markup.py; \
-    cp vendor/lexitool/lexitool/ocr.py /opt/hermes/vendor/lexitool/lexitool/ocr.py; \
     cp vendor/lexitool/lexitool/ocr_cli.py /opt/hermes/vendor/lexitool/lexitool/ocr_cli.py; \
     cp vendor/lexitool/lexitool/review_detailed.py /opt/hermes/vendor/lexitool/lexitool/review_detailed.py; \
     
     VENV_LEXITOOL=$(/opt/hermes/.venv/bin/python -c 'import pathlib, lexitool; print(pathlib.Path(lexitool.__file__).parent)'); \
     cp vendor/lexitool/lexitool/edit_ops.py "$VENV_LEXITOOL/edit_ops.py"; \
     cp vendor/lexitool/lexitool/markup.py "$VENV_LEXITOOL/markup.py"; \
-    cp vendor/lexitool/lexitool/ocr.py "$VENV_LEXITOOL/ocr.py"; \
     cp vendor/lexitool/lexitool/ocr_cli.py "$VENV_LEXITOOL/ocr_cli.py"; \
     cp vendor/lexitool/lexitool/review_detailed.py "$VENV_LEXITOOL/review_detailed.py"; \
     
