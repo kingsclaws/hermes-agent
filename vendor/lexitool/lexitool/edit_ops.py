@@ -554,7 +554,13 @@ def trim_paragraph(docx_path: str, para: int, *,
 
 
 def _normalize_quotes(text: str) -> str:
-    """将弯引号（Word自动弯引号）标准化为直引号以匹配搜索。"""
+    """将弯引号（Word自动弯引号）标准化为直引号以匹配搜索。
+
+    同时将全角字符标准化为半角ASCII，确保1:1码位映射以支持
+    _locate_replacement_span中的索引保持不变量。
+    """
+    from .tc_utils import _normalize_fullwidth
+    text = _normalize_fullwidth(text)
     return text.replace('\u201c', '\u0022').replace('\u201d', '\u0022').replace('\u2018', '\u0027').replace('\u2019', '\u0027')
 
 
