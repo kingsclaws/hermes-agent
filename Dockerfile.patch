@@ -30,36 +30,23 @@ RUN set -e; \
     cp vendor/lexitool/lexitool/markup.py /opt/lexitool/lexitool/markup.py; \
     cp vendor/lexitool/lexitool/ocr.py /opt/lexitool/lexitool/ocr.py; \
     cp vendor/lexitool/lexitool/ocr_cli.py /opt/lexitool/lexitool/ocr_cli.py; \
-    cp vendor/lexitool/lexitool/openxml_opc.py /opt/lexitool/lexitool/openxml_opc.py; \
     cp vendor/lexitool/lexitool/review_detailed.py /opt/lexitool/lexitool/review_detailed.py; \
-    cp vendor/lexitool/lexitool/tc_utils.py /opt/lexitool/lexitool/tc_utils.py; \
+    
     \
     cp vendor/lexitool/lexitool/edit_ops.py /opt/hermes/vendor/lexitool/lexitool/edit_ops.py; \
     cp vendor/lexitool/lexitool/markup.py /opt/hermes/vendor/lexitool/lexitool/markup.py; \
     cp vendor/lexitool/lexitool/ocr.py /opt/hermes/vendor/lexitool/lexitool/ocr.py; \
     cp vendor/lexitool/lexitool/ocr_cli.py /opt/hermes/vendor/lexitool/lexitool/ocr_cli.py; \
-    cp vendor/lexitool/lexitool/openxml_opc.py /opt/hermes/vendor/lexitool/lexitool/openxml_opc.py; \
     cp vendor/lexitool/lexitool/review_detailed.py /opt/hermes/vendor/lexitool/lexitool/review_detailed.py; \
-    cp vendor/lexitool/lexitool/tc_utils.py /opt/hermes/vendor/lexitool/lexitool/tc_utils.py; \
+    
     VENV_LEXITOOL=$(/opt/hermes/.venv/bin/python -c 'import pathlib, lexitool; print(pathlib.Path(lexitool.__file__).parent)'); \
     cp vendor/lexitool/lexitool/edit_ops.py "$VENV_LEXITOOL/edit_ops.py"; \
     cp vendor/lexitool/lexitool/markup.py "$VENV_LEXITOOL/markup.py"; \
     cp vendor/lexitool/lexitool/ocr.py "$VENV_LEXITOOL/ocr.py"; \
     cp vendor/lexitool/lexitool/ocr_cli.py "$VENV_LEXITOOL/ocr_cli.py"; \
-    cp vendor/lexitool/lexitool/openxml_opc.py "$VENV_LEXITOOL/openxml_opc.py"; \
     cp vendor/lexitool/lexitool/review_detailed.py "$VENV_LEXITOOL/review_detailed.py"; \
-    cp vendor/lexitool/lexitool/tc_utils.py "$VENV_LEXITOOL/tc_utils.py"; \
+    
     \
-    cp tools/kanban_toolset.py /opt/hermes/tools/kanban_toolset.py; \
-    cp tools/kanban_tools.py /opt/hermes/tools/kanban_tools.py; \
-    cp tools/legal_evidence_gate.py /opt/hermes/tools/legal_evidence_gate.py; \
-    cp tools/memory_tool.py /opt/hermes/tools/memory_tool.py; \
-    cp tools/skills_hub.py /opt/hermes/tools/skills_hub.py; \
-    cp tools/lexitool_tool.py /opt/hermes/tools/lexitool_tool.py; \
-    cp tools/legal_workflow_learning.py /opt/hermes/tools/legal_workflow_learning.py; \
-    cp tools/project_management_tool.py /opt/hermes/tools/project_management_tool.py; \
-    cp tools/legal_orchestration_tool.py /opt/hermes/tools/legal_orchestration_tool.py; \
-    cp tools/legal_workflow_tool.py /opt/hermes/tools/legal_workflow_tool.py; \
     cp toolsets.py /opt/hermes/toolsets.py; \
     cp run_agent.py /opt/hermes/run_agent.py; \
     cp agent/system_prompt.py /opt/hermes/agent/system_prompt.py; \
@@ -68,7 +55,6 @@ RUN set -e; \
     cp hermes_cli/main.py /opt/hermes/hermes_cli/main.py; \
     cp hermes_cli/__init__.py /opt/hermes/hermes_cli/__init__.py; \
     cp hermes_cli/banner.py /opt/hermes/hermes_cli/banner.py; \
-    cp hermes_cli/backoffice.py /opt/hermes/hermes_cli/backoffice.py; \
     cp hermes_cli/plugins.py /opt/hermes/hermes_cli/plugins.py; \
     cp hermes_cli/tools_config.py /opt/hermes/hermes_cli/tools_config.py; \
     cp hermes_cli/commands.py /opt/hermes/hermes_cli/commands.py; \
@@ -77,16 +63,10 @@ RUN set -e; \
     cp hermes_cli/web_server.py /opt/hermes/hermes_cli/web_server.py; \
     cp hermes_cli/dashboard_auth/login_page.py /opt/hermes/hermes_cli/dashboard_auth/login_page.py; \
     cp hermes_cli/dashboard_auth/middleware.py /opt/hermes/hermes_cli/dashboard_auth/middleware.py; \
-    cp hermes_cli/dashboard_auth/password_provider.py /opt/hermes/hermes_cli/dashboard_auth/password_provider.py; \
     cp hermes_cli/dashboard_auth/routes.py /opt/hermes/hermes_cli/dashboard_auth/routes.py; \
     cp tui_gateway/server.py /opt/hermes/tui_gateway/server.py; \
     cp hermes_cli/container_boot.py /opt/hermes/hermes_cli/container_boot.py; \
     cp hermes_cli/service_manager.py /opt/hermes/hermes_cli/service_manager.py; \
-    cp hermes_cli/project_commands.py /opt/hermes/hermes_cli/project_commands.py; \
-    cp gateway/agent_cache.py /opt/hermes/gateway/agent_cache.py; \
-    cp gateway/agent_execution.py /opt/hermes/gateway/agent_execution.py; \
-    cp gateway/message_handler.py /opt/hermes/gateway/message_handler.py; \
-    cp gateway/kanban_runner.py /opt/hermes/gateway/kanban_runner.py; \
     cp gateway/slash_commands.py /opt/hermes/gateway/slash_commands.py; \
     cp gateway/status.py /opt/hermes/gateway/status.py; \
     cp gateway/platforms/api_server.py /opt/hermes/gateway/platforms/api_server.py; \
@@ -99,7 +79,7 @@ RUN set -e; \
     cp plugins/legal-drafting-gate/plugin.yaml /opt/hermes/plugins/legal-drafting-gate/plugin.yaml; \
     cp plugins/legal-drafting-gate/__init__.py /opt/hermes/plugins/legal-drafting-gate/__init__.py; \
     mkdir -p /opt/hermes/profiles; \
-    cp profiles/*.soul.md /opt/hermes/profiles/; \
+    cp profiles/*-SOUL.md /opt/hermes/profiles/; \
     mkdir -p /opt/hermes/web/src/components /opt/hermes/web/src/contexts /opt/hermes/web/src/hooks /opt/hermes/web/src/lib /opt/hermes/web/src/pages /opt/hermes/web/src/themes; \
     cp -a hermes_cli/web_dist /opt/hermes/hermes_cli/; \
     find /opt/hermes/hermes_cli/web_dist/assets -name 'index-*' -mtime +0 -delete 2>/dev/null; \
@@ -108,35 +88,16 @@ RUN set -e; \
     cp web/src/themes/*.ts /opt/hermes/web/src/themes/; \
     cp web/src/themes/*.tsx /opt/hermes/web/src/themes/; \
     cp web/src/App.tsx /opt/hermes/web/src/App.tsx; \
-    cp web/src/components/ChatBubble.tsx /opt/hermes/web/src/components/ChatBubble.tsx; \
-    cp web/src/components/ChatMessageList.tsx /opt/hermes/web/src/components/ChatMessageList.tsx; \
-    cp web/src/components/ChatTopBar.tsx /opt/hermes/web/src/components/ChatTopBar.tsx; \
     cp web/src/components/Markdown.tsx /opt/hermes/web/src/components/Markdown.tsx; \
-    cp web/src/components/NativeChatSurface.tsx /opt/hermes/web/src/components/NativeChatSurface.tsx; \
     cp web/src/components/SkillEditorDialog.tsx /opt/hermes/web/src/components/SkillEditorDialog.tsx; \
-    cp web/src/components/SwarmInlineView.tsx /opt/hermes/web/src/components/SwarmInlineView.tsx; \
-    cp web/src/components/ThinkingBlock.tsx /opt/hermes/web/src/components/ThinkingBlock.tsx; \
-    cp web/src/components/ToolCall.tsx /opt/hermes/web/src/components/ToolCall.tsx; \
     cp web/src/components/ToolsetConfigDrawer.tsx /opt/hermes/web/src/components/ToolsetConfigDrawer.tsx; \
-    cp web/src/contexts/ChatTabContext.tsx /opt/hermes/web/src/contexts/ChatTabContext.tsx; \
     cp web/src/contexts/profile-context.ts /opt/hermes/web/src/contexts/profile-context.ts; \
     cp web/src/contexts/useProfileScope.ts /opt/hermes/web/src/contexts/useProfileScope.ts; \
-    cp web/src/hooks/useChatSessionBinding.ts /opt/hermes/web/src/hooks/useChatSessionBinding.ts; \
     cp web/src/lib/api.ts /opt/hermes/web/src/lib/api.ts; \
     cp web/src/lib/dashboard-flags.ts /opt/hermes/web/src/lib/dashboard-flags.ts; \
     cp web/src/pages/ChatPage.tsx /opt/hermes/web/src/pages/ChatPage.tsx; \
     cp web/src/pages/SkillsPage.tsx /opt/hermes/web/src/pages/SkillsPage.tsx; \
     \
-    cp tools/kanban_toolset.py /opt/lex-hermes/tools/kanban_toolset.py; \
-    cp tools/kanban_tools.py /opt/lex-hermes/tools/kanban_tools.py; \
-    cp tools/legal_evidence_gate.py /opt/lex-hermes/tools/legal_evidence_gate.py; \
-    cp tools/memory_tool.py /opt/lex-hermes/tools/memory_tool.py; \
-    cp tools/skills_hub.py /opt/lex-hermes/tools/skills_hub.py; \
-    cp tools/lexitool_tool.py /opt/lex-hermes/tools/lexitool_tool.py; \
-    cp tools/legal_workflow_learning.py /opt/lex-hermes/tools/legal_workflow_learning.py; \
-    cp tools/project_management_tool.py /opt/lex-hermes/tools/project_management_tool.py; \
-    cp tools/legal_orchestration_tool.py /opt/lex-hermes/tools/legal_orchestration_tool.py; \
-    cp tools/legal_workflow_tool.py /opt/lex-hermes/tools/legal_workflow_tool.py; \
     cp toolsets.py /opt/lex-hermes/toolsets.py; \
     cp run_agent.py /opt/lex-hermes/run_agent.py; \
     cp agent/system_prompt.py /opt/lex-hermes/agent/system_prompt.py; \
@@ -145,7 +106,6 @@ RUN set -e; \
     cp hermes_cli/main.py /opt/lex-hermes/hermes_cli/main.py; \
     cp hermes_cli/__init__.py /opt/lex-hermes/hermes_cli/__init__.py; \
     cp hermes_cli/banner.py /opt/lex-hermes/hermes_cli/banner.py; \
-    cp hermes_cli/backoffice.py /opt/lex-hermes/hermes_cli/backoffice.py; \
     cp hermes_cli/plugins.py /opt/lex-hermes/hermes_cli/plugins.py; \
     cp hermes_cli/tools_config.py /opt/lex-hermes/hermes_cli/tools_config.py; \
     cp hermes_cli/commands.py /opt/lex-hermes/hermes_cli/commands.py; \
@@ -154,16 +114,10 @@ RUN set -e; \
     cp hermes_cli/web_server.py /opt/lex-hermes/hermes_cli/web_server.py; \
     cp hermes_cli/dashboard_auth/login_page.py /opt/lex-hermes/hermes_cli/dashboard_auth/login_page.py; \
     cp hermes_cli/dashboard_auth/middleware.py /opt/lex-hermes/hermes_cli/dashboard_auth/middleware.py; \
-    cp hermes_cli/dashboard_auth/password_provider.py /opt/lex-hermes/hermes_cli/dashboard_auth/password_provider.py; \
     cp hermes_cli/dashboard_auth/routes.py /opt/lex-hermes/hermes_cli/dashboard_auth/routes.py; \
     cp tui_gateway/server.py /opt/lex-hermes/tui_gateway/server.py; \
     cp hermes_cli/container_boot.py /opt/lex-hermes/hermes_cli/container_boot.py; \
     cp hermes_cli/service_manager.py /opt/lex-hermes/hermes_cli/service_manager.py; \
-    cp hermes_cli/project_commands.py /opt/lex-hermes/hermes_cli/project_commands.py; \
-    cp gateway/agent_cache.py /opt/lex-hermes/gateway/agent_cache.py; \
-    cp gateway/agent_execution.py /opt/lex-hermes/gateway/agent_execution.py; \
-    cp gateway/message_handler.py /opt/lex-hermes/gateway/message_handler.py; \
-    cp gateway/kanban_runner.py /opt/lex-hermes/gateway/kanban_runner.py; \
     cp gateway/slash_commands.py /opt/lex-hermes/gateway/slash_commands.py; \
     cp gateway/status.py /opt/lex-hermes/gateway/status.py; \
     cp gateway/platforms/api_server.py /opt/lex-hermes/gateway/platforms/api_server.py; \
@@ -176,7 +130,7 @@ RUN set -e; \
     cp plugins/legal-drafting-gate/plugin.yaml /opt/lex-hermes/plugins/legal-drafting-gate/plugin.yaml; \
     cp plugins/legal-drafting-gate/__init__.py /opt/lex-hermes/plugins/legal-drafting-gate/__init__.py; \
     mkdir -p /opt/lex-hermes/profiles; \
-    cp profiles/*.soul.md /opt/lex-hermes/profiles/; \
+    cp profiles/*-SOUL.md /opt/lex-hermes/profiles/; \
     mkdir -p /opt/lex-hermes/web/src/components /opt/lex-hermes/web/src/contexts /opt/lex-hermes/web/src/hooks /opt/lex-hermes/web/src/lib /opt/lex-hermes/web/src/pages /opt/lex-hermes/web/src/themes; \
     cp -a hermes_cli/web_dist /opt/lex-hermes/hermes_cli/; \
     cp web/index.html /opt/lex-hermes/web/index.html; \
@@ -184,20 +138,11 @@ RUN set -e; \
     cp web/src/themes/*.ts /opt/lex-hermes/web/src/themes/; \
     cp web/src/themes/*.tsx /opt/lex-hermes/web/src/themes/; \
     cp web/src/App.tsx /opt/lex-hermes/web/src/App.tsx; \
-    cp web/src/components/ChatBubble.tsx /opt/lex-hermes/web/src/components/ChatBubble.tsx; \
-    cp web/src/components/ChatMessageList.tsx /opt/lex-hermes/web/src/components/ChatMessageList.tsx; \
-    cp web/src/components/ChatTopBar.tsx /opt/lex-hermes/web/src/components/ChatTopBar.tsx; \
     cp web/src/components/Markdown.tsx /opt/lex-hermes/web/src/components/Markdown.tsx; \
-    cp web/src/components/NativeChatSurface.tsx /opt/lex-hermes/web/src/components/NativeChatSurface.tsx; \
     cp web/src/components/SkillEditorDialog.tsx /opt/lex-hermes/web/src/components/SkillEditorDialog.tsx; \
-    cp web/src/components/SwarmInlineView.tsx /opt/lex-hermes/web/src/components/SwarmInlineView.tsx; \
-    cp web/src/components/ThinkingBlock.tsx /opt/lex-hermes/web/src/components/ThinkingBlock.tsx; \
-    cp web/src/components/ToolCall.tsx /opt/lex-hermes/web/src/components/ToolCall.tsx; \
     cp web/src/components/ToolsetConfigDrawer.tsx /opt/lex-hermes/web/src/components/ToolsetConfigDrawer.tsx; \
-    cp web/src/contexts/ChatTabContext.tsx /opt/lex-hermes/web/src/contexts/ChatTabContext.tsx; \
     cp web/src/contexts/profile-context.ts /opt/lex-hermes/web/src/contexts/profile-context.ts; \
     cp web/src/contexts/useProfileScope.ts /opt/lex-hermes/web/src/contexts/useProfileScope.ts; \
-    cp web/src/hooks/useChatSessionBinding.ts /opt/lex-hermes/web/src/hooks/useChatSessionBinding.ts; \
     cp web/src/lib/api.ts /opt/lex-hermes/web/src/lib/api.ts; \
     cp web/src/lib/dashboard-flags.ts /opt/lex-hermes/web/src/lib/dashboard-flags.ts; \
     cp web/src/pages/ChatPage.tsx /opt/lex-hermes/web/src/pages/ChatPage.tsx; \
@@ -212,45 +157,13 @@ RUN set -e; \
     cp .hermes-project/roles/hpswarm-drafter.md /opt/lex-hermes/.hermes-project/roles/hpswarm-drafter.md; \
     cp .hermes-project/roles/hpswarm-reviewer-content.md /opt/lex-hermes/.hermes-project/roles/hpswarm-reviewer-content.md; \
     cp .hermes-project/roles/hpswarm-reviewer-format.md /opt/lex-hermes/.hermes-project/roles/hpswarm-reviewer-format.md; \
-    cp tests/test_legal_harness_toolsets.py /opt/hermes/tests/test_legal_harness_toolsets.py; \
-    cp tests/test_legal_harness_toolsets.py /opt/lex-hermes/tests/test_legal_harness_toolsets.py; \
-    cp tests/test_lex_master_route.py /opt/hermes/tests/test_lex_master_route.py; \
-    cp tests/test_lex_master_route.py /opt/lex-hermes/tests/test_lex_master_route.py; \
-    cp tests/test_hermes_state.py /opt/hermes/tests/test_hermes_state.py; \
-    cp tests/test_hermes_state.py /opt/lex-hermes/tests/test_hermes_state.py; \
-    cp tests/test_project_binding.py /opt/hermes/tests/test_project_binding.py; \
-    cp tests/test_project_binding.py /opt/lex-hermes/tests/test_project_binding.py; \
-    cp tests/test_legal_orchestration.py /opt/hermes/tests/test_legal_orchestration.py; \
-    cp tests/test_legal_orchestration.py /opt/lex-hermes/tests/test_legal_orchestration.py; \
-    cp tests/tools/test_legal_workflow_learning.py /opt/hermes/tests/tools/test_legal_workflow_learning.py; \
-    cp tests/tools/test_legal_workflow_learning.py /opt/lex-hermes/tests/tools/test_legal_workflow_learning.py; \
-    cp tests/test_lexitool_ocr_fallback.py /opt/hermes/tests/test_lexitool_ocr_fallback.py; \
-    cp tests/test_lexitool_ocr_fallback.py /opt/lex-hermes/tests/test_lexitool_ocr_fallback.py; \
-    cp tests/tools/test_memory_tool.py /opt/hermes/tests/tools/test_memory_tool.py; \
-    cp tests/tools/test_memory_tool.py /opt/lex-hermes/tests/tools/test_memory_tool.py; \
-    cp tests/tools/test_memory_tool_schema.py /opt/hermes/tests/tools/test_memory_tool_schema.py; \
-    cp tests/tools/test_memory_tool_schema.py /opt/lex-hermes/tests/tools/test_memory_tool_schema.py; \
-    cp tests/tools/test_memory_tool_import_fallback.py /opt/hermes/tests/tools/test_memory_tool_import_fallback.py; \
-    cp tests/tools/test_memory_tool_import_fallback.py /opt/lex-hermes/tests/tools/test_memory_tool_import_fallback.py; \
-    cp tests/tools/test_kanban_swarm_toolset.py /opt/hermes/tests/tools/test_kanban_swarm_toolset.py; \
-    cp tests/tools/test_kanban_swarm_toolset.py /opt/lex-hermes/tests/tools/test_kanban_swarm_toolset.py; \
-    cp tests/tools/test_kanban_tools.py /opt/hermes/tests/tools/test_kanban_tools.py; \
-    cp tests/tools/test_kanban_tools.py /opt/lex-hermes/tests/tools/test_kanban_tools.py; \
     mkdir -p /opt/hermes/tests/plugins /opt/lex-hermes/tests/plugins; \
-    cp tests/plugins/test_backoffice_issue_relay.py /opt/hermes/tests/plugins/test_backoffice_issue_relay.py; \
-    cp tests/plugins/test_backoffice_issue_relay.py /opt/lex-hermes/tests/plugins/test_backoffice_issue_relay.py; \
-    cp tests/plugins/test_legal_drafting_gate.py /opt/hermes/tests/plugins/test_legal_drafting_gate.py; \
-    cp tests/plugins/test_legal_drafting_gate.py /opt/lex-hermes/tests/plugins/test_legal_drafting_gate.py; \
     mkdir -p /opt/hermes/tests/gateway /opt/lex-hermes/tests/gateway; \
-    cp tests/gateway/test_status.py /opt/hermes/tests/gateway/test_status.py; \
-    cp tests/gateway/test_status.py /opt/lex-hermes/tests/gateway/test_status.py; \
-    cp tests/gateway/test_kanban_notifier.py /opt/hermes/tests/gateway/test_kanban_notifier.py; \
-    cp tests/gateway/test_kanban_notifier.py /opt/lex-hermes/tests/gateway/test_kanban_notifier.py; \
-    cp tests/test_project_init_workflow.py /opt/hermes/tests/test_project_init_workflow.py; \
-    cp tests/test_project_init_workflow.py /opt/lex-hermes/tests/test_project_init_workflow.py; \
     cp hermes_state.py /opt/hermes/hermes_state.py; \
     cp hermes_state.py /opt/lex-hermes/hermes_state.py; \
     \
+    cp scripts/patch-tc-utils.py /tmp/patch-tc-utils.py; \
+    python3 /tmp/patch-tc-utils.py; \
     find /opt/lexitool/lexitool/__pycache__ -name '*.pyc' -delete 2>/dev/null; \
     find /opt/hermes/vendor/lexitool/lexitool/__pycache__ -name '*.pyc' -delete 2>/dev/null; \
     find "$VENV_LEXITOOL/__pycache__" -name '*.pyc' -delete 2>/dev/null; \
@@ -368,9 +281,6 @@ RUN set -e; \
     echo "=== Setting up backoffice mimocode autofix ==="; \
     npx skills@latest add vinvcn/mattpocock-skills-zh-CN --yes 2>/dev/null || true; \
     mkdir -p /opt/hermes/scripts /root/.hermes/backoffice-claude-session; \
-    cp /tmp/lex-hermes-patch/scripts/backoffice-autofix.sh /opt/hermes/scripts/backoffice-autofix.sh; \
-    chmod +x /opt/hermes/scripts/backoffice-autofix.sh; \
-    ln -sf /opt/hermes/scripts/backoffice-autofix.sh /command/backoffice-autofix; \
     echo '{"codebase":"lex-hermes","repo":"/opt/hermes-agent","branch":"lex-hermes"}' > /root/.hermes/backoffice-claude-session/config.json; \
     \
     rm -rf /tmp/lex-hermes-patch

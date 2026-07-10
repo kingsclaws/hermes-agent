@@ -6,6 +6,12 @@ Provides normalization functions for text comparison in TC operations.
 from __future__ import annotations
 
 import unicodedata
+from datetime import datetime, timezone
+
+
+def _utc_now() -> str:
+    """Return the current UTC time as an ISO 8601 string."""
+    return datetime.now(timezone.utc).isoformat()
 
 
 def _normalize_fullwidth(text: str) -> str:
