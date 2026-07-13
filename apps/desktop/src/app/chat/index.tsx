@@ -7,7 +7,7 @@ import {
 import { useStore } from '@nanostores/react'
 import { useQuery } from '@tanstack/react-query'
 import type * as React from 'react'
-import { Suspense, useCallback, useMemo, useRef } from 'react'
+import { Suspense, useCallback, useMemo, useRef, useState } from 'react'
 import { useLocation } from 'react-router-dom'
 
 import { Thread } from '@/components/assistant-ui/thread'
@@ -38,6 +38,7 @@ import {
   $activeSessionId,
   $awaitingResponse,
   $busy,
+  $connection,
   $contextSuggestions,
   $currentCwd,
   $currentModel,
@@ -59,6 +60,10 @@ import type { ModelOptionsResponse } from '@/types/hermes'
 
 import { routeSessionId } from '../routes'
 import { titlebarHeaderBaseClass, titlebarHeaderShadowClass, titlebarHeaderTitleClass } from '../shell/titlebar'
+
+import { KanbanFloatingButton } from '@/components/kanban/kanban-floating-button'
+import { KanbanPanel } from '@/components/kanban/kanban-panel'
+import { useKanban, useKanbanConnection } from '@/hooks/use-kanban'
 
 import { ChatDropOverlay } from './chat-drop-overlay'
 import { ChatSwapOverlay } from './chat-swap-overlay'
@@ -322,6 +327,12 @@ export function ChatView({
   const routedSessionId = routeSessionId(location.pathname)
   const isRoutedSessionView = Boolean(routedSessionId)
 
+  // Kanban integration for lex-hermes-plugin
+  const { activeCount, connected, tasks } = useKanban()
+  const [showKanbanPanel, setShowKanbanPanel] = useState(false)
+  const connection = useStore($connection)
+  useKanbanConnection(connection?.baseUrl ?? null, connection?.token ?? null)
+
   // The URL points at a session the store hasn't loaded yet (sidebar / cmd-K /
   // direct nav). Derived in render so the swap reads instantly: the same frame
   // the id changes we drop the old transcript and show the loader, instead of
@@ -550,6 +561,21 @@ export function ChatView({
           </Suspense>
         )}
       </ChatRuntimeBoundary>
+
+      {/* Kanban floating panel for lex-hermes-plugin */}
+      <KanbanFloatingButton
+        active={showKanbanPanel}
+        connected={connected}
+        count={activeCount}
+        onClick={() => setShowKanbanPanel(!showKanbanPanel)}
+      />
+      {showKanbanPanel && (
+        <KanbanPanel
+          connected={connected}
+          tasks={tasks}
+          onClose={() => setShowKanbanPanel(false)}
+        />
+      )}
     </div>
   )
 }
