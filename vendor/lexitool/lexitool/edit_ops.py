@@ -574,7 +574,7 @@ def _locate_text_in_para(p: etree._Element, target: str) -> list[tuple]:
     for t in p.iter(f"{W}t"):
         if t.text:
             t_nodes.append(t)
-    
+
     # 将所有文本拼起来找（标准化引号以匹配Word弯引号）
     raw_text = ''.join(t.text for t in t_nodes)
     full_text = _normalize_quotes(raw_text)
@@ -582,13 +582,13 @@ def _locate_text_in_para(p: etree._Element, target: str) -> list[tuple]:
     idx = full_text.find(target_norm)
     if idx < 0:
         return []
-    
+
     # 定位到具体的 w:t 节点
     result = []
     remaining = target
     char_pos = 0
     start_found = False
-    
+
     for t in t_nodes:
         tlen = len(t.text)
         if not start_found:
@@ -612,7 +612,7 @@ def _locate_text_in_para(p: etree._Element, target: str) -> list[tuple]:
             remaining = remaining[take:]
             if not remaining:
                 break
-    
+
     return result if not remaining else []
 
 
@@ -630,7 +630,7 @@ def replace_text_in_place(docx_path: str, para: int, old: str, new: str, *,
                           output: str | None = None) -> EditResult:
     """
     原地替换段落中的文本，保留原 run 的格式。支持跨 run 文本匹配。
-    
+
     与 replace_text(tc=True) 不同：
     - replace_text 在段落末尾追加 <w:del> + <w:ins>
     - replace_text_in_place 在原 run 位置生成 <w:del>(旧run) + <w:ins>(新run)
@@ -640,34 +640,34 @@ def replace_text_in_place(docx_path: str, para: int, old: str, new: str, *,
     p = _find_para(root, para)
     if p is None:
         return EditResult(ok=False, message=f"段落 {para} 不存在", path=docx_path)
-    
+
     locations = _locate_text_in_para(p, old)
     if not locations:
         return EditResult(ok=False, para=para, text=old,
                           message=f"段落 {para} 中未找到 '{old}'",
                           path=docx_path)
-    
+
     tid = _next_tc_id(root)
     from datetime import datetime
     dt = datetime.now().strftime("%Y-%m-%dT%H:%M:%SZ")
-    
+
     # 先收集所有匹配的 run（保留格式用第一个 run 的 rPr）
     matched_run_els = []
     for t_el, offset, take in locations:
         run_el = _get_run_of_t(t_el)
         if run_el is not None:
             matched_run_els.append((run_el, t_el, offset, take))
-    
+
     if not matched_run_els:
         return EditResult(ok=False, para=para, text=old,
                           message=f"段落 {para} 中匹配的 run 不存在",
                           path=docx_path)
-    
+
     first_rPr = matched_run_els[0][0].find(f"{W}rPr")
     first_parent = matched_run_els[0][0].getparent()
     # 记录第一个 run_el 在父元素中的位置（用于之后插入 ins）
     first_pos = list(first_parent).index(matched_run_els[0][0])
-    
+
     # 创建唯一的 <w:ins>（用第一个 run 的格式）
     ins = etree.Element(f"{W}ins")
     ins.set(f"{W}id", str(tid)); tid += 1
@@ -679,12 +679,12 @@ def replace_text_in_place(docx_path: str, para: int, old: str, new: str, *,
     it = etree.SubElement(ir, f"{W}t")
     it.text = new
     it.set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
-    
+
     # 为每个匹配位置创建 <w:del>，从后往前处理
     for run_el, t_el, offset, take in reversed(matched_run_els):
         rPr = run_el.find(f"{W}rPr")
         old_text_part = t_el.text[offset:offset+take]
-        
+
         d = etree.Element(f"{W}del")
         d.set(f"{W}id", str(tid)); tid += 1
         d.set(f"{W}author", author); d.set(f"{W}date", dt)
@@ -695,15 +695,15 @@ def replace_text_in_place(docx_path: str, para: int, old: str, new: str, *,
         dt_el = etree.SubElement(dr, f"{W}delText")
         dt_el.text = old_text_part
         dt_el.set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
-        
+
         parent = run_el.getparent()
         pos = list(parent).index(run_el)
         parent.insert(pos, d)
         parent.remove(run_el)
-    
+
     # 在第一个 del 的位置插入 <w:ins>
     first_parent.insert(first_pos, ins)
-    
+
     _write_docx(docx_path, etree.tostring(root, xml_declaration=True,
                                           encoding="UTF-8", standalone=True),
                 other, output=output)

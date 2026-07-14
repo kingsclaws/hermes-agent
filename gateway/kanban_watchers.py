@@ -40,6 +40,16 @@ class _LocalSessionAdapter:
         return await self._handle_message(event)
 
 
+def _notification_platforms(adapters: dict) -> set[str]:
+    """Return connected transports plus the transport-less local session."""
+    platforms = {
+        getattr(platform, "value", str(platform)).lower()
+        for platform in adapters
+    }
+    platforms.add("local")
+    return platforms
+
+
 def _resolve_auto_decompose_settings(
     load_config: Callable[[], Any],
 ) -> "tuple[bool, int]":
@@ -213,13 +223,7 @@ class GatewayKanbanWatchersMixin:
             try:
                 def _collect():
                     deliveries: list[dict] = []
-                    active_platforms = {
-                        getattr(platform, "value", str(platform)).lower()
-                        for platform in self.adapters.keys()
-                    }
-                    if not active_platforms:
-                        logger.debug("kanban notifier: no connected adapters; skipping tick")
-                        return deliveries
+                    active_platforms = _notification_platforms(self.adapters)
 
                     # Enumerate every board on disk, but poll each resolved DB
                     # path once. Multiple slugs can point at the same DB when

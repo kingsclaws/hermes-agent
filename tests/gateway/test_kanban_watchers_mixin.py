@@ -10,7 +10,11 @@ from __future__ import annotations
 import asyncio
 import inspect
 
-from gateway.kanban_watchers import GatewayKanbanWatchersMixin, _LocalSessionAdapter
+from gateway.kanban_watchers import (
+    GatewayKanbanWatchersMixin,
+    _LocalSessionAdapter,
+    _notification_platforms,
+)
 
 KANBAN_METHODS = [
     "_kanban_notifier_watcher",
@@ -60,6 +64,10 @@ def test_local_session_adapter_injects_wake_without_transport_send():
 
     assert asyncio.run(exercise()) == "handled"
     assert events == ["wake"]
+
+
+def test_local_subscriptions_are_polled_without_connected_adapters():
+    assert _notification_platforms({}) == {"local"}
 
 
 def test_singleton_dispatcher_lock_is_exclusive(tmp_path):
