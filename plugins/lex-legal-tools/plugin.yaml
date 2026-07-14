@@ -2,9 +2,3 @@ name: lex-legal-tools
 version: 0.18.0
 description: "Lex legal document tools — lexitool, legal workflow, research, project management, kanban swarm."
 author: "Lex-Hermes"
-hooks:
-  - pre_tool_call
-  - post_tool_call
-  - kanban_task_completed
-  - kanban_task_blocked
-  - kanban_task_review_gate_approved

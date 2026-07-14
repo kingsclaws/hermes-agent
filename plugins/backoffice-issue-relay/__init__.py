@@ -192,10 +192,6 @@ def register(ctx: Any) -> None:
     ctx.register_hook("kanban_task_blocked", _on_kanban_task_blocked)
     ctx.register_hook("kanban_task_completed", _on_kanban_task_completed)
     ctx.register_hook("kanban_task_claimed", _on_kanban_task_lifecycle)
-    ctx.register_hook("kanban_task_review_claimed", _on_kanban_task_lifecycle)
-    ctx.register_hook("kanban_task_review_requested", _on_kanban_task_lifecycle)
-    ctx.register_hook("kanban_task_review_gate_approved", _on_kanban_task_lifecycle)
-    ctx.register_hook("kanban_task_unblocked", _on_kanban_task_lifecycle)
 
 
 def _now() -> str:
