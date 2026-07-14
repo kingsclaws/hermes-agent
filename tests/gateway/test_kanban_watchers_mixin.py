@@ -7,9 +7,10 @@ that GatewayRunner picks them up via the MRO (behavior-neutral relocation).
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 
-from gateway.kanban_watchers import GatewayKanbanWatchersMixin
+from gateway.kanban_watchers import GatewayKanbanWatchersMixin, _LocalSessionAdapter
 
 KANBAN_METHODS = [
     "_kanban_notifier_watcher",
@@ -43,6 +44,22 @@ def test_watcher_loops_are_coroutines():
     # The two long-running watchers are async loops.
     assert inspect.iscoroutinefunction(GatewayKanbanWatchersMixin._kanban_notifier_watcher)
     assert inspect.iscoroutinefunction(GatewayKanbanWatchersMixin._kanban_dispatcher_watcher)
+
+
+def test_local_session_adapter_injects_wake_without_transport_send():
+    events = []
+
+    async def handle_message(event):
+        events.append(event)
+        return "handled"
+
+    async def exercise():
+        adapter = _LocalSessionAdapter(handle_message)
+        await adapter.send("session-1", "notification")
+        return await adapter.handle_message("wake")
+
+    assert asyncio.run(exercise()) == "handled"
+    assert events == ["wake"]
 
 
 def test_singleton_dispatcher_lock_is_exclusive(tmp_path):

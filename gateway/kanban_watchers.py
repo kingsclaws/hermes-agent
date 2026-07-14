@@ -25,6 +25,21 @@ from agent.i18n import t
 logger = logging.getLogger("gateway.run")
 
 
+class _LocalSessionAdapter:
+    """Route local kanban wakes back through the gateway message handler."""
+
+    def __init__(self, handle_message: Callable):
+        self._handle_message = handle_message
+
+    async def send(self, _chat_id: str, _message: str, metadata=None) -> None:
+        # CLI/TUI sessions have no transport on which to display the separate
+        # notification. The internal wake below is the actual delivery.
+        return None
+
+    async def handle_message(self, event):
+        return await self._handle_message(event)
+
+
 def _resolve_auto_decompose_settings(
     load_config: Callable[[], Any],
 ) -> "tuple[bool, int]":
@@ -321,6 +336,8 @@ class GatewayKanbanWatchersMixin:
                     # exists to fix). The helper returns None only when the profile
                     # (or default) genuinely has no adapter for the platform.
                     adapter = self._authorization_adapter(plat, sub_profile or None)
+                    if adapter is None and plat == _Platform.LOCAL:
+                        adapter = _LocalSessionAdapter(self._handle_message)
                     if adapter is None:
                         logger.debug(
                             "kanban notifier: adapter %s disconnected before delivery for %s; rewinding claim",
