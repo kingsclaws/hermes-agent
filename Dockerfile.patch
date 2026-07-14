@@ -67,6 +67,7 @@ RUN set -e; \
     cp gateway/slash_commands.py /opt/hermes/gateway/slash_commands.py; \
     cp gateway/status.py /opt/hermes/gateway/status.py; \
     cp gateway/platforms/api_server.py /opt/hermes/gateway/platforms/api_server.py; \
+    cp tools/lex_preview_tool.py /opt/hermes/tools/lex_preview_tool.py; \
     mkdir -p /opt/hermes/plugins/backoffice-issue-relay; \
     cp plugins/backoffice-issue-relay/plugin.yaml /opt/hermes/plugins/backoffice-issue-relay/plugin.yaml; \
     cp plugins/backoffice-issue-relay/__init__.py /opt/hermes/plugins/backoffice-issue-relay/__init__.py; \
@@ -118,6 +119,7 @@ RUN set -e; \
     cp gateway/slash_commands.py /opt/lex-hermes/gateway/slash_commands.py; \
     cp gateway/status.py /opt/lex-hermes/gateway/status.py; \
     cp gateway/platforms/api_server.py /opt/lex-hermes/gateway/platforms/api_server.py; \
+    cp tools/lex_preview_tool.py /opt/lex-hermes/tools/lex_preview_tool.py; \
     mkdir -p /opt/lex-hermes/plugins/backoffice-issue-relay; \
     cp plugins/backoffice-issue-relay/plugin.yaml /opt/lex-hermes/plugins/backoffice-issue-relay/plugin.yaml; \
     cp plugins/backoffice-issue-relay/__init__.py /opt/lex-hermes/plugins/backoffice-issue-relay/__init__.py; \
