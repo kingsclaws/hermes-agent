@@ -635,7 +635,8 @@ class S6ServiceManager:
              so with-contenv's root HOME does not leak into the
              unprivileged gateway process.
           3. Activates the bundled venv.
-          4. Drops to the hermes user and exec's
+          4. Honors the container's explicit ``HERMES_RUN_AS_ROOT`` mode;
+             otherwise drops to the hermes user and exec's
              ``hermes -p <profile> gateway run`` (or just ``hermes
              gateway run`` for the default profile — see below).
 
@@ -703,6 +704,17 @@ class S6ServiceManager:
             gateway_cmd = "hermes gateway run --replace"
         else:
             gateway_cmd = f"hermes -p {shlex.quote(profile)} gateway run --replace"
+        # Some deployments intentionally keep the gateway as root so it can
+        # use a root-owned HERMES_HOME and Docker socket. Without this branch,
+        # the supervisor ignored HERMES_RUN_AS_ROOT and the child failed on
+        # root-owned 0600 state such as auth.json.
+        lines.extend(
+            [
+                'case "${HERMES_RUN_AS_ROOT:-}" in',
+                f"    1|true|TRUE|True|yes|YES|Yes|on|ON|On) export HOME=/root; exec {gateway_cmd} ;;",
+                "esac",
+            ]
+        )
         # Skip the drop when already non-root (setgroups() lacks CAP_SETGID →
         # s6 boot-loop).
         lines.append(f'[ "$(id -u)" = 0 ] || exec {gateway_cmd}')

@@ -50,6 +50,15 @@ case "${HERMES_DASHBOARD_INSECURE:-}" in
         ;;
 esac
 
+# Deployments with a root-owned HERMES_HOME can explicitly keep supervised
+# services as root. The default remains the unprivileged hermes user.
+case "${HERMES_RUN_AS_ROOT:-}" in
+    1|true|TRUE|True|yes|YES|Yes|on|ON|On)
+        export HOME=/root
+        exec hermes dashboard --host "$dash_host" --port "$dash_port" --no-open
+        ;;
+esac
+
 # Skip the drop when already non-root.
 [ "$(id -u)" = 0 ] || exec hermes dashboard --host "$dash_host" --port "$dash_port" --no-open
 exec s6-setuidgid hermes hermes dashboard \

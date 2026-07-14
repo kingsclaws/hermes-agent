@@ -1,0 +1,32 @@
+ARG BASE_IMAGE=localhost:6678/lex-hermes:flat-base
+FROM ${BASE_IMAGE}
+
+ARG HERMES_GIT_SHA=unknown
+
+USER root
+WORKDIR /opt/hermes
+
+# Overlay the complete lex-hermes-plugin working tree. The clean flat base
+# supplies the venv, browser assets and s6 runtime but contributes no config or
+# credentials. Reinstalling editable metadata makes imports resolve here.
+COPY --chown=root:root . /opt/hermes
+
+RUN chmod -R a+rX /opt/hermes \
+    && /usr/local/bin/uv pip install \
+        --python /opt/hermes/.venv/bin/python \
+        --no-cache-dir --no-deps -e /opt/hermes \
+    && printf '%s\n' "$HERMES_GIT_SHA" > /opt/hermes/.hermes_build_sha \
+    && /opt/hermes/.venv/bin/python -m py_compile \
+        /opt/hermes/hermes_cli/kanban_db.py \
+        /opt/hermes/hermes_cli/service_manager.py \
+        /opt/hermes/hermes_cli/web_server.py \
+    && cd /opt/hermes \
+    && /opt/hermes/.venv/bin/python -c \
+        "from hermes_cli import kanban_db; assert hasattr(kanban_db, 'subscribe_session')"
+
+ENV HERMES_WEB_DIST=/opt/hermes/hermes_cli/web_dist \
+    HERMES_TUI_DIR=/opt/hermes/ui-tui \
+    PATH=/opt/hermes/bin:/opt/hermes/.venv/bin:/opt/data/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+ENTRYPOINT ["/init", "/opt/hermes/docker/main-wrapper.sh"]
+CMD []

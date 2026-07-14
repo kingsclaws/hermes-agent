@@ -680,6 +680,14 @@ def test_render_run_script_resets_home_before_exec() -> None:
     assert "exec s6-setuidgid hermes hermes -p coder gateway run --replace" in run_text
 
 
+def test_render_run_script_honors_explicit_root_mode() -> None:
+    run_text = S6ServiceManager._render_run_script("lex-master", {})
+
+    assert 'case "${HERMES_RUN_AS_ROOT:-}" in' in run_text
+    assert "exec hermes -p lex-master gateway run --replace" in run_text
+    assert "exec s6-setuidgid hermes hermes -p lex-master gateway run --replace" in run_text
+
+
 def test_render_run_script_uses_replace_to_take_over_stale_holder() -> None:
     """NS-505: the supervised gateway must exec ``gateway run --replace``.
 

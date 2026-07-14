@@ -1,0 +1,41 @@
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+
+ARG LEX_SOURCE_REVISION=unknown
+ARG LEX_SOURCE_DIGEST=unknown
+ARG WEBUI_SOURCE_REVISION=unknown
+
+USER root
+
+# The complete plugin branch is already installed at /opt/hermes by the base
+# build. Keep the historical path as a symlink so there is one source tree.
+RUN rm -rf /opt/lex-hermes \
+    && ln -s /opt/hermes /opt/lex-hermes
+
+COPY --chown=root:root webui/ /opt/hermes-webui-lex/
+COPY --chmod=0755 start-lex-plugin.sh /start-lex-plugin.sh
+
+ENV HERMES_HOME=/root/.hermes \
+    HERMES_DASHBOARD=1 \
+    HERMES_DASHBOARD_HOST=0.0.0.0 \
+    HERMES_DASHBOARD_PORT=9119 \
+    HERMES_AUTO_GATEWAY=1 \
+    HERMES_AUTO_GATEWAY_PROFILES=lex-master \
+    HERMES_RUN_AS_ROOT=1 \
+    HERMES_DOCKER_EXEC_AS_ROOT=1 \
+    HERMES_ALLOW_ROOT_GATEWAY=1 \
+    HERMES_WEBUI_DIR=/opt/hermes-webui-lex \
+    HERMES_WEBUI_HOST=0.0.0.0 \
+    HERMES_WEBUI_PORT=8788 \
+    HERMES_WEBUI_AGENT_DIR=/opt/lex-hermes \
+    HERMES_WEBUI_LEX_BASE_URL=http://127.0.0.1:9119 \
+    HERMES_WEBUI_SKIP_ONBOARDING=1
+
+LABEL org.opencontainers.image.title="lex-hermes-plugin" \
+      org.opencontainers.image.revision="${LEX_SOURCE_REVISION}" \
+      io.lex-hermes.source-digest="${LEX_SOURCE_DIGEST}" \
+      io.lex-hermes.webui-revision="${WEBUI_SOURCE_REVISION}"
+
+EXPOSE 8788 9119
+ENTRYPOINT ["/start-lex-plugin.sh"]
+CMD ["sleep", "infinity"]
