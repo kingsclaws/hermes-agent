@@ -515,6 +515,27 @@ def test_task_age_helper(kanban_home):
 # Notify subscriptions
 # ---------------------------------------------------------------------------
 
+def test_subscribe_session_is_idempotent(kanban_home):
+    conn = kb.connect()
+    try:
+        tid = kb.create_task(conn, title="session-owned task")
+    finally:
+        conn.close()
+
+    assert kb.subscribe_session("session-123", tid) is True
+    assert kb.subscribe_session("session-123", tid) is True
+
+    conn = kb.connect()
+    try:
+        subs = kb.list_notify_subs(conn, tid)
+        assert len(subs) == 1
+        assert subs[0]["platform"] == "session"
+        assert subs[0]["chat_id"] == "session-123"
+        assert subs[0]["thread_id"] == ""
+    finally:
+        conn.close()
+
+
 def test_notify_sub_crud(kanban_home):
     conn = kb.connect()
     try:

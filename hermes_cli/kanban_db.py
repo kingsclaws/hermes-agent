@@ -8269,6 +8269,34 @@ def add_notify_sub(
             )
 
 
+def subscribe_session(session_id: str, task_id: str, board: Optional[str] = None) -> bool:
+    """Subscribe an agent session to a task's terminal-state events.
+
+    Session subscriptions use the same durable notification table as gateway
+    subscriptions, but carry a synthetic ``session`` platform so the Lex
+    coordinator delivery path can distinguish them from messaging adapters.
+    """
+    conn = connect(board=board)
+    try:
+        add_notify_sub(
+            conn,
+            task_id=task_id,
+            platform="session",
+            chat_id=session_id,
+        )
+        return True
+    except Exception:
+        logger.exception(
+            "Failed to subscribe session %s to kanban task %s on board %s",
+            session_id,
+            task_id,
+            board or DEFAULT_BOARD,
+        )
+        return False
+    finally:
+        conn.close()
+
+
 def list_notify_subs(
     conn: sqlite3.Connection, task_id: Optional[str] = None,
 ) -> list[dict]:
