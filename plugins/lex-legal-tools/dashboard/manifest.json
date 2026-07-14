@@ -1,0 +1,11 @@
+{
+  "name": "lex-legal-tools",
+  "label": "Lex Legal Tools",
+  "description": "Read-only legal matter, evidence, research, and workflow API",
+  "icon": "Scale",
+  "version": "0.18.0",
+  "tab": {
+    "hidden": true
+  },
+  "api": "plugin_api.py"
+}

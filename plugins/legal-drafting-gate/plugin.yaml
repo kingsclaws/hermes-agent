@@ -1,0 +1,6 @@
+name: legal-drafting-gate
+version: 0.1.0
+description: "Enforce legal document drafting prerequisites before mutating Word documents."
+author: "Lex-Hermes"
+hooks:
+  - pre_tool_call
