@@ -31,7 +31,7 @@ from hermes_cli.dashboard_auth.cookies import (
     read_sso_attempt_cookie,
     set_sso_attempt_cookie,
 )
-from hermes_cli.dashboard_auth.public_paths import PUBLIC_API_PATHS
+from hermes_cli.dashboard_auth.public_paths import is_public_api_path
 
 _log = logging.getLogger(__name__)
 
@@ -60,15 +60,15 @@ def _path_is_public(path: str) -> bool:
 
     Two sources of public-ness:
 
-    * :data:`PUBLIC_API_PATHS` — the shared ``/api/*`` allowlist that
+    * ``is_public_api_path(path)`` — the shared ``/api/*`` allowlist that
       the legacy ``_SESSION_TOKEN`` middleware also honours. Matched
-      exactly (no prefix expansion) so adding ``/api/status`` doesn't
-      accidentally expose ``/api/status/secret-extension``.
+      via a central helper so exact paths and audited prefixes stay in
+      lockstep across both auth stacks.
     * :data:`_GATE_PUBLIC_PREFIXES` — auth-bootstrap routes and static
       mounts. Prefix-matched so ``/assets/foo.css`` lights up via
       ``/assets/``.
     """
-    if path in PUBLIC_API_PATHS:
+    if is_public_api_path(path):
         return True
     return any(
         path == prefix or path.startswith(prefix)
@@ -182,9 +182,14 @@ def _auto_sso_response(request: Request) -> Response | None:
         # Zero → nothing to redirect to. Two+ → user must choose at /login.
         return None
 
+    provider = providers[0]
+    if getattr(provider, "supports_password", False):
+        # Password providers have no redirect flow. Their login form lives on
+        # /login and submits directly to /auth/password-login.
+        return None
+
     from hermes_cli.dashboard_auth.prefix import prefix_from_request
 
-    provider = providers[0]
     prefix = prefix_from_request(request)
     next_param = _safe_next_target(request)
     from urllib.parse import quote
@@ -458,4 +463,3 @@ def _attempt_refresh(request: Request, *, refresh_token):
         if new_session is not None:
             return new_session, provider.name
     return None
-

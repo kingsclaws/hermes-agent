@@ -406,6 +406,21 @@ class TestAutoSsoRedirect:
         assert r.headers["location"].startswith("/login")
         assert "/auth/login" not in r.headers["location"]
 
+    def test_password_provider_renders_login_not_oauth_redirect(self, gated_app):
+        """A password-only provider must render its form instead of entering
+        the OAuth initiation route, which it does not implement.
+        """
+        clear_providers()
+        provider = StubAuthProvider()
+        provider.supports_password = True
+        register_provider(provider)
+
+        r = gated_app.get("/sessions", follow_redirects=False)
+
+        assert r.status_code == 302
+        assert r.headers["location"].startswith("/login")
+        assert "/auth/login" not in r.headers["location"]
+
 
 # ---------------------------------------------------------------------------
 # Gate middleware: same-origin next= validation

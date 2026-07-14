@@ -53,3 +53,7 @@ PUBLIC_API_PATHS: frozenset[str] = frozenset({
     # 401 no_cookie. The JWT — not this allowlist — is the security boundary.
     "/api/cron/fire",
 })
+
+def is_public_api_path(path: str) -> bool:
+    """Return True when ``path`` bypasses dashboard auth."""
+    return path in PUBLIC_API_PATHS

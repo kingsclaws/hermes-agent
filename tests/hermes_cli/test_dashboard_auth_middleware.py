@@ -107,6 +107,20 @@ def test_other_public_api_paths_are_public_under_gate(gated_app, path):
         )
 
 
+@pytest.mark.parametrize("path", [
+    "/api/lex/projects",
+    "/api/lex/projects/demo-project",
+    "/api/lex/projects/demo-project/evidence",
+    "/api/lex/projects/demo-project/kanban",
+    "/api/lex/projects/demo-project/cockpit",
+])
+def test_lex_read_model_requires_authentication(gated_app, path):
+    """Legal project and evidence data must never bypass dashboard auth."""
+    r = gated_app.get(path, follow_redirects=False)
+    assert r.status_code == 401
+    assert r.json()["error"] == "unauthenticated"
+
+
 def test_gated_html_redirects_to_login(gated_app):
     r = gated_app.get("/", follow_redirects=False)
     assert r.status_code == 302

@@ -51,6 +51,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from hermes_cli import __version__, __release_date__
+from hermes_cli.lex_api import router as _lex_api_router
 from hermes_cli.config import (
     cfg_get,
     DEFAULT_CONFIG,
@@ -257,6 +258,7 @@ app = FastAPI(title="Hermes Agent", version=__version__, lifespan=_lifespan)
 from hermes_cli.memory_oauth import router as _memory_oauth_router  # noqa: E402
 
 app.include_router(_memory_oauth_router)
+app.include_router(_lex_api_router)
 
 # ---------------------------------------------------------------------------
 # Session token for protecting sensitive endpoints (reveal).
@@ -307,7 +309,7 @@ app.add_middleware(
 # endpoints belong there.
 # ---------------------------------------------------------------------------
 from hermes_cli.dashboard_auth.public_paths import (
-    PUBLIC_API_PATHS as _PUBLIC_API_PATHS,
+    is_public_api_path as _is_public_api_path,
 )
 
 
@@ -577,7 +579,7 @@ async def auth_middleware(request: Request, call_next):
     if getattr(request.app.state, "auth_required", False):
         return await call_next(request)
     path = request.url.path
-    if path.startswith("/api/") and path not in _PUBLIC_API_PATHS:
+    if path.startswith("/api/") and not _is_public_api_path(path):
         if not _has_valid_session_token(request) and not _has_valid_query_token(request, path):
             return JSONResponse(
                 status_code=401,
