@@ -23,8 +23,8 @@ import re
 
 
 def _project_session_db():
-    """Return the SessionDB used as the shared project registry."""
-    from hermes_state import SessionDB
+    """Return the plugin-owned legal project store plus session access."""
+    from .project_store import LegalProjectStore
 
     db_path = os.environ.get("HERMES_PROJECTS_DB_PATH", "").strip()
     if not db_path:
@@ -37,7 +37,7 @@ def _project_session_db():
         except Exception:
             db_path = ""
 
-    return SessionDB(db_path=Path(db_path)) if db_path else SessionDB()
+    return LegalProjectStore(db_path=Path(db_path)) if db_path else LegalProjectStore()
 
 
 # ── Schemas ──────────────────────────────────────────────────────────────────
@@ -361,6 +361,68 @@ LEX_MASTER_ROUTE_SCHEMA = {
 # Module-level cache for the currently selected project in this session.
 _active_project_name: str | None = None
 _active_project_path: str | None = None
+
+
+def _ensure_legal_harness_files(
+    project_dir: str, *, project_name: str = "", client: str = "", goal: str = "",
+) -> dict:
+    """Create project bootstrap files without depending on Hermes core."""
+    root = Path(project_dir).expanduser().resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    sidecar = root / ".hermes-project"
+    memories = sidecar / "memories"
+    memories.mkdir(parents=True, exist_ok=True)
+    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    created: list[str] = []
+
+    meta_path = sidecar / "project-meta.json"
+    try:
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    except Exception:
+        meta = {}
+    meta.update({
+        "name": project_name or meta.get("name") or root.name,
+        "client": client if client != "" else meta.get("client", ""),
+        "goal": goal if goal != "" else meta.get("goal", ""),
+        "cwd": str(root),
+        "management_dir": str(root),
+        "updated": now,
+        "toolsets": ["lexitool"],
+    })
+    meta.setdefault("created", now)
+    meta_path.write_text(
+        json.dumps(meta, ensure_ascii=False, indent=2) + "\n", encoding="utf-8",
+    )
+
+    defaults = {
+        root / "AGENTS.md": (
+            f"# {meta['name']} Coordinator\n\n"
+            "Use Lex legal tools and Kanban review gates. Read every source "
+            "before concluding, preserve Track Changes, and verify deliverables.\n"
+        ),
+        root / "STANDARDS.md": (
+            "# Legal Work Standards\n\n"
+            "1. Lock the authoritative source and scope before editing.\n"
+            "2. Maintain a file evidence ledger; filenames are not evidence.\n"
+            "3. Preserve Track Changes and run delivery verification.\n"
+            "4. Do not report completion while evidence or review gates are open.\n"
+        ),
+        sidecar / "project-context.md": (
+            f"# Project Context: {meta['name']}\n\n"
+            f"- Client: {meta.get('client') or 'TBD'}\n"
+            f"- Goal: {meta.get('goal') or 'TBD'}\n"
+            f"- Path: `{root}`\n"
+        ),
+        sidecar / "project-facts.json": json.dumps(
+            {"facts": [], "updated_at": now}, ensure_ascii=False, indent=2,
+        ) + "\n",
+        memories / "project_facts.md": "# Project Facts\n\nNo confirmed facts recorded.\n",
+    }
+    for path, content in defaults.items():
+        if not path.exists():
+            path.write_text(content, encoding="utf-8")
+            created.append(str(path))
+    return {"ok": True, "project_dir": str(root), "created": created}
 
 
 def _resolve_cwd() -> str:
@@ -1109,96 +1171,59 @@ def _write_project_source_digest_mirror(
 
 
 def _sync_source_digest_project_facts(project_dir: str, source: dict, digest: dict) -> list[dict]:
-    from hermes_cli.project_commands import project_facts
-
+    facts_path = Path(project_dir) / ".hermes-project" / "project-facts.json"
+    facts_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        facts_data = json.loads(facts_path.read_text(encoding="utf-8"))
+    except Exception:
+        facts_data = {"facts": []}
+    records = facts_data.setdefault("facts", [])
     updates: list[dict] = []
     rel_path = str(source.get("rel_path") or source.get("path") or "").strip() or "source"
-    fact_prefix = rel_path.replace("/", " > ")
+
+    def add(category: str, key: str, value, status: str, tags: list[str]) -> None:
+        record = {
+            "category": category, "key": key, "value": value,
+            "source": "project_source_digest",
+            "confidence": "high" if category == "init_reading" else "medium",
+            "status": status, "tags": ["project_init", "source_digest", *tags],
+        }
+        records[:] = [item for item in records if item.get("key") != key]
+        records.append(record)
+        updates.append(record)
 
     read_method = str(digest.get("read_method") or source.get("read_method") or "").strip()
     if read_method:
-        updates.append(
-            project_facts(
-                project_dir,
-                "upsert",
-                category="init_reading",
-                key=f"{rel_path}.read_method",
-                value=read_method,
-                source="project_source_digest",
-                confidence="high",
-                status="confirmed",
-                tags=["project_init", "source_digest"],
-            )
-        )
+        add("init_reading", f"{rel_path}.read_method", read_method, "confirmed", [])
     coverage = str(digest.get("read_coverage") or "").strip()
     if coverage:
-        updates.append(
-            project_facts(
-                project_dir,
-                "upsert",
-                category="init_reading",
-                key=f"{rel_path}.read_coverage",
-                value=coverage,
-                source="project_source_digest",
-                confidence="high",
-                status="confirmed",
-                tags=["project_init", "source_digest"],
-            )
-        )
-
+        add("init_reading", f"{rel_path}.read_coverage", coverage, "confirmed", [])
     for index, raw in enumerate(digest.get("key_facts") or [], start=1):
-        value = str(raw).strip()
-        if not value:
-            continue
-        updates.append(
-            project_facts(
-                project_dir,
-                "upsert",
-                category="init_source_fact",
-                key=f"{rel_path}.fact.{index}",
-                value={"source_file": rel_path, "fact": value},
-                source="project_source_digest",
-                confidence="medium",
-                status="confirmed",
-                tags=["project_init", "source_digest", "candidate_fact"],
+        if value := str(raw).strip():
+            add(
+                "init_source_fact", f"{rel_path}.fact.{index}",
+                {"source_file": rel_path, "fact": value}, "confirmed",
+                ["candidate_fact"],
             )
-        )
-
     for index, raw in enumerate(digest.get("open_questions") or [], start=1):
-        value = str(raw).strip()
-        if not value:
-            continue
-        updates.append(
-            project_facts(
-                project_dir,
-                "upsert",
-                category="init_open_question",
-                key=f"{rel_path}.question.{index}",
-                value={"source_file": rel_path, "question": value},
-                source="project_source_digest",
-                confidence="medium",
-                status="needs_confirmation",
-                tags=["project_init", "source_digest", "open_question"],
+        if value := str(raw).strip():
+            add(
+                "init_open_question", f"{rel_path}.question.{index}",
+                {"source_file": rel_path, "question": value},
+                "needs_confirmation", ["open_question"],
             )
-        )
-
     for index, raw in enumerate(digest.get("issues") or [], start=1):
-        value = str(raw).strip()
-        if not value:
-            continue
-        updates.append(
-            project_facts(
-                project_dir,
-                "upsert",
-                category="init_issue",
-                key=f"{rel_path}.issue.{index}",
-                value={"source_file": rel_path, "issue": value},
-                source="project_source_digest",
-                confidence="medium",
-                status="needs_confirmation",
-                tags=["project_init", "source_digest", "issue"],
+        if value := str(raw).strip():
+            add(
+                "init_issue", f"{rel_path}.issue.{index}",
+                {"source_file": rel_path, "issue": value},
+                "needs_confirmation", ["issue"],
             )
-        )
+    facts_data["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    facts_path.write_text(
+        json.dumps(facts_data, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
     return updates
 
 
@@ -1354,8 +1379,6 @@ def _create_project_init_kanban_graph(
 # ── Tool handlers ────────────────────────────────────────────────────────────
 
 def _register_or_update_project(name: str, path: str, client: str, goal: str) -> tuple[str, dict]:
-    from hermes_cli.project_commands import _ensure_legal_harness_files
-
     db = _project_session_db()
     project_dir = Path(path).expanduser().resolve()
     project_dir.mkdir(parents=True, exist_ok=True)
@@ -1588,8 +1611,6 @@ def project_source_digest_handler(args: dict, **kwargs) -> str:
         return json.dumps({"success": False, "error": error}, ensure_ascii=False)
     assert project is not None and source is not None
     try:
-        from hermes_cli.project_commands import _ensure_legal_harness_files
-
         _ensure_legal_harness_files(str(project.get("path") or project.get("cwd") or ""))
     except Exception:
         pass
@@ -1690,78 +1711,9 @@ def project_source_digest_handler(args: dict, **kwargs) -> str:
 
 def project_init_handler(args: dict, **kwargs) -> str:
     """Create a new project from chat."""
-    # Backwards-compatible alias: historically project_init created
-    # scaffolding only. Lex now treats chat project creation as
-    # create/register + auto init.
-    if args.get("path") and Path(str(args.get("path"))).exists():
-        return project_create_handler({**args, "auto_init": args.get("auto_init", True)}, **kwargs)
-    name = args.get("name", "").strip()
-    if not name:
-        return json.dumps({"success": False, "error": "project name is required"})
-
-    path = _resolve_project_path(name, args.get("path"))
-    client = args.get("client", "") or "（待补充）"
-    goal = args.get("goal", "") or "（待补充）"
-
-    try:
-        from hermes_cli.project_commands import _create_scaffolding, _register_in_db
-
-        project_dir = Path(path)
-        _create_scaffolding(project_dir, name, client, goal)
-        project_id = _register_in_db(name, str(project_dir), client, goal)
-
-        global _active_project_name, _active_project_path
-        _active_project_name = name
-        _active_project_path = str(project_dir)
-
-        # Auto-create kanban board for the new project
-        kanban_msg = ""
-        try:
-            from .kanban_toolset import kanban_board_create_handler
-            result = json.loads(kanban_board_create_handler(
-                {"project_path": str(project_dir), "title": name},
-            ))
-            if result.get("success"):
-                kanban_msg = " Kanban Board 已自动创建。"
-        except Exception:
-            pass
-
-        # Auto-bind current session to the newly created project
-        bind_msg = ""
-        try:
-            session_id = os.environ.get("HERMES_SESSION_ID")
-            if session_id:
-                from hermes_state import SessionDB
-                db = SessionDB()
-                try:
-                    db.set_session_project(session_id, project_id,
-                                           project_cwd=str(project_dir))
-                    bind_msg = " Current session bound to project."
-                finally:
-                    db.close()
-        except Exception:
-            pass
-
-        return json.dumps(
-            {
-                "success": True,
-                "project_id": project_id,
-                "name": name,
-                "client": client,
-                "goal": goal,
-                "path": str(project_dir),
-                "status": "INIT",
-                "message": (
-                    f"Project '{name}' created at {project_dir}. "
-                    "AGENTS.md is loaded automatically — Coordinator is ready. "
-                    "Use swarm_task_create to delegate work to Drafter and Reviewers."
-                    + kanban_msg
-                ),
-            },
-            ensure_ascii=False,
-        )
-    except Exception as exc:
-        return json.dumps({"success": False, "error": str(exc)})
+    return project_create_handler(
+        {**args, "auto_init": args.get("auto_init", True)}, **kwargs,
+    )
 
 
 def project_list_handler(args: dict, **kwargs) -> str:
@@ -2044,9 +1996,9 @@ def lex_master_route_handler(args: dict, **kwargs) -> str:
     action = str(args.get("action") or "").strip()
     db_path = _shared_project_db_path()
     try:
-        from hermes_state import SessionDB
+        from .project_store import LegalProjectStore
 
-        db = SessionDB(db_path=db_path)
+        db = LegalProjectStore(db_path=db_path)
     except Exception as exc:
         return json.dumps(
             {
