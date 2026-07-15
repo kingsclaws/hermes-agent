@@ -13,6 +13,7 @@ import inspect
 from gateway.kanban_watchers import (
     GatewayKanbanWatchersMixin,
     _LocalSessionAdapter,
+    _normalize_notification_platform,
     _notification_platforms,
 )
 
@@ -50,24 +51,47 @@ def test_watcher_loops_are_coroutines():
     assert inspect.iscoroutinefunction(GatewayKanbanWatchersMixin._kanban_dispatcher_watcher)
 
 
-def test_local_session_adapter_injects_wake_without_transport_send():
+def test_local_session_adapter_persists_transport_free_notification():
     events = []
+    notifications = []
 
     async def handle_message(event):
         events.append(event)
         return "handled"
 
     async def exercise():
-        adapter = _LocalSessionAdapter(handle_message)
-        await adapter.send("session-1", "notification")
+        adapter = _LocalSessionAdapter(
+            handle_message,
+            enqueue_notification=lambda **kwargs: notifications.append(kwargs),
+        )
+        await adapter.send(
+            "session-1", "notification", metadata={"notification_id": "evt-1"},
+        )
         return await adapter.handle_message("wake")
 
     assert asyncio.run(exercise()) == "handled"
     assert events == ["wake"]
+    assert notifications == [{
+        "session_id": "session-1",
+        "message": (
+            "[IMPORTANT: Internal Kanban notification for this session.\n"
+            "notification\n"
+            "Inspect or collect the task if needed, then report the material "
+            "result to the user without repeating this notification verbatim.]"
+        ),
+        "notification_id": "evt-1",
+        "kind": "kanban",
+    }]
 
 
 def test_local_subscriptions_are_polled_without_connected_adapters():
-    assert _notification_platforms({}) == {"local"}
+    assert _notification_platforms({}) == {"local", "session"}
+
+
+def test_legacy_session_subscription_uses_local_delivery():
+    assert _normalize_notification_platform("session") == "local"
+    assert _normalize_notification_platform("LOCAL") == "local"
+    assert _normalize_notification_platform("telegram") == "telegram"
 
 
 def test_singleton_dispatcher_lock_is_exclusive(tmp_path):

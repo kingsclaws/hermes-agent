@@ -26,15 +26,29 @@ logger = logging.getLogger("gateway.run")
 
 
 class _LocalSessionAdapter:
-    """Route local kanban wakes back through the gateway message handler."""
+    """Persist local wakes for the process that owns the target CLI session."""
 
-    def __init__(self, handle_message: Callable):
+    def __init__(self, handle_message: Callable, enqueue_notification=None):
         self._handle_message = handle_message
+        if enqueue_notification is None:
+            from tools.session_notifications import enqueue_notification
+        self._enqueue_notification = enqueue_notification
 
-    async def send(self, _chat_id: str, _message: str, metadata=None) -> None:
-        # CLI/TUI sessions have no transport on which to display the separate
-        # notification. The internal wake below is the actual delivery.
-        return None
+    async def send(self, chat_id: str, message: str, metadata=None) -> None:
+        metadata = metadata or {}
+        turn_message = (
+            "[IMPORTANT: Internal Kanban notification for this session.\n"
+            f"{message}\n"
+            "Inspect or collect the task if needed, then report the material "
+            "result to the user without repeating this notification verbatim.]"
+        )
+        await asyncio.to_thread(
+            self._enqueue_notification,
+            session_id=chat_id,
+            message=turn_message,
+            notification_id=metadata.get("notification_id"),
+            kind="kanban",
+        )
 
     async def handle_message(self, event):
         return await self._handle_message(event)
@@ -46,8 +60,14 @@ def _notification_platforms(adapters: dict) -> set[str]:
         getattr(platform, "value", str(platform)).lower()
         for platform in adapters
     }
-    platforms.add("local")
+    platforms.update({"local", "session"})
     return platforms
+
+
+def _normalize_notification_platform(platform: str) -> str:
+    """Map the pre-local-subscription spelling to its current transport."""
+    value = (platform or "").lower()
+    return "local" if value in {"local", "session"} else value
 
 
 def _resolve_auto_decompose_settings(
@@ -280,7 +300,7 @@ class GatewayKanbanWatchersMixin:
                                             sub.get("task_id"), owner_profile, notifier_profile,
                                         )
                                         continue
-                                platform = (sub.get("platform") or "").lower()
+                                platform = _normalize_notification_platform(sub.get("platform") or "")
                                 if platform not in active_platforms:
                                     logger.debug(
                                         "kanban notifier: subscription for %s on %s skipped; adapter not connected",
@@ -319,7 +339,7 @@ class GatewayKanbanWatchersMixin:
                     sub = d["sub"]
                     task = d["task"]
                     board_slug = d.get("board")
-                    platform_str = (sub["platform"] or "").lower()
+                    platform_str = _normalize_notification_platform(sub["platform"] or "")
                     try:
                         plat = _Platform(platform_str)
                     except ValueError:
@@ -429,6 +449,15 @@ class GatewayKanbanWatchersMixin:
                         metadata: dict[str, Any] = {}
                         if sub.get("thread_id"):
                             metadata["thread_id"] = sub["thread_id"]
+                        if plat == _Platform.LOCAL:
+                            _event_ref = (
+                                f"run:{ev.run_id}" if ev.run_id is not None
+                                else f"event:{ev.id}"
+                            )
+                            metadata["notification_id"] = (
+                                f"kanban:{board_slug or 'default'}:"
+                                f"{sub['task_id']}:{_event_ref}:{kind}"
+                            )
                         sub_key = (
                             sub["task_id"], sub["platform"],
                             sub["chat_id"], sub.get("thread_id") or "",
@@ -512,7 +541,7 @@ class GatewayKanbanWatchersMixin:
                         task_terminal = task and task.status in {"done", "archived"}
                         _WAKE_KINDS = ("completed", "gave_up", "crashed", "timed_out", "blocked")
                         _wake_kinds = {ev.kind for ev in d["events"] if ev.kind in _WAKE_KINDS}
-                        if _wake_kinds:
+                        if _wake_kinds and plat != _Platform.LOCAL:
                             try:
                                 _session_key = getattr(task, "session_id", None) or ""
                                 if _session_key:

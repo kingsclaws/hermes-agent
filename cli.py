@@ -4039,6 +4039,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
         self._agent_running = False
         self._pending_input = queue.Queue()
         self._interrupt_queue = queue.Queue()
+        self._last_session_notification_poll = 0.0
         # Tracks whether the turn that just finished was interrupted via
         # Ctrl+C. Consumed by _maybe_continue_goal_after_turn so /goal loops
         # don't auto-queue another continuation on top of a user-cancelled
@@ -15182,6 +15183,26 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
                         # Periodic config watcher — auto-reload MCP on mcp_servers change
                         if not self._agent_running:
                             self._check_config_mcp_changes()
+                            # Gateway-side Kanban workers run in another process.
+                            # Pull their durable notifications into this session's
+                            # normal turn queue instead of competing for the session.
+                            _now = time.monotonic()
+                            if _now - self._last_session_notification_poll >= 1.0:
+                                self._last_session_notification_poll = _now
+                                try:
+                                    from tools.session_notifications import (
+                                        deliver_notifications_to_queue,
+                                    )
+                                    deliver_notifications_to_queue(
+                                        session_id=self.session_id,
+                                        target_queue=self._pending_input,
+                                        consumer="cli-idle",
+                                    )
+                                except Exception:
+                                    logger.debug(
+                                        "Failed to drain durable session notifications",
+                                        exc_info=True,
+                                    )
                             # Check for background process notifications (completions
                             # and watch pattern matches) while agent is idle.
                             try:
