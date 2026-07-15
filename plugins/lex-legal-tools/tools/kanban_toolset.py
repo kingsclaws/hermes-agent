@@ -1669,18 +1669,18 @@ def kanban_task_collect_handler(args: dict, **kwargs) -> str:
                 return json.dumps({"success": False, "error": f"任务未找到: {task_id}"}, ensure_ascii=False)
             events = kb.list_events(conn, task_id)
             comments = kb.list_comments(conn, task_id)
-            session_id = os.environ.get("HERMES_SESSION_ID", "") or ""
-            parent_agent = kwargs.get("parent_agent")
-            if not session_id and parent_agent is not None:
-                session_id = getattr(parent_agent, "session_id", "") or ""
-            if session_id and task.status in {"done", "blocked", "archived"}:
-                kb.record_collection_receipt(
-                    conn,
-                    task_id=task_id,
-                    session_id=session_id,
-                    status=task.status,
-                    source="swarm_task_collect",
-                )
+            run_summary = kb.latest_summary(conn, task_id)
+            completed_payload = next(
+                (
+                    event.payload
+                    for event in reversed(events)
+                    if event.kind == "completed" and isinstance(event.payload, dict)
+                ),
+                {},
+            )
+            artifacts = completed_payload.get("artifacts") or []
+            if not isinstance(artifacts, list):
+                artifacts = []
         finally:
             conn.close()
 
@@ -1696,7 +1696,7 @@ def kanban_task_collect_handler(args: dict, **kwargs) -> str:
             "task_id": task_id,
             "status": task.status,
             "worker": task.assignee or "unknown",
-            "summary": task.result or (
+            "summary": run_summary or task.result or completed_payload.get("summary") or (
                 f"Task completed with status '{task.status}'." if terminal else f"Task is in progress (status: {task.status})."
             ),
             "events_summary": event_summary,
@@ -1705,7 +1705,7 @@ def kanban_task_collect_handler(args: dict, **kwargs) -> str:
                     {"author": c.author, "body": c.body, "at": c.created_at}
                     for c in comments
                 ],
-                "files_touched": [],
+                "files_touched": artifacts,
                 "handoff_notes": [],
             },
         }
