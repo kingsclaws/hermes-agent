@@ -150,3 +150,53 @@ def test_lex_api_research_and_kanban(tmp_path, monkeypatch) -> None:
     assert cockpit_body["workflow"]["kanban"]["current_lane"] == "review"
     assert cockpit_body["workflow"]["kanban"]["review_tasks"] == 2
     assert cockpit_body["workflow"]["research"]["counts"]["collecting"] == 1
+
+
+def test_lex_api_merges_legal_and_official_projects(tmp_path, monkeypatch) -> None:
+    home = tmp_path / "home"
+    monkeypatch.setenv("HERMES_HOME", str(home))
+
+    from hermes_cli import projects_db
+
+    official_root = tmp_path / "official-matter"
+    official_root.mkdir()
+    with projects_db.connect_closing() as conn:
+        official_id = projects_db.create_project(
+            conn,
+            name="Official Matter",
+            folders=[str(official_root)],
+        )
+
+    legal_root = tmp_path / "legal-matter"
+    legal_root.mkdir()
+    state_db = home / "state.db"
+    state_db.parent.mkdir(parents=True, exist_ok=True)
+    import sqlite3
+
+    conn = sqlite3.connect(state_db)
+    conn.execute(
+        """CREATE TABLE projects (
+               id TEXT PRIMARY KEY, name TEXT NOT NULL, path TEXT NOT NULL,
+               cwd TEXT DEFAULT '', status TEXT NOT NULL, goal TEXT DEFAULT '',
+               notes TEXT DEFAULT '', created_at REAL NOT NULL,
+               updated_at REAL NOT NULL
+           )"""
+    )
+    conn.execute(
+        """INSERT INTO projects
+               (id, name, path, status, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?)""",
+        ("proj_legal", "Legal Matter", str(legal_root), "ACTIVE", 1.0, 2.0),
+    )
+    conn.commit()
+    conn.close()
+
+    app = FastAPI()
+    app.include_router(router, prefix=API_PREFIX)
+    body = TestClient(app).get(f"{API_PREFIX}/projects").json()
+
+    assert body["count"] == 2
+    assert {project["id"] for project in body["projects"]} == {
+        "proj_legal",
+        official_id,
+    }

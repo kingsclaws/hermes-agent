@@ -19,6 +19,7 @@ from typing import Any, Iterator, Optional
 
 from fastapi import APIRouter, HTTPException, Query
 
+from hermes_cli import projects_db
 from hermes_constants import (
     get_hermes_home,
     reset_hermes_home_override,
@@ -86,7 +87,12 @@ def _first_non_empty(*values: Any) -> str:
 
 
 def _project_root(project: dict[str, Any]) -> Optional[Path]:
-    raw = project.get("path") or project.get("cwd")
+    raw = project.get("path") or project.get("cwd") or project.get("primary_path")
+    if not raw:
+        folders = project.get("folders") or []
+        primary = next((folder for folder in folders if folder.get("is_primary")), None)
+        selected = primary or (folders[0] if folders else None)
+        raw = selected.get("path") if selected else None
     if not raw:
         return None
     return Path(raw).expanduser().resolve()
@@ -379,14 +385,18 @@ def _project_payload(project: dict[str, Any], *, profile: Optional[str] = None) 
 
     return {
         "id": str(project.get("id") or ""),
-        "slug": str(project.get("id") or ""),
+        "slug": str(project.get("slug") or project.get("id") or ""),
         "name": str(project.get("name") or (root.name if root else "Legal project")),
-        "description": str(project.get("goal") or project.get("notes") or "") or None,
-        "archived": str(project.get("status") or "").upper() == "ARCHIVED",
+        "description": str(
+            project.get("description") or project.get("goal") or project.get("notes") or ""
+        ) or None,
+        "archived": bool(project.get("archived"))
+        or str(project.get("status") or "").upper() == "ARCHIVED",
         "created_at": project.get("created_at"),
         "primary_path": str(root) if root else None,
-        "board_slug": _legal_board_slug(root) if root else None,
-        "folders": ([{"path": str(root), "is_primary": True}] if root else []),
+        "board_slug": project.get("board_slug") or (_legal_board_slug(root) if root else None),
+        "folders": project.get("folders")
+        or ([{"path": str(root), "is_primary": True}] if root else []),
         "meta": meta,
         "state": state,
         "context_excerpt": context_excerpt,
@@ -488,9 +498,38 @@ def _list_legal_projects(*, profile: Optional[str]) -> list[dict[str, Any]]:
                 pass
 
 
+def _list_official_projects(*, profile: Optional[str]) -> list[dict[str, Any]]:
+    """Load Hermes projects as compatibility records for the Lex dashboard."""
+    with _profile_scope(profile):
+        with projects_db.connect_closing() as conn:
+            projects = projects_db.list_projects(conn, include_archived=True)
+    return [project.to_dict() for project in projects]
+
+
+def _list_projects(*, profile: Optional[str]) -> list[dict[str, Any]]:
+    """Merge legal and Hermes projects, preferring legal records on conflicts."""
+    projects = _list_legal_projects(profile=profile)
+    seen_ids = {str(project.get("id") or "") for project in projects}
+    seen_paths = {
+        str(root)
+        for project in projects
+        if (root := _project_root(project)) is not None
+    }
+    for project in _list_official_projects(profile=profile):
+        project_id = str(project.get("id") or "")
+        root = _project_root(project)
+        if project_id in seen_ids or (root is not None and str(root) in seen_paths):
+            continue
+        projects.append(project)
+        seen_ids.add(project_id)
+        if root is not None:
+            seen_paths.add(str(root))
+    return projects
+
+
 def _load_project(project_id: str, *, profile: Optional[str]) -> dict[str, Any]:
     project = next(
-        (row for row in _list_legal_projects(profile=profile) if row.get("id") == project_id),
+        (row for row in _list_projects(profile=profile) if row.get("id") == project_id),
         None,
     )
     if project is None:
@@ -500,7 +539,7 @@ def _load_project(project_id: str, *, profile: Optional[str]) -> dict[str, Any]:
 
 @router.get("/projects")
 def get_lex_projects(profile: Optional[str] = Query(default=None)) -> dict[str, Any]:
-    projects = _list_legal_projects(profile=profile)
+    projects = _list_projects(profile=profile)
     rows = [_project_payload(project, profile=profile) for project in projects]
     return {"projects": rows, "count": len(rows)}
 
