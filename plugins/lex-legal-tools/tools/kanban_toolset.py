@@ -2266,7 +2266,15 @@ def kanban_task_read_handler(args: dict, **kwargs) -> str:
         kb, conn, row, board = official
         try:
             events = []
-            for event in kb.list_events_for_tasks(conn, [task_id]):
+            # ``list_events_for_tasks`` only exists in some Hermes revisions.
+            # The stable public API is the single-task ``list_events`` helper.
+            list_task_events = getattr(kb, "list_events_for_tasks", None)
+            event_rows = (
+                list_task_events(conn, [task_id])
+                if callable(list_task_events)
+                else kb.list_events(conn, task_id)
+            )
+            for event in event_rows:
                 events.append({
                     "id": event.id,
                     "task_id": event.task_id,

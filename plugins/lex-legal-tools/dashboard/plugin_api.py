@@ -116,12 +116,26 @@ def _local_kanban_summary(root: Optional[Path], *, profile: Optional[str] = None
         return {"exists": False, "counts": {}, "board_path": None}
     from hermes_cli import kanban_db as kb
 
+    expected_root = str(root.resolve())
+    board_slug = _legal_board_slug(root)
+    canonical_path: Path | None = None
     with _profile_scope(profile):
-        canonical_path = kb.kanban_db_path(board=_legal_board_slug(root))
+        # Prefer persisted board metadata over reconstructing a slug. This also
+        # survives slug-algorithm changes and proves the board belongs to this
+        # project via its default_workdir.
+        for board in kb.list_boards(include_archived=True):
+            workdir = str(board.get("default_workdir") or "").strip()
+            if workdir and os.path.realpath(workdir) == os.path.realpath(expected_root):
+                board_slug = str(board.get("slug") or board_slug)
+                db_value = str(board.get("db_path") or "").strip()
+                canonical_path = Path(db_value) if db_value else None
+                break
+        if canonical_path is None:
+            canonical_path = kb.kanban_db_path(board=board_slug)
     legacy_path = root / "kanban" / "kanban.db"
     db_path = canonical_path if canonical_path.is_file() else legacy_path
     if not db_path.is_file():
-        return {"exists": False, "counts": {}, "tasks": [], "board_path": str(db_path)}
+        return {"exists": False, "counts": {}, "tasks": [], "board_path": str(db_path), "board_slug": board_slug}
     try:
         conn = sqlite3.connect(str(db_path))
         conn.row_factory = sqlite3.Row
@@ -163,8 +177,15 @@ def _local_kanban_summary(root: Optional[Path], *, profile: Optional[str] = None
                 + " LIMIT 200"
             )
             tasks = [dict(row) for row in conn.execute(sql).fetchall()]
-    except Exception:
-        return {"exists": True, "counts": {}, "tasks": [], "board_path": str(db_path)}
+    except Exception as exc:
+        return {
+            "exists": True,
+            "counts": {},
+            "tasks": [],
+            "board_path": str(db_path),
+            "board_slug": board_slug,
+            "error": str(exc) or exc.__class__.__name__,
+        }
     finally:
         try:
             conn.close()
@@ -176,6 +197,7 @@ def _local_kanban_summary(root: Optional[Path], *, profile: Optional[str] = None
         "counts": counts,
         "tasks": tasks,
         "board_path": str(db_path),
+        "board_slug": board_slug,
     }
 
 
