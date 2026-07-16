@@ -215,13 +215,14 @@ def _resolve_coordinator_session_for_project(project_path: str) -> str | None:
     not to whoever created the task (which might be lex-master).
     """
     try:
-        from hermes_state import SessionDB
         from .project_management_tool import (
             _ensure_coordinator_column,
+            _project_session_db,
             _resolve_project,
-            _shared_project_db_path,
         )
-        db = SessionDB(db_path=_shared_project_db_path())
+        # Project CRUD belongs to LegalProjectStore. A raw SessionDB exposes
+        # sessions only and does not implement get_project/list_projects.
+        db = _project_session_db()
         _ensure_coordinator_column(db)
         # Find project by path
         projects = db.list_projects()
