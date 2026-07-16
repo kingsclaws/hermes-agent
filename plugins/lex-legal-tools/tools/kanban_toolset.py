@@ -139,6 +139,72 @@ or equivalent evidence coverage table. Any conclusion that materials are
 - provided_but_incomplete / 已提供但不完整
 """
 
+
+def _lex_project_context_pack(project_path: str, objective: str) -> dict[str, Any] | None:
+    try:
+        from .project_store import LegalProjectStore
+        store = LegalProjectStore()
+        try:
+            project = store.get_project_by_path(project_path)
+            return store.build_context_pack(project["id"], objective=objective) if project else None
+        finally:
+            store.close()
+    except Exception:
+        return None
+
+
+def _structured_handoff(args: dict[str, Any], note: str) -> dict[str, Any]:
+    def values(name: str) -> list[str]:
+        raw = args.get(name, [])
+        if isinstance(raw, str):
+            try:
+                raw = json.loads(raw)
+            except Exception:
+                raw = [item.strip() for item in raw.split("\n") if item.strip()]
+        return [str(item).strip() for item in (raw or []) if str(item).strip()]
+    return {"version": 1, "note": note, **{name: values(name) for name in (
+        "decisions", "constraints", "evidence_refs", "files_modified",
+        "unresolved_items", "required_next_actions",
+    )}}
+
+
+def _persist_structured_handoff(project_path: str, task_id: str, payload: dict[str, Any], *, actor: str = "", target: str = "") -> None:
+    try:
+        from .project_store import LegalProjectStore
+        store = LegalProjectStore()
+        try:
+            project = store.get_project_by_path(project_path)
+            if project:
+                store.record_task_handoff(
+                    project["id"], task_id, payload, actor=actor, target=target,
+                    source_session_id=os.environ.get("HERMES_SESSION_ID", ""),
+                )
+                session_id = os.environ.get("HERMES_SESSION_ID", "")
+                for item in payload.get("decisions", []):
+                    store.record_decision(
+                        project["id"], item[:120], item, created_by=actor,
+                        source_session_id=session_id,
+                    )
+                for item in payload.get("constraints", []):
+                    store.record_constraint(
+                        project["id"], item[:120], item, created_by=actor,
+                        source_session_id=session_id,
+                    )
+                if payload.get("note"):
+                    store.create_snapshot(
+                        project["id"], payload["note"], label=f"handoff:{task_id}",
+                        state={
+                            "task_id": task_id,
+                            "unresolved_items": payload.get("unresolved_items", []),
+                            "required_next_actions": payload.get("required_next_actions", []),
+                        },
+                        created_by=actor, source_session_id=session_id,
+                    )
+        finally:
+            store.close()
+    except Exception:
+        pass
+
 # ── DB helpers ─────────────────────────────────────────────────────────────────
 
 def _resolve_coordinator_session_for_project(project_path: str) -> str | None:
@@ -1022,6 +1088,16 @@ def kanban_task_create_handler(args: dict, **kwargs) -> str:
         priority = int(args.get("priority", 0) or 0)
         description = args.get("description", "").strip()
         description_with_protocol = (description + LEGAL_FILE_READING_PROTOCOL).strip()
+        context_pack = _lex_project_context_pack(project_path, title)
+        context_text = ""
+        if context_pack:
+            context_text = (
+                "\n\n## Durable project context\n<LEX_CONTEXT_PACK_JSON>\n"
+                + json.dumps(context_pack, ensure_ascii=False, indent=2)
+                + "\n</LEX_CONTEXT_PACK_JSON>\n"
+                "Treat this pack as cross-session ground truth. Optional LCM/session recall may add detail, "
+                "but must not override durable project constraints."
+            )
         gates_text = ""
         if gates:
             gates_text = (
@@ -1033,6 +1109,7 @@ def kanban_task_create_handler(args: dict, **kwargs) -> str:
             )
         body = (
             description_with_protocol
+            + context_text
             + gates_text
             + f"\n\n## Project path\n{Path(project_path).resolve()}\n"
         ).strip()
@@ -1963,6 +2040,12 @@ KANBAN_TASK_HANDOFF_SCHEMA = {
                 "type": "string",
                 "description": "认领时获得的 claim_token。用于验证操作权限。",
             },
+            "decisions": {"type": "array", "items": {"type": "string"}, "description": "本阶段形成的关键决策。"},
+            "constraints": {"type": "array", "items": {"type": "string"}, "description": "后续阶段必须遵守的约束。"},
+            "evidence_refs": {"type": "array", "items": {"type": "string"}, "description": "证据、材料或引用路径。"},
+            "files_modified": {"type": "array", "items": {"type": "string"}, "description": "本阶段修改的文件。"},
+            "unresolved_items": {"type": "array", "items": {"type": "string"}, "description": "尚未解决的问题。"},
+            "required_next_actions": {"type": "array", "items": {"type": "string"}, "description": "下一处理人必须执行的动作。"},
             "board": {
                 "type": "string",
                 "description": "可选：Hermes Kanban board slug。不填则使用 HERMES_KANBAN_BOARD/HERMES_KANBAN_DB 或当前项目推导。",
@@ -2240,6 +2323,9 @@ def kanban_task_handoff_handler(args: dict, **kwargs) -> str:
     task_id = args.get("task_id", "").strip()
     note = args.get("note", "").strip()
     claim_token = args.get("claim_token", "").strip()
+    handoff_payload = _structured_handoff(args, note)
+    actor = getattr(kwargs.get("parent_agent"), "name", "worker")
+    project_path = _resolve_project_path(args, kwargs.get("parent_agent"))
 
     if not task_id or not claim_token:
         return json.dumps({"success": False, "error": "task_id 和 claim_token 为必填项。"})
@@ -2258,12 +2344,18 @@ def kanban_task_handoff_handler(args: dict, **kwargs) -> str:
         complete_args = {
             "task_id": task_id,
             "summary": note or "handoff completed",
-            "metadata": {"swarm_action": "handoff", "approved_by": getattr(parent_agent, "name", None)},
+            "metadata": {
+                "swarm_action": "handoff",
+                "approved_by": getattr(parent_agent, "name", None),
+                "lex_handoff": handoff_payload,
+            },
         }
         if board:
             complete_args["board"] = board
         out = json.loads(_handle_complete(complete_args))
         if out.get("ok"):
+            if project_path:
+                _persist_structured_handoff(project_path, task_id, handoff_payload, actor=actor)
             return _official_result(
                 True,
                 task_id=task_id,
@@ -2302,7 +2394,6 @@ def kanban_task_handoff_handler(args: dict, **kwargs) -> str:
     # ── DELIVERY_SPEC gate check (hard gate) ──
     # Validate exit criteria for the current delivery phase before allowing handoff.
     # This makes delivery validation non-bypassable — like Claude Code's plan/todo system.
-    project_path = _resolve_project_path(args, kwargs.get("parent_agent"))
     if project_path:
         try:
             from ..delivery_spec import load_delivery_spec, validate_gate_exit
@@ -2348,12 +2439,11 @@ def kanban_task_handoff_handler(args: dict, **kwargs) -> str:
     now = _now()
     gates = json.loads(row["gates_json"])
     history = json.loads(row["handoff_history_json"])
-    actor = getattr(parent_agent, "name", "worker")
-
     history.append({
         "action": "handoff",
         "from": row["assignee"],
         "note": note,
+        "structured": handoff_payload,
         "timestamp": now,
     })
 
@@ -2368,7 +2458,7 @@ def kanban_task_handoff_handler(args: dict, **kwargs) -> str:
             (next_assignee, json.dumps(history, ensure_ascii=False), now, task_id),
         )
         _log_event(conn, task_id, "handoff", actor=actor,
-                   payload={"note": note, "to": next_assignee, "gate_index": row["gate_index"]})
+                   payload={"note": note, "structured": handoff_payload, "to": next_assignee, "gate_index": row["gate_index"]})
         msg = f"已移交给 {next_assignee} 审核（门禁 {row['gate_index'] + 1}/{len(gates)}）。"
     else:
         # No gates — mark done directly
@@ -2378,11 +2468,13 @@ def kanban_task_handoff_handler(args: dict, **kwargs) -> str:
                updated_at = ? WHERE id = ?""",
             (json.dumps(history, ensure_ascii=False), now, now, task_id),
         )
-        _log_event(conn, task_id, "completed", actor=actor, payload={"note": note})
+        _log_event(conn, task_id, "completed", actor=actor, payload={"note": note, "structured": handoff_payload})
         msg = "任务已完成（无门禁链）。"
 
     updated = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
     conn.close()
+    if project_path:
+        _persist_structured_handoff(project_path, task_id, handoff_payload, actor=actor)
 
     return json.dumps({
         "success": True,

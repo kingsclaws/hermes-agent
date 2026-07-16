@@ -115,6 +115,29 @@ def test_legal_project_store_owns_init_and_source_lifecycle(monkeypatch, tmp_pat
     store.close()
 
 
+def test_legal_project_store_builds_cross_session_context_pack(monkeypatch, tmp_path):
+    state_db = tmp_path / "state.db"
+    monkeypatch.setenv("HERMES_PROJECTS_DB_PATH", str(state_db))
+    module = _load_project_management_module(monkeypatch)
+    store = module._project_session_db()
+    project_id = store.create_project("Matter", str(tmp_path / "matter"))
+
+    store.record_decision(project_id, "Governing law", "Use PRC law", source_session_id="s1")
+    store.record_constraint(project_id, "Deadline", "File by Friday", source_session_id="s1")
+    store.create_snapshot(
+        project_id, "Draft complete; reviewer must verify schedules",
+        label="handoff:task-1", state={"task_id": "task-1"}, source_session_id="s1",
+    )
+
+    pack = store.build_context_pack(project_id, objective="Review draft")
+    assert pack["objective"] == "Review draft"
+    assert pack["active_decisions"][0]["decision"] == "Use PRC law"
+    assert pack["active_constraints"][0]["constraint_text"] == "File by Friday"
+    assert pack["latest_snapshot"]["state"]["task_id"] == "task-1"
+    assert store.context_health(project_id)["cross_session_ready"] is True
+    store.close()
+
+
 def test_legal_project_create_uses_plugin_owned_scaffold(monkeypatch, tmp_path):
     state_db = tmp_path / "state.db"
     project_dir = tmp_path / "new-matter"

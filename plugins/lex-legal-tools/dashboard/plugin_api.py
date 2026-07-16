@@ -9,15 +9,18 @@ artifacts directly.
 from __future__ import annotations
 
 from contextlib import contextmanager
+import hashlib
 import json
+import os
+import re
 import sqlite3
 from pathlib import Path
 from typing import Any, Iterator, Optional
 
 from fastapi import APIRouter, HTTPException, Query
 
-from hermes_cli import projects_db
 from hermes_constants import (
+    get_hermes_home,
     reset_hermes_home_override,
     set_hermes_home_override,
 )
@@ -82,11 +85,8 @@ def _first_non_empty(*values: Any) -> str:
     return ""
 
 
-def _project_root(project: projects_db.Project) -> Optional[Path]:
-    raw = project.primary_path or next(
-        (folder.path for folder in project.folders if folder.is_primary),
-        None,
-    )
+def _project_root(project: dict[str, Any]) -> Optional[Path]:
+    raw = project.get("path") or project.get("cwd")
     if not raw:
         return None
     return Path(raw).expanduser().resolve()
@@ -98,10 +98,22 @@ def _project_sidecar(root: Optional[Path]) -> Optional[Path]:
     return root / ".hermes-project"
 
 
-def _local_kanban_summary(root: Optional[Path]) -> dict[str, Any]:
+def _legal_board_slug(root: Path) -> str:
+    name = root.name.lower()
+    slug = re.sub(r"[^a-z0-9]+", "-", name).strip("-")
+    digest = hashlib.sha1(str(root.resolve()).encode("utf-8")).hexdigest()[:8]
+    return f"legal-{slug[:48].strip('-')}-{digest}" if slug else f"legal-project-{digest}"
+
+
+def _local_kanban_summary(root: Optional[Path], *, profile: Optional[str] = None) -> dict[str, Any]:
     if root is None:
         return {"exists": False, "counts": {}, "board_path": None}
-    db_path = root / "kanban" / "kanban.db"
+    from hermes_cli import kanban_db as kb
+
+    with _profile_scope(profile):
+        canonical_path = kb.kanban_db_path(board=_legal_board_slug(root))
+    legacy_path = root / "kanban" / "kanban.db"
+    db_path = canonical_path if canonical_path.is_file() else legacy_path
     if not db_path.is_file():
         return {"exists": False, "counts": {}, "tasks": [], "board_path": str(db_path)}
     try:
@@ -126,7 +138,13 @@ def _local_kanban_summary(root: Optional[Path]) -> dict[str, Any]:
                 "created_at",
                 "completed_at",
                 "session_id",
-                "column_id",
+                "body",
+                "block_kind",
+                "last_failure_error",
+                "result",
+                "started_at",
+                "current_step_key",
+                "workflow_template_id",
             )
             if name in columns
         ]
@@ -327,16 +345,19 @@ def _project_stage_summary(
     }
 
 
-def _project_payload(project: projects_db.Project) -> dict[str, Any]:
+def _project_payload(project: dict[str, Any], *, profile: Optional[str] = None) -> dict[str, Any]:
     root = _project_root(project)
     sidecar = _project_sidecar(root)
     meta = _read_json(sidecar / "project-meta.json") if sidecar else {}
     state = _read_json(sidecar / "project-state.json") if sidecar else {}
+    state.setdefault("status", project.get("status"))
+    if project.get("init_status"):
+        state.setdefault("phase", project.get("init_status"))
     context_excerpt = _read_excerpt(sidecar / "project-context.md") if sidecar else ""
     facts_excerpt = _read_excerpt(sidecar / "memories" / "project_facts.md") if sidecar else ""
     digest_entries = _source_digest_entries(sidecar)
     research_runs = _research_runs(sidecar)
-    kanban = _local_kanban_summary(root)
+    kanban = _local_kanban_summary(root, profile=profile)
     workflow = _project_stage_summary(
         meta=meta,
         state=state,
@@ -344,17 +365,28 @@ def _project_payload(project: projects_db.Project) -> dict[str, Any]:
         research_runs=research_runs,
         digest_entries=digest_entries,
     )
+    durable_context = _project_context(str(project.get("id") or ""), profile=profile)
+    latest_snapshot = durable_context["latest_snapshot"]
+    context_health = {
+        "active_decisions": len(durable_context["decisions"]),
+        "active_constraints": len(durable_context["constraints"]),
+        "latest_snapshot": latest_snapshot,
+        "cross_session_ready": bool(
+            latest_snapshot or durable_context["decisions"] or durable_context["constraints"]
+        ),
+        "session_context_provider": "lcm-compatible",
+    }
 
     return {
-        "id": project.id,
-        "slug": project.slug,
-        "name": project.name,
-        "description": project.description,
-        "archived": bool(project.archived),
-        "created_at": project.created_at,
+        "id": str(project.get("id") or ""),
+        "slug": str(project.get("id") or ""),
+        "name": str(project.get("name") or (root.name if root else "Legal project")),
+        "description": str(project.get("goal") or project.get("notes") or "") or None,
+        "archived": str(project.get("status") or "").upper() == "ARCHIVED",
+        "created_at": project.get("created_at"),
         "primary_path": str(root) if root else None,
-        "board_slug": project.board_slug,
-        "folders": [folder.to_dict() for folder in project.folders],
+        "board_slug": _legal_board_slug(root) if root else None,
+        "folders": ([{"path": str(root), "is_primary": True}] if root else []),
         "meta": meta,
         "state": state,
         "context_excerpt": context_excerpt,
@@ -369,13 +401,98 @@ def _project_payload(project: projects_db.Project) -> dict[str, Any]:
         },
         "kanban": kanban,
         "workflow": workflow,
+        "context_health": context_health,
+        "durable_context": durable_context,
     }
 
 
-def _load_project(project_id: str, *, profile: Optional[str]) -> projects_db.Project:
+def _legal_projects_db_path() -> Path:
+    override = os.environ.get("HERMES_PROJECTS_DB_PATH", "").strip()
+    return Path(override).expanduser() if override else get_hermes_home() / "state.db"
+
+
+def _project_context(project_id: str, *, profile: Optional[str]) -> dict[str, Any]:
+    """Read the durable cross-session context without importing tool modules."""
     with _profile_scope(profile):
-        with projects_db.connect_closing() as conn:
-            project = projects_db.get_project(conn, project_id)
+        path = _legal_projects_db_path()
+        if not path.is_file():
+            return {"decisions": [], "constraints": [], "latest_snapshot": None}
+        conn: sqlite3.Connection | None = None
+        try:
+            conn = sqlite3.connect(str(path))
+            conn.row_factory = sqlite3.Row
+            tables = {str(row[0]) for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()}
+            decisions = [dict(row) for row in conn.execute(
+                "SELECT * FROM project_decisions WHERE project_id = ? AND status = 'active' ORDER BY updated_at DESC LIMIT 50",
+                (project_id,),
+            ).fetchall()] if "project_decisions" in tables else []
+            constraints = [dict(row) for row in conn.execute(
+                "SELECT * FROM project_constraints WHERE project_id = ? AND status = 'active' ORDER BY updated_at DESC LIMIT 50",
+                (project_id,),
+            ).fetchall()] if "project_constraints" in tables else []
+            snapshot_row = conn.execute(
+                "SELECT * FROM project_snapshots WHERE project_id = ? ORDER BY created_at DESC LIMIT 1",
+                (project_id,),
+            ).fetchone() if "project_snapshots" in tables else None
+            snapshot = dict(snapshot_row) if snapshot_row else None
+            if snapshot:
+                try:
+                    snapshot["state"] = json.loads(snapshot.pop("state_json") or "{}")
+                except Exception:
+                    snapshot["state"] = {}
+            return {"decisions": decisions, "constraints": constraints, "latest_snapshot": snapshot}
+        except Exception:
+            return {"decisions": [], "constraints": [], "latest_snapshot": None}
+        finally:
+            if conn is not None:
+                conn.close()
+
+
+def _list_legal_projects(*, profile: Optional[str]) -> list[dict[str, Any]]:
+    with _profile_scope(profile):
+        path = _legal_projects_db_path()
+        if not path.is_file():
+            return []
+        conn: sqlite3.Connection | None = None
+        try:
+            conn = sqlite3.connect(str(path))
+            conn.row_factory = sqlite3.Row
+            exists = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='projects'"
+            ).fetchone()
+            if not exists:
+                return []
+            has_init_runs = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='project_init_runs'"
+            ).fetchone()
+            query = (
+                """SELECT p.*,
+                          (SELECT r.status FROM project_init_runs r
+                            WHERE r.project_id = p.id
+                            ORDER BY r.updated_at DESC LIMIT 1) AS init_status
+                     FROM projects p ORDER BY p.updated_at DESC"""
+                if has_init_runs
+                else "SELECT p.*, NULL AS init_status FROM projects p ORDER BY p.updated_at DESC"
+            )
+            return [
+                dict(row)
+                for row in conn.execute(query).fetchall()
+            ]
+        finally:
+            try:
+                if conn is not None:
+                    conn.close()
+            except Exception:
+                pass
+
+
+def _load_project(project_id: str, *, profile: Optional[str]) -> dict[str, Any]:
+    project = next(
+        (row for row in _list_legal_projects(profile=profile) if row.get("id") == project_id),
+        None,
+    )
     if project is None:
         raise HTTPException(status_code=404, detail=f"Unknown project: {project_id}")
     return project
@@ -383,10 +500,8 @@ def _load_project(project_id: str, *, profile: Optional[str]) -> projects_db.Pro
 
 @router.get("/projects")
 def get_lex_projects(profile: Optional[str] = Query(default=None)) -> dict[str, Any]:
-    with _profile_scope(profile):
-        with projects_db.connect_closing() as conn:
-            projects = projects_db.list_projects(conn, include_archived=True)
-    rows = [_project_payload(project) for project in projects]
+    projects = _list_legal_projects(profile=profile)
+    rows = [_project_payload(project, profile=profile) for project in projects]
     return {"projects": rows, "count": len(rows)}
 
 
@@ -396,7 +511,7 @@ def get_lex_project(
     profile: Optional[str] = Query(default=None),
 ) -> dict[str, Any]:
     project = _load_project(project_id, profile=profile)
-    return {"project": _project_payload(project)}
+    return {"project": _project_payload(project, profile=profile)}
 
 
 @router.get("/projects/{project_id}/evidence")
@@ -405,7 +520,7 @@ def get_lex_project_evidence(
     profile: Optional[str] = Query(default=None),
 ) -> dict[str, Any]:
     project = _load_project(project_id, profile=profile)
-    payload = _project_payload(project)
+    payload = _project_payload(project, profile=profile)
     return {
         "project_id": payload["id"],
         "project_name": payload["name"],
@@ -421,7 +536,7 @@ def get_lex_project_research_runs(
     profile: Optional[str] = Query(default=None),
 ) -> dict[str, Any]:
     project = _load_project(project_id, profile=profile)
-    payload = _project_payload(project)
+    payload = _project_payload(project, profile=profile)
     return {
         "project_id": payload["id"],
         "project_name": payload["name"],
@@ -437,7 +552,7 @@ def get_lex_project_research_run_detail(
     profile: Optional[str] = Query(default=None),
 ) -> dict[str, Any]:
     project = _load_project(project_id, profile=profile)
-    payload = _project_payload(project)
+    payload = _project_payload(project, profile=profile)
     root = _project_root(project)
     detail = _research_run_detail(_project_sidecar(root), run_id)
     if detail is None:
@@ -456,7 +571,7 @@ def get_lex_project_kanban(
     profile: Optional[str] = Query(default=None),
 ) -> dict[str, Any]:
     project = _load_project(project_id, profile=profile)
-    payload = _project_payload(project)
+    payload = _project_payload(project, profile=profile)
     return {
         "project_id": payload["id"],
         "project_name": payload["name"],
@@ -472,7 +587,7 @@ def get_lex_project_cockpit(
     profile: Optional[str] = Query(default=None),
 ) -> dict[str, Any]:
     project = _load_project(project_id, profile=profile)
-    payload = _project_payload(project)
+    payload = _project_payload(project, profile=profile)
     return {
         "project": {
             "id": payload["id"],
@@ -490,4 +605,20 @@ def get_lex_project_cockpit(
         "kanban": payload["kanban"],
         "context_excerpt": payload["context_excerpt"],
         "facts_excerpt": payload["facts_excerpt"],
+        "context_health": payload["context_health"],
+        "durable_context": payload["durable_context"],
+    }
+
+
+@router.get("/projects/{project_id}/context")
+def get_lex_project_context(
+    project_id: str,
+    profile: Optional[str] = Query(default=None),
+) -> dict[str, Any]:
+    project = _load_project(project_id, profile=profile)
+    payload = _project_payload(project, profile=profile)
+    return {
+        "project_id": payload["id"],
+        "context_health": payload["context_health"],
+        **payload["durable_context"],
     }

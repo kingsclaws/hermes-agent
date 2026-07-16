@@ -87,6 +87,67 @@ CREATE TABLE IF NOT EXISTS project_source_digests (
     FOREIGN KEY (source_id) REFERENCES project_sources(id),
     FOREIGN KEY (run_id) REFERENCES project_init_runs(id)
 );
+
+CREATE TABLE IF NOT EXISTS project_decisions (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    title TEXT NOT NULL,
+    decision TEXT NOT NULL,
+    rationale TEXT DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'active',
+    source_session_id TEXT DEFAULT '',
+    created_by TEXT DEFAULT '',
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL,
+    FOREIGN KEY (project_id) REFERENCES projects(id)
+);
+CREATE INDEX IF NOT EXISTS idx_project_decisions_project
+    ON project_decisions(project_id, status, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS project_constraints (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    title TEXT NOT NULL,
+    constraint_text TEXT NOT NULL,
+    severity TEXT NOT NULL DEFAULT 'required',
+    status TEXT NOT NULL DEFAULT 'active',
+    source_session_id TEXT DEFAULT '',
+    created_by TEXT DEFAULT '',
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL,
+    FOREIGN KEY (project_id) REFERENCES projects(id)
+);
+CREATE INDEX IF NOT EXISTS idx_project_constraints_project
+    ON project_constraints(project_id, status, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS project_snapshots (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    label TEXT DEFAULT '',
+    summary TEXT NOT NULL,
+    state_json TEXT NOT NULL DEFAULT '{}',
+    source_session_id TEXT DEFAULT '',
+    created_by TEXT DEFAULT '',
+    created_at REAL NOT NULL,
+    FOREIGN KEY (project_id) REFERENCES projects(id)
+);
+CREATE INDEX IF NOT EXISTS idx_project_snapshots_project
+    ON project_snapshots(project_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS task_handoffs (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    task_id TEXT NOT NULL,
+    actor TEXT DEFAULT '',
+    target TEXT DEFAULT '',
+    note TEXT DEFAULT '',
+    payload_json TEXT NOT NULL DEFAULT '{}',
+    source_session_id TEXT DEFAULT '',
+    created_at REAL NOT NULL,
+    FOREIGN KEY (project_id) REFERENCES projects(id)
+);
+CREATE INDEX IF NOT EXISTS idx_task_handoffs_project
+    ON task_handoffs(project_id, task_id, created_at DESC);
 """
 
 
@@ -349,3 +410,117 @@ class LegalProjectStore:
 
         self._execute_write(write)
         return digest_id
+
+    def record_decision(self, project_id: str, title: str, decision: str, **meta: Any) -> str:
+        decision_id = f"dec_{uuid.uuid4().hex[:12]}"
+        now = time.time()
+        self._execute_write(lambda conn: conn.execute(
+            """INSERT INTO project_decisions
+               (id, project_id, title, decision, rationale, status,
+                source_session_id, created_by, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (decision_id, project_id, title, decision, meta.get("rationale", ""),
+             meta.get("status", "active"), meta.get("source_session_id", ""),
+             meta.get("created_by", ""), now, now),
+        ))
+        return decision_id
+
+    def list_decisions(self, project_id: str, status: Optional[str] = None) -> list[dict]:
+        query = "SELECT * FROM project_decisions WHERE project_id = ?"
+        params: list[Any] = [project_id]
+        if status:
+            query += " AND status = ?"
+            params.append(status)
+        query += " ORDER BY updated_at DESC"
+        with self._lock:
+            rows = self._conn.execute(query, params).fetchall()
+        return [dict(row) for row in rows]
+
+    def record_constraint(self, project_id: str, title: str, constraint_text: str, **meta: Any) -> str:
+        constraint_id = f"con_{uuid.uuid4().hex[:12]}"
+        now = time.time()
+        self._execute_write(lambda conn: conn.execute(
+            """INSERT INTO project_constraints
+               (id, project_id, title, constraint_text, severity, status,
+                source_session_id, created_by, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (constraint_id, project_id, title, constraint_text,
+             meta.get("severity", "required"), meta.get("status", "active"),
+             meta.get("source_session_id", ""), meta.get("created_by", ""), now, now),
+        ))
+        return constraint_id
+
+    def list_constraints(self, project_id: str, status: Optional[str] = None) -> list[dict]:
+        query = "SELECT * FROM project_constraints WHERE project_id = ?"
+        params: list[Any] = [project_id]
+        if status:
+            query += " AND status = ?"
+            params.append(status)
+        query += " ORDER BY updated_at DESC"
+        with self._lock:
+            rows = self._conn.execute(query, params).fetchall()
+        return [dict(row) for row in rows]
+
+    def create_snapshot(self, project_id: str, summary: str, **meta: Any) -> str:
+        snapshot_id = f"snap_{uuid.uuid4().hex[:12]}"
+        now = time.time()
+        self._execute_write(lambda conn: conn.execute(
+            """INSERT INTO project_snapshots
+               (id, project_id, label, summary, state_json, source_session_id,
+                created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (snapshot_id, project_id, meta.get("label", ""), summary,
+             json.dumps(meta.get("state") or {}, ensure_ascii=False, sort_keys=True),
+             meta.get("source_session_id", ""), meta.get("created_by", ""), now),
+        ))
+        return snapshot_id
+
+    def latest_snapshot(self, project_id: str) -> Optional[dict]:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM project_snapshots WHERE project_id = ? ORDER BY created_at DESC LIMIT 1",
+                (project_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        result = dict(row)
+        try:
+            result["state"] = json.loads(result.pop("state_json") or "{}")
+        except Exception:
+            result["state"] = {}
+        return result
+
+    def record_task_handoff(self, project_id: str, task_id: str, payload: dict, **meta: Any) -> str:
+        handoff_id = f"handoff_{uuid.uuid4().hex[:12]}"
+        self._execute_write(lambda conn: conn.execute(
+            """INSERT INTO task_handoffs
+               (id, project_id, task_id, actor, target, note, payload_json,
+                source_session_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (handoff_id, project_id, task_id, meta.get("actor", ""), meta.get("target", ""),
+             str(payload.get("note") or ""), json.dumps(payload, ensure_ascii=False, sort_keys=True),
+             meta.get("source_session_id", ""), time.time()),
+        ))
+        return handoff_id
+
+    def build_context_pack(self, project_id: str, *, objective: str = "", limit: int = 12) -> dict:
+        project = self.get_project(project_id) or {}
+        return {
+            "version": 1,
+            "project": {key: project.get(key) for key in ("id", "name", "client", "goal", "path", "status")},
+            "objective": objective,
+            "latest_snapshot": self.latest_snapshot(project_id),
+            "active_decisions": self.list_decisions(project_id, "active")[:limit],
+            "active_constraints": self.list_constraints(project_id, "active")[:limit],
+        }
+
+    def context_health(self, project_id: str) -> dict:
+        decisions = self.list_decisions(project_id, "active")
+        constraints = self.list_constraints(project_id, "active")
+        snapshot = self.latest_snapshot(project_id)
+        return {
+            "active_decisions": len(decisions),
+            "active_constraints": len(constraints),
+            "latest_snapshot": snapshot,
+            "snapshot_age_seconds": max(0, time.time() - snapshot["created_at"]) if snapshot else None,
+            "cross_session_ready": bool(snapshot or decisions or constraints),
+            "session_context_provider": "lcm-compatible",
+        }
